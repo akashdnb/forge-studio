@@ -8,7 +8,6 @@ on:
       - 'src/pipeline/http-workflow-handlers.js'
       - 'test/media-qa.test.js'
       - 'package.json'
-      - 'package-lock.json'
       - 'Dockerfile'
       - '.github/workflows/media-qa.yml'
   push:
@@ -19,7 +18,6 @@ on:
       - 'src/pipeline/http-workflow-handlers.js'
       - 'test/media-qa.test.js'
       - 'package.json'
-      - 'package-lock.json'
       - 'Dockerfile'
       - '.github/workflows/media-qa.yml'
 
@@ -35,11 +33,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
       - name: Syntax and full tests
         run: npm run check
       - name: Verify media toolchain
