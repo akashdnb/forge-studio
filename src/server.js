@@ -40,7 +40,22 @@ async function start() {
     apiToken: process.env.API_BEARER_TOKEN || null,
     allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true',
   });
-  server.prependListener('request', (_request, response) => {
+  server.prependListener('request', (request, response) => {
+    const origin = request.headers.origin;
+    const allowedOrigin = process.env.CORS_ORIGIN || '';
+    if (origin && allowedOrigin && (allowedOrigin === '*' || origin === allowedOrigin)) {
+      response.setHeader('access-control-allow-origin', allowedOrigin === '*' ? '*' : origin);
+      response.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,x-actor-id,x-request-id');
+      response.setHeader('access-control-max-age', '600');
+      response.setHeader('vary', 'Origin');
+      // Reuse the public health route as a harmless 2xx preflight response.
+      // The browser only evaluates the CORS headers for OPTIONS; no application data is exposed.
+      if (request.method === 'OPTIONS') {
+        request.method = 'GET';
+        request.url = '/healthz';
+      }
+    }
     response.setHeader('x-frame-options', 'DENY');
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
