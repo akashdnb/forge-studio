@@ -14,15 +14,11 @@ function stableJson(value) {
   if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
   return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + stableJson(value[key])).join(',') + '}';
 }
-
 function sha256Json(value) { return crypto.createHash('sha256').update(stableJson(value)).digest('hex'); }
 function sha256File(file) {
   return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = require('node:fs').createReadStream(file);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.once('error', reject);
-    stream.once('end', () => resolve(hash.digest('hex')));
+    const hash = crypto.createHash('sha256'); const stream = require('node:fs').createReadStream(file);
+    stream.on('data', (chunk) => hash.update(chunk)); stream.once('error', reject); stream.once('end', () => resolve(hash.digest('hex')));
   });
 }
 
@@ -46,18 +42,11 @@ function validateRenderInput(input) {
 
 function run(command, args, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = ''; let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(Object.assign(new Error(`${command} timed out after ${timeoutMs}ms`), { retryable: true })); }, timeoutMs);
-    timer.unref?.();
+    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] }); let stdout = ''; let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(Object.assign(new Error(`${command} timed out after ${timeoutMs}ms`), { retryable: true })); }, timeoutMs); timer.unref?.();
     child.once('error', (error) => { clearTimeout(timer); reject(error); });
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      if (code === 0) return resolve({ stdout, stderr });
-      reject(Object.assign(new Error(`${command} exited with code ${code}${signal ? ` (${signal})` : ''}`), { retryable: false, stdout, stderr }));
-    });
+    child.once('exit', (code, signal) => { clearTimeout(timer); if (code === 0) return resolve({ stdout, stderr }); reject(Object.assign(new Error(`${command} exited with code ${code}${signal ? ` (${signal})` : ''}`), { retryable: false, stdout, stderr })); });
   });
 }
 
@@ -65,16 +54,25 @@ function buildFfmpegArgs(input, outputPath) {
   const videoTrack = input.timeline.tracks.find((track) => track.type === 'VIDEO');
   const audioTracks = input.timeline.tracks.filter((track) => ['NARRATION', 'MUSIC', 'SFX'].includes(track.type));
   const videoSegments = [...videoTrack.segments].sort((a, b) => Number(a.start) - Number(b.start));
-  const inputs = []; const filters = []; const concatLabels = [];
+  const inputs = []; const filters = []; const concatLabels = []; let nextInput = 0; let cursor = 0;
+  const addVideoFilter = (inputIndex, label, duration) => filters.push(`[${inputIndex}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},trim=duration=${duration},setpts=PTS-STARTPTS[${label}]`);
   for (const [index, segment] of videoSegments.entries()) {
+    const start = Number(segment.start); const duration = Number(segment.duration); const gap = start - cursor;
+    if (gap > 0.001) {
+      inputs.push('-f', 'lavfi', '-t', String(gap), '-i', `color=c=black:s=${VIDEO_WIDTH}x${VIDEO_HEIGHT}:r=${VIDEO_FPS}`);
+      addVideoFilter(nextInput, `gap${index}`, gap); concatLabels.push(`[gap${index}]`); nextInput += 1;
+    }
     const source = path.resolve(input.workDir, segment.sourcePath || segment.path);
     inputs.push('-stream_loop', '-1', '-i', source);
-    const label = `v${index}`;
-    filters.push(`[${index}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},trim=duration=${Number(segment.duration)},setpts=PTS-STARTPTS[${label}]`);
-    concatLabels.push(`[${label}]`);
+    addVideoFilter(nextInput, `v${index}`, duration); concatLabels.push(`[v${index}]`); nextInput += 1; cursor = Math.max(cursor, start + duration);
+  }
+  const tail = input.durationSeconds - cursor;
+  if (tail > 0.001) {
+    inputs.push('-f', 'lavfi', '-t', String(tail), '-i', `color=c=black:s=${VIDEO_WIDTH}x${VIDEO_HEIGHT}:r=${VIDEO_FPS}`);
+    addVideoFilter(nextInput, 'tail', tail); concatLabels.push('[tail]'); nextInput += 1;
   }
   filters.push(`${concatLabels.join('')}concat=n=${concatLabels.length}:v=1:a=0[vout]`);
-  let nextInput = videoSegments.length; const audioLabels = [];
+  const audioLabels = [];
   for (const track of audioTracks) for (const segment of track.segments || []) {
     const source = path.resolve(input.workDir, segment.sourcePath || segment.path);
     inputs.push('-stream_loop', '-1', '-i', source);
@@ -89,16 +87,14 @@ function buildFfmpegArgs(input, outputPath) {
 
 async function renderTimeline({ input, workDir, outputPath, ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg', timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const immutable = validateRenderInput({ ...input, workDir });
+  const sources = immutable.timeline.tracks.flatMap((track) => track.segments || []).map((segment) => path.resolve(workDir, segment.sourcePath || segment.path));
+  try { await Promise.all(sources.map((source) => fs.access(source))); } catch (error) { throw Object.assign(new Error(`Render source file is missing: ${error.path || error.message}`), { retryable: false }); }
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await run(ffmpegPath, buildFfmpegArgs(immutable, outputPath), { cwd: workDir, timeoutMs });
   const stat = await fs.stat(outputPath);
   if (!stat.isFile() || stat.size === 0) throw Object.assign(new Error('ffmpeg completed without a non-empty MP4'), { retryable: false });
   const checksum = await sha256File(outputPath);
-  const metadata = {
-    schemaVersion: 'forge-render-v1', mediaType: 'video/mp4', sizeBytes: stat.size, sha256: checksum,
-    timelineVersionId: immutable.timelineVersionId, timelineContentHash: immutable.timelineContentHash,
-    inputVersionIds: [...(immutable.inputVersionIds || [])], durationSeconds: immutable.durationSeconds,
-  };
+  const metadata = { schemaVersion: 'forge-render-v1', mediaType: 'video/mp4', sizeBytes: stat.size, sha256: checksum, timelineVersionId: immutable.timelineVersionId, timelineContentHash: immutable.timelineContentHash, inputVersionIds: [...(immutable.inputVersionIds || [])], durationSeconds: immutable.durationSeconds };
   await fs.writeFile(`${outputPath}.json`, JSON.stringify(metadata, null, 2) + '\n', 'utf8');
   return { outputPath, checksum, sizeBytes: stat.size, metadata };
 }
