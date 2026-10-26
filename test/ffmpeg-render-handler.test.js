@@ -9,8 +9,8 @@ const { sha256Json } = require('../src/pipeline/ffmpeg-renderer');
 function fakePool({ timeline, timelineHash, artifact = null } = {}) {
   const state = { artifact };
   const query = async (sql) => {
-    if (sql.includes('FROM version_records') && sql.includes("kind='render'")) return { rows: [] };
     if (sql.includes('FROM version_records') && sql.includes('episode_id=$2')) return { rows: [{ id: 'timeline:v1', episode_id: 'episode-1', kind: 'timeline', payload: timeline, content_hash: timelineHash }] };
+    if (sql.includes('SELECT episode_id,kind FROM version_records')) return { rows: [] };
     if (sql.includes('FROM artifacts a JOIN version_records')) return { rows: state.artifact ? [state.artifact] : [] };
     if (sql.startsWith('SELECT project_id FROM episodes')) return { rows: [{ project_id: 'project-1' }] };
     if (sql.startsWith('INSERT INTO version_records')) return { rows: [] };
