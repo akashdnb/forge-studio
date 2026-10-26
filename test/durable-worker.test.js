@@ -56,17 +56,18 @@ test('worker heartbeat loss prevents stale worker completion or failure writes',
     async complete() { completeCalls += 1; return {}; },
     async fail() { failCalls += 1; return { status: 'FAILED' }; },
   };
-  let releaseExecution;
-  const execution = new Promise((resolve) => { releaseExecution = resolve; });
+  let signalSeen;
+  const signalReady = new Promise((resolve) => { signalSeen = resolve; });
   const worker = new DurableWorker({
     queue, leaseHeartbeatMs: 10,
     executeJob: async (_job, { signal }) => {
+      signalSeen();
       await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
-      releaseExecution();
       return { lateResult: true };
     },
   });
   const promise = worker.runOnce();
+  await signalReady;
   const result = await promise;
   assert.equal(result.status, 'lease-lost');
   assert.equal(completeCalls, 0);
