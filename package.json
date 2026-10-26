@@ -1,13 +1,14 @@
 {
   "name": "forge-studio-core",
   "private": true,
-  "version": "0.4.0",
-  "description": "Forge Studio production domain and HTTP API",
+  "version": "0.5.0",
+  "description": "Forge Studio production domain, API, durable jobs and operational dashboard",
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
+    "worker": "node src/worker.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/http-api.js && node --check src/pipeline/provider-pipeline.js && node --check src/pipeline/workflow.js && node --check scripts/demo-workflow.js && node --check src/persistence/production-repository.js && node --test",
+    "check": "node --check src/server.js && node --check src/http-api.js && node --check src/pipeline/provider-pipeline.js && node --check src/pipeline/workflow.js && node --check src/pipeline/http-provider.js && node --check src/worker.js && node --check src/persistence/job-queue.js && node --check src/persistence/outbox.js && node --check scripts/demo-workflow.js && node --check src/persistence/production-repository.js && node --test",
     "migrate": "node src/migrate.js",
     "demo": "node scripts/demo-workflow.js"
   },
