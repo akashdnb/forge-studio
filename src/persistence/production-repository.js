@@ -1,5 +1,5 @@
 const { PostgresRepository } = require('./postgres-repository');
-const { immutableRecord, requiredString } = require('../domain/records');
+const { requiredString } = require('../domain/records');
 const { EPISODE_STATES, TRANSITIONS } = require('../domain/episode-service');
 
 function fromDb(row) {
@@ -30,11 +30,11 @@ class PersistentProductionRepository {
 
   async migrate(options) { return this.db.migrate(options); }
 
-  async createProject(input) {
-    const id = requiredString(input.id, 'id');
-    const name = requiredString(input.name, 'name');
+  async createProject({ id, name, createdBy = 'system', metadata = {} }) {
+    id = requiredString(id, 'id');
+    name = requiredString(name, 'name');
     try {
-      return await this.db.createProject({ ...input, id, name });
+      return await this.db.createProject({ id, name, createdBy, metadata });
     } catch (error) {
       if (error.code === '23505') throw Object.assign(new Error('Project already exists'), { code: 'CONFLICT' });
       throw error;
@@ -116,13 +116,26 @@ class PersistentProductionRepository {
   }
 
   async registerArtifact(input) {
-    const artifact = await this.db.registerArtifact(input);
-    return artifact;
+    const result = await this.db.withTransaction(async (client) => {
+      const episode = await client.query('SELECT project_id FROM episodes WHERE id = $1 FOR SHARE', [input.episodeId]);
+      if (!episode.rows[0]) throw Object.assign(new Error('Unknown episode'), { code: 'NOT_FOUND' });
+      const version = await client.query(
+        'SELECT id FROM version_records WHERE id = $1 AND episode_id = $2',
+        [input.versionId, input.episodeId],
+      );
+      if (!version.rows[0]) throw Object.assign(new Error('Artifact version not found for episode'), { code: 'INVALID_PROVENANCE' });
+      return this.db.registerArtifact({ ...input, createdBy: input.createdBy || 'system' });
+    });
+    return result;
   }
 
   async createProviderRun(input) {
-    try { return await this.db.createProviderRun(input); }
-    catch (error) {
+    try {
+      const episode = await this.db.getEpisode(input.episodeId);
+      if (!episode) throw Object.assign(new Error('Episode does not exist'), { code: 'NOT_FOUND' });
+      const result = await this.db.createProviderRun(input);
+      return result;
+    } catch (error) {
       if (error.code === '23505') throw Object.assign(new Error('Provider run ID already exists'), { code: 'CONFLICT' });
       if (error.code === '23503') throw Object.assign(new Error('Episode does not exist'), { code: 'NOT_FOUND' });
       throw error;
@@ -132,8 +145,50 @@ class PersistentProductionRepository {
   async recordCost(input) { return this.db.recordCost(input); }
   async episodeCost(episodeId) { return this.db.episodeCost(episodeId); }
 
-  async recordQa(input) { return this.db.recordQa(input); }
-  async appendApproval(input) { return this.db.appendApproval(input); }
+  async recordQa(input) {
+    const artifact = await this.db.pool.query(
+      'SELECT id FROM artifacts WHERE id = $1 AND episode_id = $2 AND version_id = $3',
+      [input.artifactId, input.episodeId, input.versionId],
+    );
+    if (!artifact.rows[0]) throw Object.assign(new Error('QA artifact/version provenance mismatch'), { code: 'INVALID_PROVENANCE' });
+    return this.db.recordQa(input);
+  }
+
+  async appendApproval(input) {
+    return this.db.withTransaction(async (client) => {
+      const episodeResult = await client.query('SELECT * FROM episodes WHERE id = $1 FOR UPDATE', [input.episodeId]);
+      const episode = episodeResult.rows[0];
+      if (!episode) throw Object.assign(new Error('Unknown episode'), { code: 'NOT_FOUND' });
+      if (input.stage === 'FINAL_RENDER' && input.decision === 'APPROVED') {
+        const artifact = await client.query(
+          `SELECT a.id, a.version_id FROM artifacts a
+           JOIN qa_results q ON q.artifact_id = a.id AND q.version_id = a.version_id
+           WHERE a.id = $1 AND a.episode_id = $2 AND a.version_id = $3 AND a.kind = 'render'
+             AND q.status IN ('PASSED','WARNINGS')
+           ORDER BY q.created_at DESC LIMIT 1`,
+          [input.targetId, input.episodeId, input.targetVersionId],
+        );
+        if (!artifact.rows[0]) throw Object.assign(new Error('Final render has no passing QA'), { code: 'QA_BLOCKED' });
+        if (episode.current_render_id !== input.targetId) throw Object.assign(new Error('Only the current selected render can be approved'), { code: 'STATE_CONFLICT' });
+        if (episode.state !== 'AWAITING_APPROVAL') throw Object.assign(new Error('Episode is not awaiting approval'), { code: 'STATE_CONFLICT' });
+        const approved = await client.query(
+          "UPDATE episodes SET state = 'APPROVED', approved_render_id = $1, revision = revision + 1, updated_at = now() WHERE id = $2 RETURNING *",
+          [input.targetId, input.episodeId],
+        );
+        await client.query(
+          'INSERT INTO approvals (id,episode_id,stage,target_id,target_version_id,decision,actor,comments,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)',
+          [input.id, input.episodeId, input.stage, input.targetId, input.targetVersionId, input.decision, input.actor, input.comments || '', JSON.stringify(input.evidence || {})],
+        );
+        await client.query(
+          "INSERT INTO audit_events (project_id,episode_id,actor,action,target_type,target_id,details) VALUES ($1,$2,$3,'FINAL_RENDER_APPROVED','artifact',$4,$5::jsonb)",
+          [episode.project_id, input.episodeId, input.actor, input.targetId, JSON.stringify({ versionId: input.targetVersionId })],
+        );
+        return { episode: fromDb(approved.rows[0]), approval: { ...input } };
+      }
+      return this.db.appendApproval(input);
+    });
+  }
+
   async invalidationPlan(versionId) { return this.db.invalidationPlan(versionId); }
 }
 
