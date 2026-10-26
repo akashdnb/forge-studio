@@ -13,10 +13,7 @@ CREATE TABLE IF NOT EXISTS channels (
   UNIQUE(project_id, name)
 );
 CREATE INDEX IF NOT EXISTS channels_project_idx ON channels(project_id);
-
-DO $$ BEGIN
-  ALTER TABLE episodes ADD CONSTRAINT episodes_channel_fk FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER TABLE episodes ADD CONSTRAINT episodes_channel_fk FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS style_profiles (
   id text PRIMARY KEY,
@@ -28,6 +25,9 @@ CREATE TABLE IF NOT EXISTS style_profiles (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id, name)
 );
+
+ALTER TABLE version_records DROP CONSTRAINT IF EXISTS version_records_kind_check;
+ALTER TABLE version_records ADD CONSTRAINT version_records_kind_check CHECK (kind IN ('episode','research','script','scene-plan','scene','asset','narration','render','qa','timeline','caption','thumbnail'));
 
 CREATE TABLE IF NOT EXISTS research_packages (
   id text PRIMARY KEY,
