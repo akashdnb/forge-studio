@@ -6,4 +6,9 @@ module.exports = {
   ...require('./domain/approval-service'),
   ...require('./domain/qa-service'),
   ...require('./domain/production-service'),
+  ...require('./pipeline/provider-pipeline'),
+  ...require('./pipeline/pipeline-service'),
+  ...require('./pipeline/mock-providers'),
+  ...require('./persistence/postgres-repository'),
+  ...require('./persistence/production-repository'),
 };
