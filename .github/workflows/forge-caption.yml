@@ -1,0 +1,17 @@
+name: Forge caption worker
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { description: Durable Forge job id, required: true, type: string }
+      episode_id: { description: Forge episode id, required: true, type: string }
+      correlation_id: { description: Forge execution correlation id, required: true, type: string }
+      idempotency_key: { description: Forge job idempotency key, required: true, type: string }
+      ref: { description: Immutable Forge commit SHA, required: true, type: string }
+jobs:
+  captions:
+    uses: ./.github/workflows/forge-worker.yml
+    with: { job_id: ${{ inputs.job_id }}, episode_id: ${{ inputs.episode_id }}, worker_type: captions, correlation_id: ${{ inputs.correlation_id }}, idempotency_key: ${{ inputs.idempotency_key }}, ref: ${{ inputs.ref }} }
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      FORGE_RUNNER_CALLBACK_TOKEN: ${{ secrets.FORGE_RUNNER_CALLBACK_TOKEN }}
+      FORGE_RUNNER_CALLBACK_URL: ${{ secrets.FORGE_RUNNER_CALLBACK_URL }}
