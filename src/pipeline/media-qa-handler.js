@@ -5,7 +5,14 @@ async function executeMediaQa({ payload, job, repository, logger = console, vali
   if (!episodeId) throw Object.assign(new Error('QA job requires episodeId'), { retryable: false });
   const resultId = `qa:${job.id}`;
   const existingResult = await repository.db.pool.query('SELECT * FROM qa_results WHERE id=$1', [resultId]);
-  if (existingResult.rows[0]) return { stage: 'QA', episodeId, artifactId: existingResult.rows[0].artifact_id, versionId: existingResult.rows[0].version_id, qaResultId: resultId, status: existingResult.rows[0].status, metadata: existingResult.rows[0].metadata || {} };
+  if (existingResult.rows[0]) {
+    const existing = existingResult.rows[0];
+    if (existing.status === 'FAILED') {
+      const retryable = (existing.metadata?.checks || []).some((c) => c.name === 'execution' && c.details?.retryable);
+      throw Object.assign(new Error('Media QA failed on a previous attempt'), { retryable, qaResultId: resultId });
+    }
+    return { stage: 'QA', episodeId, artifactId: existing.artifact_id, versionId: existing.version_id, qaResultId: resultId, status: existing.status, metadata: existing.metadata || {} };
+  }
 
   let artifactId = payload.renderArtifactId || payload.artifactId || null;
   if (!artifactId && job.depends_on_job_id) {
@@ -22,7 +29,6 @@ async function executeMediaQa({ payload, job, repository, logger = console, vali
 
   const normalizedArtifact = { id: artifact.id, episodeId: artifact.episode_id, kind: artifact.kind, versionId: artifact.version_id, storageUri: artifact.storage_uri, contentHash: artifact.content_hash || artifact.version_content_hash || null, mediaType: artifact.media_type, metadata: artifact.metadata || {}, inputVersionIds: artifact.input_version_ids || [] };
   const qa = await validator({ artifact: normalizedArtifact, payload: { ...payload, timelineMetadata: payload.timelineMetadata || artifact.metadata?.timeline || {} }, timeoutMs: Number.parseInt(process.env.FORGE_QA_TIMEOUT_MS || '600000', 10), maxBytes: Number.parseInt(process.env.FORGE_QA_MAX_BYTES || String(5 * 1024 * 1024 * 1024), 10), ffprobePath: process.env.FORGE_FFPROBE_PATH || 'ffprobe', ffmpegPath: process.env.FORGE_FFMPEG_PATH || 'ffmpeg', allowedHosts: String(process.env.FORGE_QA_ALLOWED_MEDIA_HOSTS || '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean) });
-
   const persisted = await repository.recordQa({ id: resultId, episodeId, artifactId: artifact.id, versionId: artifact.version_id, status: qa.status, checks: qa.checks, runner: 'forge-media-qa-v1', metadata: { ...qa, jobId: job.id, attempt: job.attempts, artifactSha256: qa.checksum?.hash || null, provenance: { renderArtifactId: artifact.id, renderVersionId: artifact.version_id, inputVersionIds: artifact.input_version_ids || [] } } });
   const episode = await repository.getEpisode(episodeId);
   if (qa.status === 'FAILED') {
