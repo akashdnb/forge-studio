@@ -67,7 +67,7 @@ test('oversized request body is rejected with 413', async () => {
     const oversized = 'x'.repeat(1_048_577);
     const response = await fetch(base + '/v1/episodes', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer test-token' }, body: JSON.stringify({ oversized }) });
     assert.equal(response.status, 413);
-    assert.equal((await response.json()).error.code, 'BAD_REQUEST');
+    assert.equal((await response.json()).error.code, 'PAYLOAD_TOO_LARGE');
   });
 });
 
