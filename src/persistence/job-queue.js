@@ -13,7 +13,8 @@ class JobQueue {
   async get(id) { const result = await this.pool.query('SELECT * FROM forge_jobs WHERE id=$1', [id]); return result.rows[0] || null; }
   async list({ projectId = null, episodeId = null, status = null, limit = 50, offset = 0 } = {}) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new TypeError('limit must be between 1 and 200'); if (!Number.isInteger(offset) || offset < 0) throw new TypeError('offset must be non-negative'); const values = []; const where = [];
-    if (projectId) { values.push(projectId); where.push(`project_id=$${values.length}`); } if (episodeId) { values.push(episodeId); where.push(`episode_id=$${values.length}`); } if (status) { values.push(status); where.push(`status=$${values.length}`); }
+    if (projectId) { values.push(projectId); where.push(`project_id=$${values.length}`); } if (episodeId) { values.push(episodeId); where.push(`status=$${values.length}`); }
+    if (status) { values.push(status); where.push(`status=$${values.length}`); }
     values.push(limit, offset); const result = await this.pool.query(`SELECT * FROM forge_jobs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY priority ASC, created_at ASC LIMIT $${values.length - 1} OFFSET $${values.length}`, values); return result.rows;
   }
   async recoverBlockedDependencies() { const result = await this.pool.query(`UPDATE forge_jobs j SET status='CANCELLED', error=jsonb_build_object('message','Dependency failed or was cancelled'), finished_at=now(), updated_at=now() FROM forge_jobs d WHERE j.status='QUEUED' AND j.depends_on_job_id=d.id AND d.status IN ('FAILED','CANCELLED') RETURNING j.id`); return result.rowCount; }
@@ -21,6 +22,19 @@ class JobQueue {
     if (!workerId) throw new TypeError('workerId is required'); const client = await this.pool.connect();
     try { await client.query('BEGIN'); const params = [now, this.leaseSeconds, workerId]; let kindFilter = ''; if (kinds.length) { params.push(kinds); kindFilter = `AND j.kind = ANY($${params.length}::text[])`; }
       const result = await client.query(`WITH candidate AS (SELECT j.id FROM forge_jobs j WHERE j.status='QUEUED' AND j.available_at <= $1 AND (j.leased_until IS NULL OR j.leased_until < $1) ${kindFilter} AND (j.depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED')) ORDER BY j.priority ASC,j.created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE forge_jobs j SET status='RUNNING',attempts=j.attempts+1,worker_id=$3,leased_until=$1+($2::text||' seconds')::interval,started_at=COALESCE(j.started_at,now()),updated_at=now() FROM candidate c WHERE j.id=c.id RETURNING j.*`, params);
+      await client.query('COMMIT'); return result.rows[0] || null;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+  async claimSpecific(id, workerId, now = new Date()) {
+    if (!id || !workerId) throw new TypeError('id and workerId are required'); const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `UPDATE forge_jobs j SET status='RUNNING',attempts=j.attempts+1,worker_id=$2,leased_until=$3+($4::text||' seconds')::interval,started_at=COALESCE(j.started_at,now()),updated_at=now()
+         WHERE j.id=$1 AND j.status='QUEUED' AND j.available_at <= $3 AND (j.leased_until IS NULL OR j.leased_until < $3)
+           AND (j.depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED'))
+         RETURNING j.*`, [id, workerId, now, this.leaseSeconds],
+      );
       await client.query('COMMIT'); return result.rows[0] || null;
     } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
   }
