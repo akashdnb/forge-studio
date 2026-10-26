@@ -1,6 +1,7 @@
 const { requiredString } = require('../domain/records');
 const { DurableJobQueue } = require('./durable-job-queue');
 const { PostgresRepository } = require('./postgres-repository');
+const { EPISODE_STATES, TRANSITIONS } = require('../domain/episode-service');
 
 class PersistentProductionRepository {
   constructor({ pool, workerId, leaseSeconds }) {
