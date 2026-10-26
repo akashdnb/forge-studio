@@ -28,7 +28,7 @@ test('persistent repository rejects an invalid episode transition before updatin
       return {
         async query(sql, params = []) {
           calls.push({ sql, params });
-          if (sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: 'ep-1', revision: 1, state: 'DRAFT', project_id: 'p-1' }] };
+          if (sql.includes('SELECT * FROM episodes WHERE id=$1 FOR UPDATE') || sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: 'ep-1', revision: 1, state: 'DRAFT', project_id: 'p-1' }] };
           return { rows: [] };
         },
         release() { calls.push({ sql: 'RELEASE' }); },
