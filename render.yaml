@@ -44,9 +44,23 @@ services:
         sync: false
       - key: FORGE_STAGE_RENDER_ENDPOINT
         sync: false
-      - key: FORGE_STAGE_QA_ENDPOINT
-        sync: false
       - key: FORGE_STAGE_PROVIDER_TOKEN
+        sync: false
+      - key: FORGE_QA_TIMEOUT_MS
+        value: "600000"
+      - key: FORGE_QA_MAX_BYTES
+        value: "5368709120"
+      - key: FORGE_QA_ALLOWED_MEDIA_HOSTS
+        sync: false
+      - key: FORGE_S3_REGION
+        sync: false
+      - key: FORGE_S3_ENDPOINT
+        sync: false
+      - key: FORGE_S3_FORCE_PATH_STYLE
+        value: "false"
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
         sync: false
       - key: FORGE_WORKER_HANDLERS
         sync: false

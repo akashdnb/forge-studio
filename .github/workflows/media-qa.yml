@@ -1,0 +1,24 @@
+name: media-qa
+on:
+  pull_request:
+    paths: ['src/media/**','src/pipeline/media-qa-handler.js','src/pipeline/http-workflow-handlers.js','test/media-qa.test.js','package.json','Dockerfile','.github/workflows/media-qa.yml']
+  push:
+    branches: [main]
+    paths: ['src/media/**','src/pipeline/media-qa-handler.js','src/pipeline/http-workflow-handlers.js','test/media-qa.test.js','package.json','Dockerfile','.github/workflows/media-qa.yml']
+permissions: { contents: read }
+jobs:
+  media-qa:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Syntax and full tests
+        run: npm run check
+      - name: Verify media toolchain
+        run: ffprobe -version | head -n 1 && ffmpeg -version | head -n 1
