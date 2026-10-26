@@ -40,9 +40,21 @@ test('workflow enforces dependency closure and runs the ordered stages with vers
   const ledger = new ProviderRunLedger();
   const artifacts = new ArtifactRegistry();
   const runner = new PipelineRunner({ providerRegistry: registry, ledger, artifactRegistry: artifacts });
-  for (const capability of ['research', 'llm', 'scene-plan', 'tts', 'image', 'timeline', 'render', 'qa', 'publish']) {
+  for (const capability of ['research', 'llm', 'tts', 'image', 'timeline', 'render', 'qa', 'publish']) {
     registry.register(capability, new MockTextProvider({ name: `mock-${capability}` }));
   }
+  registry.register('scene-plan', {
+    name: 'mock-scene-plan',
+    async execute(request, context) {
+      return { artifacts: [{
+        id: `${context.runId}-scene-plan`, versionId: `${context.runId}-v1`, kind: 'scene-plan',
+        content: { schemaVersion: '1.0', title: 'Demo', scenes: [
+          { id: 'scene-1', title: 'Opening', type: 'title-card', durationSeconds: 3, narration: 'Open.' },
+          { id: 'scene-2', title: 'Explain', type: 'diagram', durationSeconds: 8, narration: 'Explain.' },
+        ] },
+      }] };
+    },
+  });
   const pipeline = new PipelineService({ runner });
   const workflow = new EpisodeWorkflow({ pipelineService: pipeline });
   await assert.rejects(workflow.execute({ episodeId: 'ep', brief: {}, stages: ['SCRIPT'] }), /requires RESEARCH/);
