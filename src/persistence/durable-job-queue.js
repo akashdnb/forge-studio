@@ -17,12 +17,13 @@ class DurableJobQueue {
     idempotencyKey = requiredString(idempotencyKey, 'idempotencyKey');
     if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10) throw new TypeError('maxAttempts must be 1..10');
     if (!Number.isInteger(priority)) throw new TypeError('priority must be an integer');
+    if (!['RESEARCH','SCRIPT','SCENE_PLAN','NARRATION','ASSETS','TIMELINE','RENDER','QA','PUBLISH'].includes(stage)) throw new TypeError('Unknown workflow stage');
     const result = await this.pool.query(
       `INSERT INTO workflow_jobs (id,episode_id,stage,capability,idempotency_key,request,input_version_ids,max_attempts,priority,created_by)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10)
        ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key
        RETURNING *`,
-      [id, episodeId, stage, capability, idempotencyKey, JSON.stringify(request), JSON.stringify(inputVersionIds), maxAttempts, priority, createdBy],
+      [id, episodeId, stage, requiredString(capability, 'capability'), idempotencyKey, JSON.stringify(request), JSON.stringify(inputVersionIds), maxAttempts, priority, createdBy],
     );
     const job = result.rows[0];
     if (job.episode_id !== episodeId) throw Object.assign(new Error('Job idempotency key belongs to a different episode'), { code: 'IDEMPOTENCY_CONFLICT' });
@@ -31,11 +32,23 @@ class DurableJobQueue {
 
   async claim() {
     return this.withTransaction(async (client) => {
+      // If a worker disappeared after its final allowed attempt, terminate the
+      // job instead of perpetually reclaiming an expired lease.
+      const exhausted = await client.query(
+        `UPDATE workflow_jobs SET status='FAILED',locked_by=NULL,locked_at=NULL,heartbeat_at=NULL,
+         lease_expires_at=NULL,finished_at=now(),updated_at=now(),
+         error=jsonb_build_object('message','Worker lease expired after max attempts','retryable',false)
+         WHERE status='RUNNING' AND lease_expires_at < now() AND attempts >= max_attempts
+         RETURNING id`,
+      );
+      for (const row of exhausted.rows) {
+        await client.query("INSERT INTO workflow_job_events (job_id,event_type,details) VALUES ($1,'JOB_FAILED_LEASE_EXHAUSTED','{}'::jsonb)", [row.id]);
+      }
       const result = await client.query(
         `WITH candidate AS (
            SELECT id FROM workflow_jobs
-           WHERE (status='QUEUED' AND available_at <= now())
-              OR (status='RUNNING' AND lease_expires_at < now())
+           WHERE ((status='QUEUED' AND available_at <= now()) OR (status='RUNNING' AND lease_expires_at < now()))
+             AND attempts < max_attempts
            ORDER BY priority DESC, available_at, created_at
            FOR UPDATE SKIP LOCKED LIMIT 1
          )
@@ -56,23 +69,20 @@ class DurableJobQueue {
 
   async heartbeat(jobId) {
     const result = await this.pool.query(
-      `UPDATE workflow_jobs SET heartbeat_at=now(),locked_at=COALESCE(locked_at,now()),
-       lease_expires_at=now()+($1::text || ' seconds')::interval,updated_at=now()
-       WHERE id=$2 AND status='RUNNING' AND locked_by=$3 RETURNING *`,
+      `UPDATE workflow_jobs SET heartbeat_at=now(),lease_expires_at=now()+($1::text || ' seconds')::interval,updated_at=now()
+       WHERE id=$2 AND status='RUNNING' AND locked_by=$3 AND lease_expires_at > now() RETURNING *`,
       [this.leaseSeconds, jobId, this.workerId],
     );
     if (!result.rows[0]) throw Object.assign(new Error('Job lease is no longer owned by this worker'), { code: 'LEASE_LOST' });
     return result.rows[0];
   }
 
-  async complete(jobId, resultPayload = {}) {
-    return this.#finish(jobId, 'SUCCEEDED', { result: resultPayload });
-  }
+  async complete(jobId, resultPayload = {}) { return this.#finish(jobId, 'SUCCEEDED', { result: resultPayload }); }
 
   async fail(jobId, error, { retryable = false, retryDelaySeconds = 10 } = {}) {
     if (!Number.isInteger(retryDelaySeconds) || retryDelaySeconds < 0 || retryDelaySeconds > 86400) throw new TypeError('retryDelaySeconds must be 0..86400');
     return this.withTransaction(async (client) => {
-      const selected = await client.query("SELECT * FROM workflow_jobs WHERE id=$1 AND status='RUNNING' AND locked_by=$2 FOR UPDATE", [jobId, this.workerId]);
+      const selected = await client.query("SELECT * FROM workflow_jobs WHERE id=$1 AND status='RUNNING' AND locked_by=$2 AND lease_expires_at > now() FOR UPDATE", [jobId, this.workerId]);
       const job = selected.rows[0];
       if (!job) throw Object.assign(new Error('Job lease is no longer owned by this worker'), { code: 'LEASE_LOST' });
       const retry = retryable && job.attempts < job.max_attempts;
@@ -84,10 +94,9 @@ class DurableJobQueue {
          WHERE id=$4 RETURNING *`,
         [status,retryDelaySeconds,JSON.stringify({ message: String(error?.message || error || 'Unknown error'), retryable }),jobId],
       );
-      await client.query(
-        'INSERT INTO workflow_job_events (job_id,event_type,details) VALUES ($1,$2,$3::jsonb)',
-        [jobId, retry ? 'JOB_RETRY_SCHEDULED' : 'JOB_FAILED', JSON.stringify({ attempts: job.attempts, retryable })],
-      );
+      await client.query('INSERT INTO workflow_job_events (job_id,event_type,details) VALUES ($1,$2,$3::jsonb)', [
+        jobId, retry ? 'JOB_RETRY_SCHEDULED' : 'JOB_FAILED', JSON.stringify({ attempts: job.attempts, retryable }),
+      ]);
       return next.rows[0];
     });
   }
@@ -134,7 +143,7 @@ class DurableJobQueue {
       const updated = await client.query(
         `UPDATE workflow_jobs SET status=$1,result=$2::jsonb,locked_by=NULL,locked_at=NULL,heartbeat_at=NULL,
          lease_expires_at=NULL,finished_at=now(),updated_at=now()
-         WHERE id=$3 AND status='RUNNING' AND locked_by=$4 RETURNING *`,
+         WHERE id=$3 AND status='RUNNING' AND locked_by=$4 AND lease_expires_at > now() RETURNING *`,
         [status, JSON.stringify(payload), jobId, this.workerId],
       );
       if (!updated.rows[0]) throw Object.assign(new Error('Job lease is no longer owned by this worker'), { code: 'LEASE_LOST' });
