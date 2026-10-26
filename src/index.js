@@ -8,6 +8,8 @@ module.exports = {
   ...require('./domain/production-service'),
   ...require('./pipeline/provider-pipeline'),
   ...require('./pipeline/pipeline-service'),
+  ...require('./pipeline/scene-plan'),
+  ...require('./pipeline/workflow'),
   ...require('./pipeline/mock-providers'),
   ...require('./derivatives/shorts-handoff'),
   ...require('./persistence/postgres-repository'),

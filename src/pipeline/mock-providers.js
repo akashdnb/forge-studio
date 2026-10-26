@@ -11,13 +11,14 @@ class MockTextProvider {
   }
 
   async execute(request, context) {
-    const text = typeof request.text === 'string' ? request.text : JSON.stringify(request);
+    const text = typeof request.text === 'string' ? request.text : (request.brief?.title || request.brief?.topic || JSON.stringify(request));
     const versionId = request.versionId || `${context.runId}-v1`;
+    const defaultKind = ({ RESEARCH: 'research', SCRIPT: 'script', NARRATION: 'narration', ASSETS: 'asset', TIMELINE: 'timeline', RENDER: 'render', QA: 'qa', PUBLISH: 'publish-record' })[context.stage] || 'script';
     return {
       artifacts: [{
         id: `${context.runId}-output`,
         versionId,
-        kind: request.kind || 'script',
+        kind: request.kind || defaultKind,
         content: { text, stage: context.stage, inputVersionIds: context.inputVersionIds },
         mediaType: 'application/json',
         metadata: { mock: true },

@@ -3,15 +3,8 @@ const { requiredString } = require('../domain/records');
 const { PIPELINE_STAGES } = require('./provider-pipeline');
 
 const DEFAULT_STAGE_CAPABILITIES = Object.freeze({
-  RESEARCH: 'research',
-  SCRIPT: 'llm',
-  SCENE_PLAN: 'scene-plan',
-  NARRATION: 'tts',
-  ASSETS: 'image',
-  TIMELINE: 'timeline',
-  RENDER: 'render',
-  QA: 'qa',
-  PUBLISH: 'publish',
+  RESEARCH: 'research', SCRIPT: 'llm', SCENE_PLAN: 'scene-plan', NARRATION: 'tts',
+  ASSETS: 'image', TIMELINE: 'timeline', RENDER: 'render', QA: 'qa', PUBLISH: 'publish',
 });
 
 class PipelineService {
