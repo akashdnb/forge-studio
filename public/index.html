@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Forge Studio</title>
+  <style>
+    :root{font-family:Inter,system-ui,sans-serif;color:#18202a;background:#f6f7f9}body{margin:0}.shell{max-width:1180px;margin:auto;padding:32px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:24px}.brand{font-weight:800;font-size:24px}.muted{color:#687385}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:#fff;border:1px solid #e2e6eb;border-radius:14px;padding:18px;box-shadow:0 2px 8px #0000000a}.row{display:flex;gap:10px;align-items:center}.stack>*+*{margin-top:10px}input,textarea,button{font:inherit}input,textarea{width:100%;box-sizing:border-box;border:1px solid #ccd3dc;border-radius:8px;padding:10px}textarea{min-height:90px}button{border:0;border-radius:8px;padding:10px 14px;background:#18202a;color:#fff;cursor:pointer}button.secondary{background:#eef1f5;color:#18202a}.episode{border-top:1px solid #edf0f3;padding:12px 0}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef1f5;font-size:12px}.error{color:#b42318}.ok{color:#067647}@media(max-width:800px){.grid{grid-template-columns:1fr}.shell{padding:18px}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="top"><div><div class="brand">Forge Studio</div><div class="muted">Production control plane</div></div><div class="row"><button class="secondary" id="save">Save connection</button><button id="refresh">Refresh</button></div></div>
+  <div class="grid">
+    <section class="card stack">
+      <h2>Connection</h2>
+      <input id="base" placeholder="API base URL (e.g. https://forge.example.com)">
+      <input id="token" type="password" placeholder="Bearer token">
+      <div id="health" class="muted">Not checked</div>
+    </section>
+    <section class="card stack">
+      <h2>New episode</h2>
+      <input id="project" placeholder="Project ID" value="default-project">
+      <input id="title" placeholder="Episode title">
+      <textarea id="description" placeholder="Brief / description"></textarea>
+      <button id="create">Create episode</button>
+      <div id="createStatus" class="muted"></div>
+    </section>
+  </div>
+  <section class="card" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Episodes</h2><span id="count" class="pill">0</span></div><div id="episodes" class="muted">Connect to Forge to load episodes.</div></section>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const saved=JSON.parse(localStorage.getItem('forge-connection')||'null');
+$('base').value=saved?.base||location.origin;
+$('token').value=saved?.token||'';
+function headers(){const h={'content-type':'application/json'};if($('token').value)h.authorization='Bearer '+$('token').value;return h}
+function base(){return $('base').value.replace(/\/$/,'')}
+async function request(path,options={}){const r=await fetch(base()+path,{...options,headers:{...headers(),...(options.headers||{})}});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body?.error?.message||`HTTP ${r.status}`);return body}
+$('save').onclick=()=>{localStorage.setItem('forge-connection',JSON.stringify({base:$('base').value,token:$('token').value}));load()};
+$('refresh').onclick=load;
+$('create').onclick=async()=>{try{$('createStatus').textContent='Creating…';await request('/v1/episodes',{method:'POST',body:JSON.stringify({id:crypto.randomUUID(),projectId:$('project').value,title:$('title').value,description:$('description').value})});$('createStatus').textContent='Created';$('title').value='';$('description').value='';load()}catch(e){$('createStatus').textContent=e.message;$('createStatus').className='error'}};
+async function load(){try{const health=await request('/readyz');$('health').textContent=`Ready · persistence: ${health.checks.persistence}`;$('health').className='ok';const data=await request('/v1/episodes?limit=100');$('count').textContent=data.items.length;$('episodes').innerHTML=data.items.length?data.items.map(e=>`<div class="episode"><strong>${escapeHtml(e.title)}</strong><div class="muted">${escapeHtml(e.id)} · <span class="pill">${escapeHtml(e.state)}</span></div></div>`).join(''):'No episodes yet.'}catch(e){$('health').textContent=e.message;$('health').className='error';$('episodes').textContent='Unable to load episodes.'}}
+function escapeHtml(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+load();
+</script>
+</body>
+</html>
