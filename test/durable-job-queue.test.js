@@ -23,6 +23,7 @@ function fakeQueuePool() {
           if (sql.includes('SELECT * FROM workflow_jobs WHERE id=$1 AND status=\'RUNNING\'')) return { rows: [{ id: params[0], status: 'RUNNING', locked_by: params[1], attempts: 1, max_attempts: 3 }] };
           if (sql.includes('UPDATE workflow_jobs SET status=$1,result=')) return { rows: [{ id: params[2], status: params[0] }] };
           if (sql.includes('UPDATE workflow_jobs SET status=$1,available_at=')) return { rows: [{ id: params[3], status: params[0] }] };
+          if (sql.includes('INSERT INTO workflow_job_events')) return { rows: [] };
           if (sql.includes('UPDATE workflow_jobs SET status=\'CANCELLED\'')) return { rows: [{ id: params[0], status: 'CANCELLED' }] };
           return { rows: [] };
         },
@@ -74,5 +75,5 @@ test('fail schedules retry only when retryable and attempts remain', async () =>
   const queue = new DurableJobQueue({ pool, workerId: 'worker-a' });
   const result = await queue.fail('job-1', new Error('temporary'), { retryable: true, retryDelaySeconds: 7 });
   assert.equal(result.status, 'QUEUED');
-  assert.ok(pool.calls.some((call) => call.sql.includes('JOB_RETRY_SCHEDULED')));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('INSERT INTO workflow_job_events')));
 });
