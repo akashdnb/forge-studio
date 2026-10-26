@@ -4,13 +4,11 @@ const { JobQueue } = require('./persistence/job-queue');
 const { createPublishingHandlers } = require('./publishing/job-handler');
 const { createHttpWorkflowHandlers } = require('./pipeline/http-workflow-handlers');
 const { createCaptionJobHandler } = require('./captions/job-handler');
-
+const { createStorageFromEnv } = require('./storage');
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool }); let stopping = false; let timer = null;
   async function tick() {
-    if (stopping) return;
-    await queue.recoverExpiredLeases(); await queue.recoverBlockedDependencies();
-    const job = await queue.claim({ workerId }); if (!job) return;
+    if (stopping) return; await queue.recoverExpiredLeases(); await queue.recoverBlockedDependencies(); const job = await queue.claim({ workerId }); if (!job) return;
     const handler = handlers[job.kind];
     if (typeof handler !== 'function') { await queue.fail(job.id, workerId, Object.assign(new Error(`No worker handler registered for ${job.kind}`), { retryable: false }), { retry: false }); return; }
     const heartbeat = setInterval(() => queue.heartbeat(job.id, workerId).catch((error) => logger.error?.('Forge worker heartbeat failed', error)), 30000); heartbeat.unref?.();
@@ -22,14 +20,13 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
   async function stop() { stopping = true; if (timer) clearTimeout(timer); }
   return { queue, run, stop, workerId };
 }
-
 function loadHandlers({ pool } = {}) {
-  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }) } : {};
+  const storage = pool ? createStorageFromEnv() : null;
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }) } : {};
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
   if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
   return handlers;
 }
-
 if (require.main === module) {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   const { Pool } = require('pg'); const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '5', 10) });
