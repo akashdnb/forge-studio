@@ -1,10 +1,22 @@
-const { randomUUID } = require('node:crypto');
-const { JobQueue } = require('../persistence/job-queue');
-const { WORKFLOW_DEPENDENCIES } = require('./workflow');
-const ORDER = ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PUBLISH'];
-const TRANSCRIPTION_DEPENDENCIES = Object.freeze({ ...WORKFLOW_DEPENDENCIES, TRANSCRIPTION: ['NARRATION'], TIMELINE: ['SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS'], CAPTIONS: ['TIMELINE'], RENDER: ['TIMELINE', 'CAPTIONS'] });
+const { EpisodeWorkflowIntegration, WORKFLOW_STAGES, WORKFLOW_DEPENDENCIES } = require('./episode-workflow-integration');
+
 class AsyncEpisodeOrchestrator {
-  constructor({ pool, leaseSeconds = 300 }) { this.queue = new JobQueue({ pool, leaseSeconds }); }
-  async enqueue({ episodeId, projectId = null, brief, stages = ORDER, actor = 'workflow', idempotencyPrefix = randomUUID() }) { if (!episodeId) throw new TypeError('episodeId is required'); if (!String(brief || '').trim()) throw new TypeError('brief is required'); const requested = new Set(stages); const jobs = []; for (const stage of stages) { if (!ORDER.includes(stage)) throw new TypeError(`Unknown workflow stage: ${stage}`); for (const dependency of TRANSCRIPTION_DEPENDENCIES[stage] || []) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency}`); } let dependsOnJobId = null; for (const stage of stages) { const job = await this.queue.enqueue({ projectId, episodeId, kind: `workflow:${stage.toLowerCase()}`, payload: { episodeId, projectId, brief, stage, actor }, idempotencyKey: `${idempotencyPrefix}:${episodeId}:${stage}`, createdBy: actor, dependsOnJobId }); jobs.push(job); dependsOnJobId = job.id; } return { episodeId, jobs }; }
+  constructor({ pool, leaseSeconds = 300 }) {
+    if (!pool) throw new TypeError('pool is required');
+    this.integration = new EpisodeWorkflowIntegration({ pool, leaseSeconds });
+    this.queue = this.integration.queue;
+  }
+
+  async enqueue({ episodeId, projectId = null, brief, stages = WORKFLOW_STAGES, actor = 'workflow', idempotencyPrefix = null }) {
+    const workflow = await this.integration.start({ episodeId, projectId, brief, stages, actor, idempotencyKey: idempotencyPrefix && `${idempotencyPrefix}:${episodeId}` });
+    return {
+      episodeId,
+      workflowId: workflow.id,
+      status: workflow.status,
+      jobs: workflow.stages.filter((stage) => stage.job_id).map((stage) => ({ id: stage.job_id, kind: `workflow:${stage.stage.toLowerCase()}`, episode_id: episodeId, status: stage.status, depends_on_job_id: null })),
+      stages: workflow.stages,
+    };
+  }
 }
-module.exports = { AsyncEpisodeOrchestrator, WORKFLOW_STAGE_ORDER: ORDER, WORKFLOW_STAGE_DEPENDENCIES: TRANSCRIPTION_DEPENDENCIES };
+
+module.exports = { AsyncEpisodeOrchestrator, WORKFLOW_STAGE_ORDER: WORKFLOW_STAGES, WORKFLOW_STAGE_DEPENDENCIES: WORKFLOW_DEPENDENCIES };
