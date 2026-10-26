@@ -13,3 +13,19 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+  - type: worker
+    name: forge-studio-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: node src/worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: WORKER_POLL_INTERVAL_MS
+        value: "1000"
+      - key: WORKER_LEASE_SECONDS
+        value: "90"
+      - key: FORGE_ALLOW_MOCK_PROVIDERS
+        value: "false"
