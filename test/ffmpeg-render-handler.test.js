@@ -1,0 +1,27 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+const { createFfmpegRenderHandler } = require('../src/pipeline/ffmpeg-render-handler');
+const { sha256Json } = require('../src/pipeline/ffmpeg-renderer');
+function fakePool({ timeline, timelineHash, artifact = null } = {}) {
+  const state = { artifact };
+  const query = async (sql) => {
+    if (sql.includes('FROM version_records') && sql.includes('episode_id=$2')) return { rows: [{ id: 'timeline:v1', episode_id: 'episode-1', kind: 'timeline', payload: timeline, content_hash: timelineHash }] };
+    if (sql.includes('SELECT episode_id,kind FROM version_records')) return { rows: [] };
+    if (sql.includes('FROM artifacts a JOIN version_records')) return { rows: state.artifact ? [state.artifact] : [] };
+    if (sql.startsWith('SELECT project_id FROM episodes')) return { rows: [{ project_id: 'project-1' }] };
+    if (sql.startsWith('INSERT INTO version_records')) return { rows: [] }; if (sql.startsWith('INSERT INTO artifacts')) return { rows: [] }; if (sql.startsWith('INSERT INTO storage_objects')) return { rows: [] };
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  const client = { query: async (sql) => { if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }; return query(sql); }, release() {} };
+  return { query, connect: async () => client, state };
+}
+test('render handler consumes persisted immutable timeline and is idempotent', async () => {
+  const timeline = { durationSeconds: 1, tracks: [{ type: 'VIDEO', segments: [{ id: 's1', start: 0, duration: 1, sourcePath: 'scene.mp4' }] }] }; const timelineHash = sha256Json(timeline); const root = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-handler-')); const output = path.join(root, 'render_render-job-1.mp4'); await fs.writeFile(output, Buffer.from('real-mp4-test')); let calls = 0;
+  const pool = fakePool({ timeline, timelineHash }); const render = async () => { calls += 1; return { outputPath: output, checksum: 'a'.repeat(64), sizeBytes: 13, metadata: { mediaType: 'video/mp4', timelineVersionId: 'timeline:v1', timelineContentHash: timelineHash } }; }; const handler = createFfmpegRenderHandler({ pool, render });
+  const first = await handler({ episodeId: 'episode-1', timeline: [{ versionId: 'timeline:v1', content: timeline, contentHash: timelineHash }] }, { id: 'job-1', attempts: 1 }); assert.equal(first.artifactId, 'render:job-1'); assert.equal(calls, 1);
+  pool.state.artifact = { id: 'render:job-1', version_id: 'render:job-1', storage_uri: `file://${output}`, content_hash: first.checksum, media_type: 'video/mp4', metadata: first.metadata };
+  const second = await handler({ episodeId: 'episode-1', timeline: [{ versionId: 'timeline:v1', content: timeline, contentHash: timelineHash }] }, { id: 'job-1', attempts: 2 }); assert.equal(second.idempotent, true); assert.equal(calls, 1);
+});
