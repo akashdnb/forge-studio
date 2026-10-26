@@ -9,7 +9,8 @@ const DEPENDENCIES = Object.freeze({
   NARRATION: ['SCRIPT', 'SCENE_PLAN'],
   ASSETS: ['SCENE_PLAN'],
   TIMELINE: ['SCENE_PLAN', 'NARRATION', 'ASSETS'],
-  RENDER: ['TIMELINE'],
+  CAPTIONS: ['TIMELINE'],
+  RENDER: ['TIMELINE', 'CAPTIONS'],
   QA: ['RENDER'],
   PUBLISH: ['QA'],
 });
@@ -31,44 +32,29 @@ class EpisodeWorkflow {
     const unknown = stages.filter((stage) => !PIPELINE_STAGES.includes(stage));
     if (unknown.length) throw new Error(`Unknown workflow stages: ${unknown.join(', ')}`);
     const requested = new Set(stages);
-    for (const stage of stages) {
-      for (const dependency of DEPENDENCIES[stage]) {
-        if (!requested.has(dependency)) {
-          throw new Error(`Stage ${stage} requires ${dependency} in the same workflow request`);
-        }
-      }
-    }
+    for (const stage of stages) for (const dependency of DEPENDENCIES[stage]) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency} in the same workflow request`);
 
     let previous = { brief };
     const outputs = [];
     const stageVersions = new Map();
     for (const stage of stages) {
-      const inputVersionIds = DEPENDENCIES[stage]
-        .flatMap((dependency) => stageVersions.get(dependency) || []);
+      const inputVersionIds = DEPENDENCIES[stage].flatMap((dependency) => stageVersions.get(dependency) || []);
       const request = this.#stageRequest(stage, previous, brief);
       const result = await this.pipeline.run({ episodeId, stage, request, inputVersionIds, actor });
       if (!result.run || result.run.status !== 'SUCCEEDED') throw new Error(`Stage ${stage} did not succeed`);
       const cost = result.run.actualCost ?? result.run.estimatedCost;
-      if (this.maxStageCost !== null && cost !== null && cost > this.maxStageCost) {
-        throw Object.assign(new Error(`Stage ${stage} exceeded the configured cost guard`), { code: 'COST_GUARD' });
-      }
+      if (this.maxStageCost !== null && cost !== null && cost > this.maxStageCost) throw Object.assign(new Error(`Stage ${stage} exceeded the configured cost guard`), { code: 'COST_GUARD' });
       const versionIds = result.artifacts.map((artifact) => artifact.versionId);
       stageVersions.set(stage, versionIds);
       outputs.push({ stage, ...result, inputVersionIds });
       previous = { ...previous, [stage]: result.artifacts, lastResult: result };
       if (stage === 'SCENE_PLAN' && result.artifacts[0]?.content) {
         const rawPlan = result.artifacts[0].content;
-        // Providers may return a full scene plan directly or a content envelope.
         const candidate = rawPlan && rawPlan.content && rawPlan.content.scenes ? rawPlan.content : rawPlan;
-        const validation = normalizeScenePlan(candidate);
-        previous.normalizedScenePlan = validation;
+        previous.normalizedScenePlan = normalizeScenePlan(candidate);
       }
     }
-    return {
-      episodeId, status: 'SUCCEEDED', stages: outputs,
-      artifactIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.id)),
-      versionIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.versionId)),
-    };
+    return { episodeId, status: 'SUCCEEDED', stages: outputs, artifactIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.id)), versionIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.versionId)) };
   }
 
   #stageRequest(stage, previous, brief) {
@@ -77,11 +63,9 @@ class EpisodeWorkflow {
     if (stage === 'SCENE_PLAN') return { brief, script: previous.SCRIPT || [] };
     if (stage === 'NARRATION') return { script: previous.SCRIPT || [], scenePlan: previous.SCENE_PLAN || [] };
     if (stage === 'ASSETS') return { scenePlan: previous.normalizedScenePlan || previous.SCENE_PLAN || [] };
-    if (stage === 'TIMELINE') return {
-      scenePlan: previous.normalizedScenePlan || previous.SCENE_PLAN || [],
-      narration: previous.NARRATION || [], assets: previous.ASSETS || [],
-    };
-    if (stage === 'RENDER') return { timeline: previous.TIMELINE || [] };
+    if (stage === 'TIMELINE') return { scenePlan: previous.normalizedScenePlan || previous.SCENE_PLAN || [], narration: previous.NARRATION || [], assets: previous.ASSETS || [] };
+    if (stage === 'CAPTIONS') return { timeline: previous.TIMELINE || [], transcriptRequired: true };
+    if (stage === 'RENDER') return { timeline: previous.TIMELINE || [], captions: previous.CAPTIONS || [] };
     if (stage === 'QA') return { render: previous.RENDER || [] };
     if (stage === 'PUBLISH') return { render: previous.RENDER || [], qa: previous.QA || [] };
     throw new Error(`No request mapping for stage ${stage}`);
