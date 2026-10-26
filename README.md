@@ -13,8 +13,10 @@ Forge Studio is the production control plane for long-form educational video epi
 - Bearer-token protected API with project-scoped authorization, readiness/liveness and request IDs.
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
-- Async nine-stage episode orchestration: research → script → scene plan → narration → assets → timeline → render → QA → publish.
+- Async episode orchestration: research → script → scene plan → narration → transcription → assets → timeline → captions → render → QA → publish.
+- Real bounded Whisper-compatible transcription worker with immutable input checksum verification and deterministic transcript artifacts.
 - Built-in configurable HTTP adapters for generation stages plus a Forge-owned deterministic media QA worker.
+- Deterministic captions worker downstream of transcript/timeline provenance.
 - YouTube publishing adapter using resumable upload and OAuth refresh-token support.
 - Lightweight operational dashboard and gated Forge → Shorts handoff.
 
@@ -85,9 +87,23 @@ Timeline snapshots are validated and persisted through:
 - `POST /v1/episodes/:episodeId/timeline`
 - `GET /v1/episodes/:episodeId/timeline`
 
+## Production render
+
+`workflow:render` is handled by Forge's built-in FFmpeg renderer, not a configurable render provider. The handler re-reads the persisted immutable timeline version, verifies its SHA-256 content hash, validates source paths, runs bounded FFmpeg, preserves timeline gaps, produces H.264/AAC MP4 output, computes the output checksum, and persists the binary through Forge's existing content-addressed storage abstraction. The render artifact, storage object and render version retain the exact timeline version/hash provenance.
+
+Render version and artifact IDs are deterministic (`render:<job-id>`), so retries reconcile the same immutable artifact. Permanent input/provenance errors are not retried; execution failures use the existing durable lease/retry lifecycle. The worker uses `/var/lib/forge` as bounded scratch space while production binaries are persisted to the configured S3-compatible backend.
+
+```text
+FORGE_RENDER_WORKDIR=/var/lib/forge
+FORGE_RENDER_OUTPUT_DIR=/var/lib/forge/renders
+FORGE_RENDER_TIMEOUT_MS=900000
+```
+
+See [`docs/ffmpeg-render-worker.md`](docs/ffmpeg-render-worker.md) for the bounded GitHub Actions executor. It claims a specific durable render job, runs the same renderer, verifies the real MP4/checksum, uploads the MP4 and metadata as a bounded Actions artifact, and explicitly reconciles success/failure to the durable job queue.
+
 ## Configure production stage services
 
-The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline` and `workflow:render`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required.
+The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets` and `workflow:timeline`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required. It also registers `workflow:captions`, the local Whisper `workflow:transcription` handler and the built-in FFmpeg `workflow:render` handler.
 
 Configure these environment variables on the worker for provider-backed stages:
 - `FORGE_STAGE_RESEARCH_ENDPOINT`
@@ -96,7 +112,6 @@ Configure these environment variables on the worker for provider-backed stages:
 - `FORGE_STAGE_NARRATION_ENDPOINT`
 - `FORGE_STAGE_ASSETS_ENDPOINT`
 - `FORGE_STAGE_TIMELINE_ENDPOINT`
-- `FORGE_STAGE_RENDER_ENDPOINT`
 - `FORGE_STAGE_PROVIDER_TOKEN` (optional shared bearer token)
 
 Provider endpoints accept POST JSON with `contractVersion: "forge-stage-v1"`, `stage`, `capability`, `payload` and job metadata. JSON artifacts may use `artifact.content`. Binary artifacts must use `artifact.contentBase64`, with optional `id`, `versionId`, `contentHash`, `mediaType`, `inputVersionIds` and `metadata`. A provider may not supply a filesystem path or arbitrary URL for Forge to fetch. Non-2xx responses are retried only for timeout, 408, 429 and 5xx responses.
