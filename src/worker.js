@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+const path = require('node:path');
 const { JobQueue } = require('./persistence/job-queue');
 
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
@@ -44,15 +45,22 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
   return { queue, run, stop, workerId };
 }
 
+function loadHandlers() {
+  const modulePath = process.env.FORGE_WORKER_HANDLERS;
+  if (!modulePath) return {};
+  const loaded = require(path.resolve(modulePath));
+  return loaded.handlers || loaded;
+}
+
 if (require.main === module) {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '5', 10) });
-  const worker = createWorker({ pool });
+  const worker = createWorker({ pool, handlers: loadHandlers() });
   const shutdown = async () => { await worker.stop(); await pool.end(); process.exit(0); };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
   worker.run().catch(async (error) => { console.error('Forge worker failed:', error); await pool.end(); process.exit(1); });
 }
 
-module.exports = { createWorker };
+module.exports = { createWorker, loadHandlers };
