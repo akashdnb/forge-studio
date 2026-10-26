@@ -1,196 +1,169 @@
 # Forge Studio — Architecture
 
-**Status:** Architecture baseline  
-**Product:** Forge Studio  
-**Repository:** `akashdnb/forge-studio`  
+**Status:** Production architecture baseline
+**Product:** Forge Studio
+**Repository:** `akashdnb/forge-studio`
 **Audience:** Product, engineering, content operations, and future contributors
 
 ## 1. Purpose
 
-Forge Studio is an AI-assisted long-form educational video production system. Its primary goal is to turn a reviewed topic/script into a polished 15–20 minute educational video through a durable, inspectable pipeline rather than a single opaque generation request.
+Forge Studio is an AI-assisted long-form educational video production system. Its goal is to turn a topic and reviewed script into a polished 15–20 minute educational video through a durable, inspectable production pipeline rather than one opaque generation request.
 
-The initial target style is similar to educational history explainers such as *The Entire History of Germany in 45 minutes*: simple 2D illustrated animation, reusable characters and environments, maps, labels, camera movement, transitions, narration, and occasional richer video segments. The system should favor clarity, consistency, production speed, and controllability over cinematic visual complexity.
+The initial visual direction is a clear educational 2D style: reusable illustrated characters, simple backgrounds, maps, labels, camera pans/zooms, transitions, narration, archival material where appropriate, and occasional richer AI-video segments. The system should optimize for clarity, consistency, controllability, production speed, and cost rather than cinematic complexity.
 
-The first release should support one educational channel/genre well. The architecture must remain provider-agnostic so additional genres and channels—history, AI, geopolitics, recent technology, semiconductors, and others—can be added without redesigning the core pipeline.
+The first release should support one educational channel/genre exceptionally well. The core architecture must remain reusable for history, AI, geopolitics, technology, semiconductors, and other educational genres without redesigning the production engine.
 
 ## 2. Product Principles
 
-1. **Script-first.** The script is the source of editorial truth. Visuals support the narration rather than determining the story.
-2. **Human approval at the right boundary.** AI can generate and regenerate artifacts, but the user reviews the final episode before publishing.
-3. **Every stage is durable.** Intermediate outputs are persisted as versioned artifacts and can be retried independently.
-4. **Provider abstraction.** LLM, voice, image, and AI-video providers are adapters behind stable internal contracts.
-5. **Deterministic composition.** The final video is assembled by our renderer from an explicit scene/timeline representation.
-6. **Cheap by default.** Local/CPU-friendly 2D rendering is preferred; expensive generative video is used selectively.
-7. **Regeneration is granular.** A failed or weak scene should be replaceable without rebuilding an entire episode.
-8. **Observable and auditable.** Jobs, durations, provider calls, costs, failures, versions, and approvals must be inspectable.
-9. **Safe publishing.** Uploading is a distinct, explicit stage after approval and QA.
-10. **Reusable assets.** Characters, maps, locations, props, and effects form a persistent library rather than being regenerated unnecessarily.
+1. **Script-first:** the approved script is the editorial source of truth.
+2. **Human-in-the-loop:** AI generates and assists; the user owns editorial and final publishing decisions.
+3. **Durable stages:** every meaningful stage produces persisted, versioned artifacts and job records.
+4. **Provider abstraction:** LLM, TTS, image, video, storage, and publishing providers are adapters behind stable contracts.
+5. **Deterministic composition:** the final video is assembled from declarative scene/timeline data by our renderer.
+6. **Cheap by default:** prefer reusable assets and lightweight 2D composition over expensive generative video.
+7. **Granular regeneration:** a weak scene should be replaceable without rebuilding unrelated work.
+8. **Observable and auditable:** jobs, versions, costs, failures, approvals, and publishing events must be inspectable.
+9. **Safe publishing:** publishing is an explicit stage after QA and human approval.
+10. **Reusable assets:** approved characters, maps, locations, props, and effects form a persistent library.
+11. **No hidden state:** important workflow state lives in the backend, not only in browser state or worker memory.
+12. **Fail closed:** invalid dependencies, failed QA, missing approvals, and authorization failures block downstream actions.
 
-## 3. End-to-End Pipeline
+## 3. End-to-End Production Pipeline
 
 ```text
 TOPIC / BRIEF
-     |
-     v
-SCRIPT
-     |
-     v
-SCRIPT_ANALYSIS
-     |
-     v
-SCENE_PLAN
-     |
-     +------------------+
-     |                  |
-     v                  v
-NARRATION          VISUAL_ASSETS
-     |                  |
-     +--------+---------+
-              |
-              v
-          TIMELINE
-              |
-              v
-            RENDER
-              |
-              v
-              QA
-              |
-              v
-         HUMAN APPROVAL
-              |
-              v
-           PUBLISH
+      |
+      v
+RESEARCH + SOURCES
+      |
+      v
+SCRIPT DRAFT
+      |
+      v
+HUMAN SCRIPT REVIEW
+      |
+      v
+SCRIPT ANALYSIS
+      |
+      v
+SCENE PLAN
+      |
+      +---------------------+
+      |                     |
+      v                     v
+NARRATION PLAN        VISUAL PLAN
+      |                     |
+      v                     v
+VOICE / AUDIO         ASSET RESOLUTION
+      |                     |
+      +----------+----------+
+                 |
+                 v
+             TIMELINE
+                 |
+                 v
+              RENDER
+                 |
+                 v
+            AUTOMATED QA
+                 |
+                 v
+          HUMAN FINAL REVIEW
+                 |
+                 v
+             APPROVAL
+                 |
+                 v
+             PUBLISH
+                 |
+                 v
+       LONG-FORM DISTRIBUTION
+                 |
+                 v
+       SHORTS HANDOFF (later)
 ```
 
-Each stage should create a durable artifact and a job/result record. A later stage consumes an immutable version of an earlier artifact. A retry should not silently mutate historical output.
+Every stage creates durable state. A later stage consumes immutable versions of its dependencies. Retries create new attempts and must not silently mutate historical artifacts.
 
-### Stage responsibilities
+## 4. Production Graph
 
-- **Script:** create or import the editorial script, then allow human editing.
-- **Script analysis:** identify sections, claims, entities, locations, dates, tone, pacing, and likely visual opportunities.
-- **Scene plan:** convert script passages into timed scenes with narration, visual type, asset requirements, onscreen text, transitions, and camera instructions.
-- **Narration:** generate voice audio from approved narration text, including timing metadata where available.
-- **Visual assets:** retrieve reusable assets or generate missing illustrations/maps/images/video clips.
-- **Timeline:** resolve scene durations, audio, visuals, transitions, and overlays into a renderable composition.
-- **Render:** render the episode using the deterministic 2D composition engine plus selected special-video clips.
-- **QA:** validate duration, audio/video integrity, missing assets, scene timing, text overflow, and other production constraints.
-- **Approval:** present the rendered candidate to the user and require explicit approval before publication.
-- **Publish:** upload the approved artifact to the configured destination, initially YouTube.
+Forge Studio is not a collection of independent generators. The central abstraction is an **Episode Production Graph**.
 
-## 4. Core Architecture
+```text
+Channel
+  |
+  +--> Project
+        |
+        +--> Episode
+              |
+              +--> Research Snapshot
+              |
+              +--> Script Version
+              |
+              +--> Scene Plan Version
+              |       |
+              |       +--> Scene 1
+              |       +--> Scene 2
+              |       +--> ...
+              |
+              +--> Narration Versions
+              |
+              +--> Asset Versions
+              |
+              +--> Timeline Version
+              |
+              +--> Render Version
+              |
+              +--> QA Result
+              |
+              +--> Approval
+              |
+              +--> Publish Run
+```
 
-### 4.1 Frontend
+Each node has a stable identity and version. Edges record dependencies. When a node changes, Forge determines which downstream nodes are stale rather than regenerating the entire episode.
 
-Use **Next.js / React / TypeScript / Tailwind CSS** for the studio UI.
+Example: changing Scene 12 should normally invalidate Scene 12-dependent timeline/render artifacts, not the approved script, unrelated scenes, or reusable assets.
 
-The frontend is responsible for:
+## 5. Project, Channel, Episode, and Version Model
 
-- episode creation and project management;
-- script editing and review;
-- scene-plan inspection;
-- asset browsing and selection;
-- generation status and job progress;
-- scene-level regeneration;
-- timeline/preview inspection;
-- render and QA results;
-- final approval;
-- publishing configuration and history.
+### Channel
 
-The frontend must not contain business-critical orchestration logic. It calls the API and subscribes/polls for job state.
+A channel is a publishing identity and a production style configuration. It contains defaults for:
 
-### 4.2 API and Orchestrator
+- genre;
+- narration voice;
+- visual style;
+- resolution/frame rate;
+- subtitle style;
+- intro/outro;
+- music policy;
+- thumbnail conventions;
+- YouTube destination;
+- publishing defaults.
 
-Use **Python / FastAPI** as the primary API and orchestration layer.
+### Project
 
-Responsibilities include:
+A project groups related episodes and shared assets. It can represent a series, historical period, technology theme, or other editorial collection.
 
-- authentication and project authorization;
-- episode lifecycle management;
-- stage/job creation;
-- artifact versioning;
-- provider selection;
-- validation of stage contracts;
-- retries and idempotency;
-- publishing authorization;
-- audit/event logging.
+### Episode
 
-Long-running work must run asynchronously. API requests should create or inspect jobs rather than synchronously executing expensive generation/render operations.
+An episode is the durable production unit. It owns the production graph and moves through an explicit state machine.
 
-### 4.3 Database
+### Versions
 
-Use **PostgreSQL** as the durable system of record.
+Scripts, scene plans, scenes, assets, narration, timelines, renders, thumbnails, and subtitles are versioned. The system must preserve old versions so the user can compare, roll back, audit, or reproduce an earlier result.
 
-Core entities should include, at minimum:
+## 6. Episode State Machine
 
-- `projects`
-- `channels`
-- `episodes`
-- `episode_versions`
-- `scripts`
-- `script_versions`
-- `scenes`
-- `scene_versions`
-- `assets`
-- `asset_versions`
-- `jobs`
-- `job_attempts`
-- `artifacts`
-- `provider_runs`
-- `render_runs`
-- `qa_runs`
-- `approvals`
-- `publish_runs`
-- `audit_events`
-
-Exact schema should evolve with implementation, but every durable object should have stable IDs, timestamps, ownership/project scope, and version information where applicable.
-
-### 4.4 Object Storage
-
-Use S3-compatible object storage for large immutable artifacts:
-
-- generated images;
-- SVGs;
-- audio files;
-- source video clips;
-- rendered videos;
-- thumbnails;
-- subtitles/captions;
-- intermediate render outputs;
-- exported project bundles.
-
-Development can use **MinIO**. Production can use an S3-compatible provider without changing application contracts.
-
-Database rows store metadata and object references; large binary media should not be stored directly in PostgreSQL.
-
-### 4.5 Queue / Workers
-
-Use **Redis** as the initial queue/backend and a Python worker framework such as **Celery or Dramatiq**.
-
-Jobs should be explicit and idempotent. Examples:
-
-- `analyze_script`
-- `plan_scenes`
-- `generate_narration`
-- `generate_image`
-- `generate_video_clip`
-- `prepare_assets`
-- `build_timeline`
-- `render_episode`
-- `run_qa`
-- `publish_episode`
-
-Workers must persist state transitions and errors. A worker crash must leave enough state to safely retry the job.
-
-## 5. Episode and Artifact Model
-
-An episode is a durable production unit. It should move through explicit states rather than relying on implicit UI state.
-
-Suggested lifecycle:
+Recommended lifecycle:
 
 ```text
 DRAFT
-  -> SCRIPT_READY
+  -> RESEARCH_READY
+  -> SCRIPT_DRAFT
+  -> SCRIPT_REVIEW
+  -> SCRIPT_APPROVED
   -> PLANNED
   -> GENERATING
   -> READY_TO_RENDER
@@ -202,27 +175,71 @@ DRAFT
   -> PUBLISHED
 ```
 
-Failure/cancellation should be represented explicitly rather than destroying prior successful artifacts.
+Exceptional states should include `FAILED`, `CANCELLED`, and `BLOCKED` without deleting successful historical artifacts.
 
-### Artifact versioning
+State transitions are backend-enforced. The UI, MCP, workers, and future integrations must all use the same transition rules.
 
-Every generated or edited artifact should have a version. Examples:
+Examples:
 
-- Script v3
-- Scene 12 plan v2
-- Narration v1
-- Character asset v4
-- Render v7
+- A script cannot become `SCRIPT_APPROVED` without an approval record.
+- A render cannot become `APPROVED` when required deterministic QA has failed unless an authorized override is recorded.
+- A video cannot enter `PUBLISHING` without an approval for that exact render version.
+- A worker retry cannot move an episode backward and overwrite a newer successful result.
 
-A new generation should create a new version and preserve the previous version. The episode records which versions are currently selected for composition.
+## 7. Research and Fact-Checking Architecture
 
-This makes scene regeneration safe and allows the user to compare or roll back outputs.
+Educational content requires provenance, not just generated prose.
 
-## 6. Scene Representation
+Research should be represented as a versioned snapshot containing:
 
-The scene plan is the central contract between AI planning and the renderer.
+- source URL/reference;
+- source title and publisher;
+- retrieval timestamp;
+- relevant excerpt/claim evidence where legally appropriate;
+- source type;
+- reliability metadata;
+- claims supported by the source;
+- conflicts or uncertainty.
 
-Example:
+Script claims can reference research evidence. The system should distinguish:
+
+```text
+SUPPORTED
+CONTESTED
+UNCERTAIN
+EDITORIAL_INTERPRETATION
+UNVERIFIED
+```
+
+Research snapshots should be immutable once used to approve a script. A later research refresh creates a new snapshot and can trigger an explicit editorial review rather than silently changing an approved episode.
+
+## 8. Script and Editorial Workflow
+
+The user should be able to:
+
+1. Create a topic/episode brief.
+2. Generate or import research.
+3. Generate a script draft.
+4. Edit the script manually or with AI assistance.
+5. Inspect claims and sources.
+6. Approve the script for production.
+7. Generate a scene plan.
+8. Inspect/edit scenes.
+9. Generate narration and visual assets.
+10. Preview the timeline.
+11. Render a candidate.
+12. Review automated QA.
+13. Watch and review the final candidate.
+14. Approve the exact render.
+15. Publish.
+
+AI assistance must never silently replace the canonical user-edited script.
+
+## 9. Scene Representation
+
+The scene plan is the contract between planning and rendering.
+
+Example planning schema:
 
 ```json
 {
@@ -236,7 +253,7 @@ Example:
 }
 ```
 
-For rendering, this can be expanded into a richer scene composition:
+A renderable scene expands this into declarative composition data:
 
 ```json
 {
@@ -262,34 +279,72 @@ For rendering, this can be expanded into a richer scene composition:
 }
 ```
 
-The schema must remain declarative. The renderer should interpret the scene rather than receiving arbitrary executable code from an AI model.
+The schema must be declarative. AI models should not emit arbitrary executable rendering code.
 
-## 7. 2D Animation / Rendering Engine
+## 10. Scene-Level Regeneration and Dependency Invalidation
 
-The primary rendering engine should be **Remotion + React + TypeScript + SVG + FFmpeg**.
+Granular regeneration is a core requirement.
 
-The engine should provide reusable primitives such as:
+If Scene 12 needs a new illustration:
 
-- static image/SVG display;
+```text
+Scene 12 v2
+   |
+   +--> Asset A v3
+   +--> Audio 12 v1
+   +--> Timeline v4
+   +--> Render v7
+```
+
+A new Scene 12 version creates a new node and marks only dependent outputs stale. The system must preserve the previous scene, asset, timeline, and render versions.
+
+Dependency invalidation should be explicit and deterministic. A regeneration request must explain which artifacts will be regenerated and which will be reused.
+
+## 11. 2D Animation and Rendering Engine
+
+The primary renderer should be **Remotion + React + TypeScript + SVG + FFmpeg**.
+
+Reusable primitives should include:
+
+- static image/SVG placement;
 - character placement;
+- idle/talking character states;
 - simple character motion;
-- talking/idle animation states;
-- camera pan and zoom;
-- map highlighting;
-- map region transitions;
+- camera pan/zoom;
+- map highlighting and region transitions;
 - labels and captions;
-- arrows/lines/callouts;
+- arrows, lines, callouts;
 - fades and cuts;
-- simple transitions;
+- transitions;
 - audio synchronization;
-- archival/video clip insertion;
+- archival/source video insertion;
 - occasional AI-video insertion.
 
-A scene should be renderable from a deterministic scene JSON document plus immutable asset references.
+The default path is lightweight 2D composition. AI-generated video is a special visual mode, not the foundation of every scene.
 
-### Timeline concept
+## 12. Timeline and Composition Architecture
 
-A final episode can combine different visual modes:
+A timeline combines independent tracks:
+
+```text
+VIDEO TRACKS
+  scene compositions
+  archival clips
+  AI-video clips
+
+AUDIO TRACKS
+  narration
+  music
+  sound effects
+
+OVERLAY TRACKS
+  captions
+  labels
+  maps/callouts
+  branding
+```
+
+Example:
 
 ```text
 10:00 FINAL VIDEO
@@ -300,11 +355,11 @@ A final episode can combine different visual modes:
 └── ...
 ```
 
-The renderer should not assume every scene is generated video. The default path is lightweight 2D composition.
+The timeline must resolve all scene durations, transitions, audio boundaries, captions, and overlays into a deterministic render plan.
 
-## 8. Asset Library
+## 13. Asset Library and Asset Intelligence
 
-Assets should be reusable across episodes and organized by semantic type:
+Assets are persistent production resources rather than disposable generation outputs.
 
 ```text
 assets/
@@ -312,29 +367,70 @@ assets/
 ├── locations/
 ├── maps/
 ├── props/
+├── backgrounds/
 └── effects/
 ```
 
-Each asset should carry metadata such as:
+Each asset should store:
 
-- asset ID and version;
-- type/category;
-- source/provider;
-- prompt or source attribution where applicable;
+- stable ID and version;
+- semantic type/category;
+- tags and aliases;
+- provider/source;
+- prompt/source attribution;
 - dimensions/aspect ratio;
-- visual style/version;
+- visual style identifier;
 - license/usage metadata;
-- storage location;
+- object-storage location;
 - creation cost;
-- creation timestamp.
+- creation timestamp;
+- approval status.
 
-The asset system should support aliases/tags so a planner can request concepts such as `bismarck`, `19th-century-german-map`, or `imperial-germany` and reuse an existing approved asset.
+Asset search should support concepts such as `bismarck`, `19th-century-german-map`, or `imperial-germany` and prefer approved reusable assets before generating new ones.
 
-## 9. AI Provider Architecture
+## 14. Visual Consistency System
 
-Provider integrations should be adapters, not scattered API calls throughout the application.
+The system should enforce a channel-level visual language.
 
-Suggested interfaces:
+A visual style configuration can define:
+
+- illustration style;
+- palette constraints;
+- line/shape characteristics;
+- character proportions;
+- map style;
+- typography;
+- background conventions;
+- camera-motion conventions;
+- transition vocabulary.
+
+Generation prompts should be assembled from the channel style plus scene-specific requirements. Reference assets can be used for character/location consistency where supported by the provider.
+
+Consistency should be checked at the asset and episode level. The system should prefer reusing approved canonical characters and locations over generating visually unrelated replacements.
+
+## 15. Narration and Audio Architecture
+
+Narration is its own versioned artifact.
+
+The audio pipeline should support:
+
+- TTS provider adapters;
+- voice profiles;
+- pronunciation overrides;
+- SSML/prosody where supported;
+- sentence/word timing metadata where available;
+- background music;
+- sound effects;
+- mixing;
+- loudness normalization;
+- silence detection;
+- subtitle/caption generation.
+
+Audio generation should be keyed to an exact narration-text version. If narration text changes, the system should mark dependent audio/timeline/render artifacts stale.
+
+## 16. AI Provider Architecture
+
+Providers must be adapters behind stable internal interfaces:
 
 ```text
 LLMProvider
@@ -345,522 +441,608 @@ StorageProvider
 PublishingProvider
 ```
 
-Each provider adapter should normalize:
+A provider run should record:
 
-- request;
-- response;
-- provider job ID;
+- provider;
 - model/version;
+- request parameters safe to retain;
+- provider job ID;
 - latency;
 - token/character/media usage;
 - estimated/actual cost;
-- failure category;
-- raw provider metadata where safe.
+- normalized failure category;
+- retry count;
+- output artifact IDs.
 
-This allows the system to switch providers without changing episode logic.
+### Provider selection and fallback
 
-### LLM
+Provider choice should be policy-driven. A policy can consider:
 
-Use an OpenAI-compatible LLM adapter initially for:
+- quality tier;
+- cost ceiling;
+- latency;
+- availability;
+- supported duration/resolution;
+- channel requirements;
+- current provider health.
 
-- script drafting;
-- script analysis;
-- scene planning;
-- visual prompts;
-- metadata generation;
-- QA assistance.
+Fallback must be explicit and auditable. A failed provider call should not silently switch to another provider in a way that changes important output characteristics without recording the decision.
 
-The system must still preserve human-editable script text as the canonical editorial artifact.
+Candidate AI-video providers include Wan, Kling, Seedance, HunyuanVideo, or premium providers. These remain interchangeable adapters rather than hard dependencies of the renderer.
 
-### Voice
+## 17. Cost and Usage Ledger
 
-Use an adapter for ElevenLabs or another selected TTS provider. Store generated audio as an immutable artifact and record the voice/model/settings used.
+Every billable provider operation should create a usage record.
 
-### Image
+Track:
 
-Use an image-generation adapter for missing illustrations. Generated assets should be added to the asset library where appropriate rather than regenerated on every episode.
+- episode/project/channel;
+- provider and model;
+- operation type;
+- requested units;
+- actual units when available;
+- estimated cost;
+- actual cost when available;
+- retry/regeneration number;
+- timestamp.
 
-### Video
+The product should be able to answer:
 
-AI video generation is a specialized provider path, not the default scene renderer. Candidate providers can include Alibaba Wan, Kling, Seedance, HunyuanVideo, or premium providers as adapters. Provider selection should be configurable and should account for cost, quality, duration, and availability.
+- What did this episode cost?
+- Which scenes cost the most?
+- How much was spent on retries?
+- Which provider is cheapest for this workload?
+- How much does an average episode cost by channel?
 
-## 10. Cost and Efficiency Strategy
+Cost controls should support per-episode and per-provider budgets and warnings before expensive operations.
 
-The product should optimize for a large amount of useful content per unit cost.
+## 18. QA Architecture
 
-Preferred hierarchy:
+QA is a first-class production stage.
 
-1. Reuse an existing approved asset.
-2. Generate a lightweight SVG/illustration or compose existing assets.
-3. Generate a still image and animate it with the renderer.
-4. Use archival/source video when licensed and appropriate.
-5. Use AI-generated video only where motion materially improves the story.
+Deterministic checks should include:
 
-Rendering locally is comparatively cheap. Expensive AI-video generation should be reserved for special scenes and regenerated only when necessary.
+- render exists and is readable;
+- expected duration within tolerance;
+- valid video stream;
+- valid audio stream;
+- no missing asset references;
+- scene durations reconcile;
+- timeline overlaps are valid;
+- supported resolution/frame rate;
+- text stays inside configured safe bounds where detectable;
+- narration/audio synchronization within tolerance;
+- all planned scenes are represented;
+- subtitles are structurally valid;
+- output storage reference is valid;
+- thumbnail is valid;
+- final media can be decoded.
 
-Every provider run should record cost information when available so episode cost can be estimated and audited.
+AI-assisted QA can inspect representative frames and audio transcripts for obvious problems, but deterministic checks remain authoritative for machine-verifiable constraints.
 
-## 11. Script and Editorial Workflow
+Failed QA blocks approval by default. Overrides require authorization and an audit record.
 
-The user should be able to:
+## 19. Human Approval Gates
 
-1. Create an episode brief/topic.
-2. Generate a draft script.
-3. Edit/revise the script with AI assistance.
-4. Mark the script as approved for planning.
-5. Generate and inspect the scene plan.
-6. Edit individual scene descriptions or timings.
-7. Generate narration and assets.
-8. Preview the assembled timeline.
-9. Render a full candidate.
-10. Review QA results and the video.
-11. Approve the final candidate.
-12. Publish.
+There are two important approval boundaries.
 
-AI should assist the user at each step, but a generation action must not silently bypass explicit editorial approval boundaries.
-
-## 12. Scene-Level Regeneration
-
-A key requirement is partial regeneration.
-
-If scene 12 has a poor illustration, the user should be able to regenerate scene 12 without:
-
-- rewriting the entire script;
-- regenerating all narration;
-- regenerating unrelated scenes;
-- rebuilding reusable assets that already exist.
-
-The system should create a new scene version, update the episode's selected scene version, invalidate only dependent downstream artifacts, and preserve prior render history.
-
-Dependency example:
+### Script approval
 
 ```text
-Script v3
-   |
-   +--> Scene Plan v4
-           |
-           +--> Scene 12 v2
-           |      |
-           |      +--> Asset A v3
-           |      +--> Audio 12 v1
-           |
-           +--> Scene 13 v1
+Research -> Draft Script -> Human Review -> SCRIPT_APPROVED
 ```
 
-Changing Scene 12 should invalidate only affected timeline/render outputs.
+This protects editorial intent before expensive production begins.
 
-## 13. QA Architecture
+### Final approval
 
-QA is a first-class pipeline stage.
+```text
+Render -> Automated QA -> Human Watch/Review -> APPROVED
+```
 
-Automated checks should include:
+The approval record must reference the exact render version, QA result, approver, timestamp, and optional notes.
 
-- video file exists and is readable;
-- expected duration within tolerance;
-- audio track exists and is readable;
-- no missing scene assets;
-- scene durations sum correctly;
-- no invalid timeline overlaps;
-- supported resolution/frame rate;
-- text stays inside safe bounds where detectable;
-- audio/video synchronization within tolerance;
-- render contains every planned scene;
-- output storage reference is valid.
+Approval is immutable. If the selected render changes, the previous approval no longer authorizes the new render.
 
-Future AI-assisted QA can inspect frames for obvious visual problems, but AI QA should supplement deterministic checks rather than replace them.
+## 20. Publishing Architecture
 
-A failed QA result should block approval/publishing unless explicitly overridden by an authorized user, with the override recorded.
+Publishing is separate from rendering and approval.
 
-## 14. Human Approval and Publishing
+The initial destination is YouTube through a `PublishingProvider` abstraction.
 
-Publishing must be separate from rendering.
-
-The final approval record should identify:
-
-- episode;
-- exact render artifact/version;
-- approver;
-- approval timestamp;
-- QA status;
-- optional notes.
-
-Only an approved render can enter the publishing stage.
-
-Initial publishing target: YouTube through the YouTube Data API. Publishing should be implemented behind `PublishingProvider` so other destinations can be added later.
-
-Publishing must be idempotent. Retries must not accidentally create duplicate uploads where the destination API supports resumable/idempotent workflows.
-
-## 15. YouTube Publishing Model
-
-A publish run should capture:
+A publish run stores:
 
 - destination channel;
+- approved render artifact/version;
 - title;
 - description;
-- tags/category as configured;
-- thumbnail artifact;
-- captions/subtitles if available;
-- visibility setting;
+- tags/category;
+- thumbnail;
+- subtitles/captions;
+- visibility/scheduling configuration;
 - external upload ID/URL;
-- publish status;
-- errors and retry state.
+- status;
+- retry/error state;
+- reconciliation metadata.
 
-Credentials/tokens must be stored through a secure secret mechanism and never committed to the repository or included in logs.
+Publishing must be idempotent and resumable where the destination supports it. A retry must not accidentally create duplicate uploads.
 
-## 16. MCP Role
+Credentials and OAuth tokens must use secure secret storage and never be committed or logged.
 
-MCP should be treated as a controlled interface to Forge Studio, not the core execution engine.
+## 21. Publishing Reconciliation
 
-MCP can expose safe operations such as:
+The system must distinguish internal intent from external destination state.
 
-- create/list episodes;
+Example:
+
+```text
+Forge says: PUBLISHING
+       |
+       v
+YouTube upload started
+       |
+       +--> network failure
+       |
+       v
+Reconcile external upload state
+       |
+       +--> upload exists -> record external ID
+       |
+       +--> upload absent -> retry safely
+```
+
+This prevents a worker timeout from causing duplicate publication.
+
+## 22. MCP Architecture
+
+MCP is a controlled interface to Forge Studio, not the core job engine.
+
+MCP may expose operations such as:
+
+- create/list projects and episodes;
 - inspect pipeline state;
-- request generation;
+- inspect research and sources;
+- request script generation;
 - inspect scene plans;
 - regenerate a scene;
 - inspect QA;
 - request approval;
 - publish an already-approved episode.
 
-Core jobs should continue to run through the API/queue/worker architecture. This prevents an MCP client disconnect from terminating or corrupting production work.
+MCP requests must call the same authorization and state-transition services as the web UI. Disconnecting an MCP client must not terminate production work.
 
-MCP tools should enforce authorization and the same state-transition rules as the web UI/API.
+## 23. API, Queue, and Worker Architecture
 
-## 17. Reliability and Idempotency
+Use **FastAPI** for the primary API and **Redis + Celery or Dramatiq** for asynchronous work.
 
-Every expensive stage must be retry-safe.
-
-Recommended pattern:
-
-1. Create a durable job with an idempotency key.
-2. Acquire/validate the required input artifact versions.
-3. Execute the provider/render operation.
-4. Upload output to immutable storage.
-5. Persist provider metadata and artifact record.
-6. Atomically mark the job successful.
-
-If a worker dies after provider execution but before state persistence, recovery should be able to reconcile provider job IDs or safely retry according to provider semantics.
-
-No stage should overwrite an existing immutable artifact.
-
-## 18. Security
-
-Security requirements include:
-
-- authenticated API access;
-- project/channel/episode authorization;
-- secrets kept outside source control;
-- signed or scoped object-storage access where required;
-- provider API keys never exposed to the browser;
-- upload/publish permissions separated from general editing permissions;
-- audit logging for approval and publishing actions;
-- validation of externally supplied URLs and media metadata;
-- resource limits on generated/rendered jobs;
-- protection against arbitrary executable scene definitions.
-
-The declarative scene format is important for security: AI output describes a composition and cannot directly execute arbitrary server-side code.
-
-## 19. Observability
-
-The system should expose:
-
-- job state and duration;
-- queue latency;
-- provider latency/error rates;
-- render duration;
-- artifact sizes;
-- episode production cost;
-- retry counts;
-- QA failures;
-- publishing failures.
-
-Every job should have correlation identifiers that allow an episode to be traced across API, queue, provider, storage, render, and publish stages.
-
-## 20. Local Development Architecture
-
-A local developer environment should be runnable with Docker Compose and include:
+Example jobs:
 
 ```text
-Next.js frontend
-FastAPI API/orchestrator
-Worker process
-PostgreSQL
-Redis
-MinIO
-Remotion renderer
+analyze_research
+analyze_script
+plan_scenes
+generate_narration
+generate_image
+generate_video_clip
+resolve_assets
+build_timeline
+render_episode
+run_deterministic_qa
+run_ai_qa
+publish_episode
+reconcile_publish
 ```
 
-Provider calls should be configurable so development can use mocks/fakes without spending money.
+API calls should create or inspect jobs rather than performing long-running generation or rendering synchronously.
 
-A minimal local demo should eventually be able to:
+Workers must persist job state before and after external calls and use idempotency keys for expensive operations.
 
-1. create a sample episode;
-2. load a sample script;
-3. generate a deterministic scene plan using fixtures;
-4. render a simple 2D scene;
-5. run QA;
-6. produce a playable MP4 artifact.
+## 24. Database Architecture
 
-## 21. Suggested Repository Structure
+Use **PostgreSQL** as the system of record.
+
+Minimum conceptual entities:
+
+```text
+channels
+projects
+episodes
+episode_versions
+research_snapshots
+research_sources
+claims
+scripts
+script_versions
+scenes
+scene_versions
+assets
+asset_versions
+artifacts
+artifact_dependencies
+jobs
+job_attempts
+provider_runs
+usage_ledger
+render_runs
+qa_runs
+approvals
+publish_runs
+audit_events
+```
+
+Every tenant/project-scoped record should carry explicit ownership scope. Relationships should be constrained so cross-project artifact references cannot occur accidentally.
+
+## 25. Object Storage and Artifact Lifecycle
+
+Use S3-compatible object storage for large media. Development can use MinIO.
+
+Store:
+
+- images/SVGs;
+- audio;
+- source/archival clips;
+- rendered videos;
+- thumbnails;
+- captions;
+- intermediate outputs;
+- exported bundles.
+
+Database records contain metadata, checksums, MIME type, size, storage key, and version information.
+
+Artifacts should have lifecycle classes:
+
+```text
+ACTIVE
+SUPERSEDED
+ARCHIVED
+DELETABLE
+DELETED
+```
+
+Garbage collection must never delete an artifact still referenced by an approved render, published video, audit record, or active version. Cleanup should be asynchronous and auditable.
+
+## 26. Security and Multi-Tenancy
+
+Even if the first deployment is single-user, the architecture should preserve clean tenant/project boundaries.
+
+Required controls:
+
+- authentication;
+- authorization at project/channel/episode level;
+- secure provider credentials;
+- signed or access-controlled media URLs;
+- secret redaction in logs;
+- input validation for provider parameters;
+- safe handling of uploaded files;
+- audit events for sensitive operations;
+- no arbitrary executable code in AI-generated scene definitions.
+
+Future multi-user operation should not require rewriting the artifact or job model.
+
+## 27. Observability
+
+Observability should cover both software health and production economics.
+
+Metrics should include:
+
+- queue depth;
+- job latency;
+- job failure/retry rate;
+- provider latency/error rate;
+- generation cost;
+- render duration;
+- render failure rate;
+- QA failure rate;
+- approval turnaround;
+- publish success/failure;
+- storage growth;
+- episode production time.
+
+Logs should include correlation IDs such as `project_id`, `episode_id`, `job_id`, `artifact_id`, and `provider_run_id` while excluding secrets and sensitive tokens.
+
+## 28. Reliability, Retries, and Idempotency
+
+Every expensive operation must be retry-safe.
+
+A job should have:
+
+- deterministic idempotency key;
+- attempt count;
+- timeout policy;
+- retryable/non-retryable classification;
+- provider request ID when available;
+- output artifact reference;
+- failure reason;
+- timestamps.
+
+External calls must be separated from state commits carefully enough that a timeout can be reconciled rather than blindly repeated.
+
+A worker crash should leave the system in a recoverable state. Historical successful artifacts must never be overwritten by a failed retry.
+
+## 29. Failure and Recovery Semantics
+
+Failures should be classified, for example:
+
+```text
+VALIDATION_ERROR
+AUTH_ERROR
+RATE_LIMIT
+PROVIDER_UNAVAILABLE
+PROVIDER_REJECTED
+TIMEOUT
+STORAGE_ERROR
+RENDER_ERROR
+QA_FAILURE
+PUBLISH_ERROR
+UNKNOWN
+```
+
+The classification determines retry behavior. For example, validation errors should normally fail fast; transient provider/network failures can retry with backoff; publish timeouts should reconcile external state before retrying.
+
+Cancellation should stop queued work where safe but must not delete already-created artifacts.
+
+## 30. Channel Templates
+
+A channel template packages recurring production decisions:
+
+```text
+Channel Template
+├── Editorial rules
+├── Research requirements
+├── Narrator/voice
+├── Visual style
+├── Character style
+├── Scene templates
+├── Intro/outro
+├── Music/SFX policy
+├── Subtitle style
+├── Thumbnail rules
+└── YouTube defaults
+```
+
+This enables future templates for history, AI, geopolitics, semiconductors, technology, and other genres without changing the production engine.
+
+## 31. Shorts Handoff Boundary
+
+Long-form production and Shorts production should remain separate systems.
+
+Forge Studio owns:
+
+- long-form episode;
+- scene metadata;
+- transcript/narration;
+- timestamps;
+- source assets;
+- final long-form render;
+- approved publishing metadata.
+
+The Shorts system can consume a stable export containing:
+
+```text
+episode_id
+render_id
+transcript
+scene timestamps
+candidate highlights
+source asset references
+caption metadata
+```
+
+The handoff should be asynchronous and versioned. Forge Studio should not depend on Shorts being available for long-form production to complete.
+
+## 32. Storage and Reproducibility
+
+A published episode should be reproducible from immutable references:
+
+```text
+Episode Version
+ + Script Version
+ + Research Snapshot
+ + Scene Plan Version
+ + Selected Scene Versions
+ + Asset Versions
+ + Audio Versions
+ + Timeline Version
+ + Renderer Version
+ + Provider Run Metadata
+ = Render
+```
+
+The renderer version and important configuration must be recorded with each render. This allows later debugging and controlled reproduction.
+
+## 33. Testing Strategy
+
+Testing must validate both individual components and production invariants.
+
+### Unit tests
+
+- state transitions;
+- dependency invalidation;
+- scene schema validation;
+- provider adapters;
+- cost calculation;
+- authorization;
+- idempotency keys;
+- publish reconciliation;
+- timeline duration calculations.
+
+### Integration tests
+
+- PostgreSQL persistence;
+- Redis job lifecycle;
+- object storage;
+- provider adapter mocks;
+- renderer invocation;
+- QA pipeline;
+- publishing mock/reconciliation.
+
+### End-to-end tests
+
+At least one fixture episode should flow through:
+
+```text
+script -> scene plan -> assets -> narration -> timeline -> render -> QA -> approval
+```
+
+The test must prove that a single scene can be regenerated without regenerating unrelated scenes.
+
+## 34. Architectural Acceptance Criteria
+
+Before production implementation is considered complete, the system should demonstrate:
+
+1. A complete episode can move through the state machine.
+2. Script approval is explicit and auditable.
+3. Research claims can retain source provenance.
+4. Scene plans are declarative and validated.
+5. Assets are reusable and versioned.
+6. Scene regeneration invalidates only affected dependencies.
+7. Narration, visuals, music, SFX, captions, and scenes compose deterministically.
+8. Renders are reproducible from immutable inputs and renderer configuration.
+9. Deterministic QA blocks invalid publication.
+10. Final approval is tied to an exact render version.
+11. Provider failures can retry/fallback according to policy.
+12. Episode and provider costs are measurable.
+13. Publishing is idempotent and externally reconciled.
+14. Secrets never enter source control or logs.
+15. Project/channel boundaries are enforced.
+16. A production failure can resume without destroying successful work.
+17. The long-form output can be handed off to the Shorts system without coupling the two runtimes.
+
+## 35. Initial Technology Stack
+
+| Layer | Initial choice |
+|---|---|
+| Web UI | Next.js / React / TypeScript / Tailwind |
+| API | Python / FastAPI |
+| Database | PostgreSQL |
+| Queue | Redis |
+| Workers | Celery or Dramatiq |
+| Object storage | MinIO locally, S3-compatible in production |
+| Renderer | Remotion / React / TypeScript / SVG / FFmpeg |
+| LLM | Provider adapter, initially OpenAI-compatible |
+| Voice | TTS provider adapter, initially ElevenLabs-compatible |
+| Images | Image provider adapter |
+| AI video | Video provider adapters such as Wan/Kling/Seedance/HunyuanVideo |
+| Publishing | YouTube Data API through `PublishingProvider` |
+| MCP | Controlled API/MCP layer over the core services |
+
+These choices are architectural defaults, not irreversible dependencies. Interfaces should permit replacement without changing episode/domain logic.
+
+## 36. Suggested Repository Structure
 
 ```text
 forge-studio/
 ├── apps/
 │   ├── web/                 # Next.js studio UI
-│   └── api/                 # FastAPI application
-├── workers/                 # async job workers
+│   ├── api/                 # FastAPI API
+│   └── renderer/            # Remotion renderer
 ├── packages/
-│   ├── schemas/             # shared domain contracts
-│   └── renderer/            # Remotion composition
-├── assets/
-│   └── examples/            # small development fixtures only
+│   ├── schemas/             # shared scene/timeline contracts
+│   ├── providers/           # provider interfaces/adapters
+│   └── ui/                  # shared UI components if needed
+├── workers/                 # async production jobs
+├── migrations/              # database migrations
 ├── infra/
 │   ├── docker/
-│   └── migrations/
-├── tests/
-│   ├── unit/
-│   └── integration/
+│   └── compose/
+├── assets/                  # seed/development assets only
 ├── docs/
 │   └── ARCHITECTURE.md
-├── docker-compose.yml
-├── .env.example
+├── tests/
 └── README.md
 ```
 
-The exact monorepo tooling can be adjusted during implementation. Domain contracts should remain language-neutral where practical.
+Large generated media must remain in object storage rather than the Git repository.
 
-## 22. Testing Strategy
-
-### Unit tests
-
-Cover:
-
-- state transitions;
-- scene-schema validation;
-- timeline duration calculation;
-- asset dependency resolution;
-- idempotency keys;
-- provider adapters;
-- cost calculations;
-- QA rules.
-
-### Integration tests
-
-Cover:
-
-- API -> database;
-- API -> queue -> worker;
-- artifact storage;
-- scene regeneration and dependency invalidation;
-- render -> QA;
-- approval -> publish gating.
-
-### End-to-end test
-
-Maintain a tiny deterministic sample episode that runs without paid external providers. The complete pipeline should be executable in CI using fakes for LLM, TTS, image/video generation, and publishing.
-
-## 23. Failure Handling
-
-Failures must be classified rather than stored as arbitrary strings.
-
-Examples:
-
-- `VALIDATION_ERROR`
-- `AUTHENTICATION_ERROR`
-- `RATE_LIMITED`
-- `PROVIDER_UNAVAILABLE`
-- `PROVIDER_REJECTED`
-- `STORAGE_ERROR`
-- `RENDER_ERROR`
-- `QA_FAILED`
-- `PUBLISH_FAILED`
-- `CANCELLED`
-
-Retry policies should differ by category. Validation and authorization failures should normally not be blindly retried. Temporary provider/storage failures may be retried with bounded exponential backoff.
-
-## 24. Configuration and Environments
-
-Use environment-specific configuration for:
-
-- database URL;
-- Redis URL;
-- object storage endpoint/bucket/credentials;
-- provider keys;
-- provider/model selection;
-- render defaults;
-- YouTube credentials;
-- logging/telemetry.
-
-Never commit real secrets. `.env.example` should document required configuration without values that grant access.
-
-## 25. Future Channel and Genre Expansion
-
-The initial educational channel is only the first tenant/content configuration.
-
-A channel configuration should eventually define:
-
-- brand/style profile;
-- default voice;
-- visual asset style;
-- default render settings;
-- publishing destination;
-- metadata templates;
-- editorial rules.
-
-An episode then references a channel/profile rather than hard-coding those decisions in the pipeline.
-
-This allows the same Forge Studio infrastructure to support history, AI, geopolitics, technology, semiconductors, and future formats.
-
-## 26. Relationship to `purffle-shorts`
-
-Forge Studio and `purffle-shorts` are separate systems.
-
-Forge Studio is responsible for long-form production: scripting, scene planning, assets, narration, animation, rendering, QA, approval, and publishing.
-
-A future integration can pass completed long-form episodes into the Shorts system for clip extraction and distribution:
-
-```text
-Forge Studio
-     |
-     | approved long-form video
-     v
-purffle-shorts
-     |
-     +--> identify short-worthy segments
-     +--> crop/reframe/edit
-     +--> generate captions/metadata
-     +--> publish Shorts
-```
-
-This integration should be asynchronous and artifact-based. Neither system should require the other to be online for unrelated work.
-
-## 27. Cost Model
-
-The architecture deliberately separates cheap deterministic work from expensive generation.
-
-Illustrative strategy for a 10-minute episode:
-
-- most scenes: SVG/still-image composition and local rendering;
-- some scenes: archival/source video where appropriately licensed;
-- a small number of scenes: AI-generated video.
-
-If AI video costs approximately $0.05/second, 2 minutes of generated video would be approximately $6 before other costs. Actual provider prices vary and must be measured from the selected provider at implementation time.
-
-The cost ledger should eventually report:
-
-```text
-Episode cost
-├── LLM
-├── TTS
-├── Image generation
-├── AI video
-├── Storage
-├── Rendering compute
-└── Publishing/other services
-```
-
-## 28. Phased Implementation Plan
+## 37. Phased Implementation Plan
 
 ### Phase 1 — Foundation
 
-- repository structure;
-- API and database;
-- episode/project models;
-- artifact storage abstraction;
-- queue/worker infrastructure;
-- shared schemas;
-- local Docker Compose environment.
+- repository/tooling setup;
+- database and migrations;
+- object storage abstraction;
+- Redis/worker infrastructure;
+- episode/project/channel models;
+- state machine;
+- artifact/version model;
+- API skeleton;
+- basic web shell.
 
-### Phase 2 — Script and Planning
+### Phase 2 — Script to Scene Plan
 
 - episode brief;
-- script CRUD/versioning;
+- research/source model;
+- script generation/editing;
+- script approval;
 - script analysis;
 - scene-plan generation;
 - scene editor;
-- scene validation.
+- schema validation.
 
-### Phase 3 — Narration and Assets
+### Phase 3 — Assets and Narration
 
-- TTS adapter;
 - asset library;
-- image-generation adapter;
-- reusable character/map/location model;
-- asset selection and regeneration.
+- image generation adapter;
+- reusable asset lookup;
+- visual consistency configuration;
+- TTS adapter;
+- audio timing;
+- subtitles.
 
-### Phase 4 — Rendering
+### Phase 4 — Renderer
 
-- Remotion renderer;
-- declarative scene primitives;
-- timeline builder;
-- audio synchronization;
-- MP4 rendering;
-- local sample episode.
+- Remotion project;
+- declarative scene renderer;
+- reusable character/map primitives;
+- timeline composition;
+- audio mixing;
+- FFmpeg export;
+- render versioning.
 
 ### Phase 5 — QA and Approval
 
 - deterministic media QA;
-- render history;
-- approval UI;
-- explicit publish gating;
-- audit trail.
+- optional AI-assisted QA;
+- final preview;
+- approval workflow;
+- audit trail;
+- scene-level regeneration and dependency invalidation.
 
 ### Phase 6 — Publishing
 
-- YouTube provider;
-- OAuth/token handling;
-- resumable/idempotent uploads;
-- metadata and thumbnail handling;
+- YouTube OAuth integration;
+- upload;
+- thumbnails/captions;
+- scheduling;
+- reconciliation;
 - publish history.
 
 ### Phase 7 — Production Hardening
 
+- provider fallback policies;
+- cost budgets;
 - observability;
-- retry policies;
-- concurrency limits;
-- cost tracking;
-- provider failover/configuration;
-- backups and retention;
-- security hardening.
+- storage lifecycle/GC;
+- recovery testing;
+- security hardening;
+- MCP interface;
+- Shorts handoff contract.
 
-### Phase 8 — Shorts Integration
+## 38. Core Architectural Decision
 
-- expose approved long-form artifacts;
-- identify candidate segments;
-- hand off clips to `purffle-shorts`;
-- track source episode and derivative relationships.
+The most important design decision is that Forge Studio is a **production graph and orchestration system with a deterministic renderer**, not an AI video generator.
 
-## 29. Non-Goals for the Initial Version
-
-The first version should not attempt to:
-
-- build a fully cinematic AI-video generator;
-- automatically publish without human approval;
-- support every video provider simultaneously;
-- replace professional video editors for arbitrary compositions;
-- build a full social-media management suite;
-- couple Forge Studio tightly to `purffle-shorts`.
-
-The initial objective is a reliable production line for educational long-form videos with strong editorial control and a simple, reusable 2D visual language.
-
-## 30. Definition of a Successful First Production
-
-The first meaningful milestone is not merely that individual components work. A successful production should demonstrate the complete path:
+AI supplies intelligence and media where useful. The system owns:
 
 ```text
-Topic
-  -> editable script
-  -> approved script
-  -> structured scene plan
-  -> narration
-  -> reusable/generated visual assets
-  -> deterministic timeline
-  -> rendered 15–20 minute educational video
-  -> automated QA
-  -> human approval
-  -> YouTube publication
+editorial truth
++ versioning
++ dependencies
++ asset reuse
++ deterministic composition
++ QA
++ approval
++ publishing
 ```
 
-The system should also demonstrate that one scene can be regenerated independently and that the resulting render uses the new scene version without destroying prior artifacts.
-
-That end-to-end proof is the primary architectural acceptance criterion for Forge Studio's first production-ready milestone.
+This separation is what makes the platform reliable enough to produce many episodes, regenerate individual scenes cheaply, change AI providers, introduce new channels, and eventually feed long-form episodes into a separate Shorts pipeline.
