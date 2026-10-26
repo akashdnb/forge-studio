@@ -60,7 +60,7 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm install --no-audit --no-fund --ignore-scripts
       - name: Install FFmpeg
-        if: inputs.worker_type == 'media-ffmpeg' || inputs.worker_type == 'qa'
+        if: inputs.worker_type == 'media-ffmpeg' || inputs.worker_type == 'qa' || inputs.worker_type == 'package'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Execute bounded Forge worker
         run: node scripts/run-github-worker-job.js "${{ inputs.job_id }}" "${{ inputs.worker_type }}"
