@@ -1,5 +1,4 @@
-const { randomUUID } = require('node:crypto');
-const { validateMediaArtifact } = require('../media/media-qa');
+const { validateMediaArtifact } = require('../media/media-qa-runtime');
 
 async function executeMediaQa({ payload, job, repository, logger = console, validator = validateMediaArtifact }) {
   const episodeId = payload?.episodeId;
@@ -18,15 +17,9 @@ async function executeMediaQa({ payload, job, repository, logger = console, vali
   if (!artifact.storage_uri) throw Object.assign(new Error('Render artifact has no storage URI'), { retryable: false });
 
   const normalizedArtifact = {
-    id: artifact.id,
-    episodeId: artifact.episode_id,
-    kind: artifact.kind,
-    versionId: artifact.version_id,
-    storageUri: artifact.storage_uri,
-    contentHash: artifact.content_hash || artifact.version_content_hash || null,
-    mediaType: artifact.media_type,
-    metadata: artifact.metadata || {},
-    inputVersionIds: artifact.input_version_ids || [],
+    id: artifact.id, episodeId: artifact.episode_id, kind: artifact.kind, versionId: artifact.version_id,
+    storageUri: artifact.storage_uri, contentHash: artifact.content_hash || artifact.version_content_hash || null,
+    mediaType: artifact.media_type, metadata: artifact.metadata || {}, inputVersionIds: artifact.input_version_ids || [],
   };
   const qa = await validator({
     artifact: normalizedArtifact,
@@ -40,24 +33,10 @@ async function executeMediaQa({ payload, job, repository, logger = console, vali
 
   const resultId = `qa:${job.id}`;
   const persisted = await repository.recordQa({
-    id: resultId,
-    episodeId,
-    artifactId: artifact.id,
-    versionId: artifact.version_id,
-    status: qa.status,
-    checks: qa.checks,
-    runner: 'forge-media-qa-v1',
-    metadata: {
-      ...qa,
-      jobId: job.id,
-      attempt: job.attempts,
-      artifactSha256: qa.checksum?.hash || null,
-      provenance: {
-        renderArtifactId: artifact.id,
-        renderVersionId: artifact.version_id,
-        inputVersionIds: artifact.input_version_ids || [],
-      },
-    },
+    id: resultId, episodeId, artifactId: artifact.id, versionId: artifact.version_id,
+    status: qa.status, checks: qa.checks, runner: 'forge-media-qa-v1',
+    metadata: { ...qa, jobId: job.id, attempt: job.attempts, artifactSha256: qa.checksum?.hash || null,
+      provenance: { renderArtifactId: artifact.id, renderVersionId: artifact.version_id, inputVersionIds: artifact.input_version_ids || [] } },
   });
 
   if (qa.status === 'FAILED') {
