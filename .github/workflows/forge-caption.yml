@@ -20,3 +20,4 @@ jobs:
     secrets:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       FORGE_RUNNER_CALLBACK_TOKEN: ${{ secrets.FORGE_RUNNER_CALLBACK_TOKEN }}
+      FORGE_RUNNER_CALLBACK_URL: ${{ secrets.FORGE_RUNNER_CALLBACK_URL }}
