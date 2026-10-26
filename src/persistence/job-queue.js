@@ -24,6 +24,11 @@ class JobQueue {
       await client.query('COMMIT'); return result.rows[0] || null;
     } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
   }
+  async claimSpecific(id, workerId, now = new Date()) {
+    if (!id || !workerId) throw new TypeError('id and workerId are required'); const client = await this.pool.connect();
+    try { await client.query('BEGIN'); const result = await client.query(`UPDATE forge_jobs j SET status='RUNNING',attempts=j.attempts+1,worker_id=$2,leased_until=$3+($4::text||' seconds')::interval,started_at=COALESCE(j.started_at,now()),updated_at=now() WHERE j.id=$1 AND j.status='QUEUED' AND j.available_at <= $3 AND (j.leased_until IS NULL OR j.leased_until < $3) AND (j.depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED')) RETURNING j.*`, [id, workerId, now, this.leaseSeconds]); await client.query('COMMIT'); return result.rows[0] || null; }
+    catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
   async heartbeat(id, workerId) { const result = await this.pool.query(`UPDATE forge_jobs SET leased_until=now()+($1::text||' seconds')::interval,updated_at=now() WHERE id=$2 AND status='RUNNING' AND worker_id=$3 RETURNING *`, [this.leaseSeconds, id, workerId]); return result.rows[0] || null; }
   async succeed(id, workerId, result = {}) { const updated = await this.pool.query(`UPDATE forge_jobs SET status='SUCCEEDED',result=$1::jsonb,leased_until=NULL,finished_at=now(),updated_at=now() WHERE id=$2 AND status='RUNNING' AND worker_id=$3 RETURNING *`, [JSON.stringify(result), id, workerId]); if (!updated.rows[0]) throw new Error(`Job ${id} is not owned by worker ${workerId}`); return updated.rows[0]; }
   async fail(id, workerId, error, { retry = true, delaySeconds = 30 } = {}) {
