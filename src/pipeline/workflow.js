@@ -9,7 +9,7 @@ const DEPENDENCIES = Object.freeze({
   NARRATION: ['SCRIPT', 'SCENE_PLAN'],
   TRANSCRIPTION: ['NARRATION'],
   ASSETS: ['SCENE_PLAN'],
-  TIMELINE: ['SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS'],
+  TIMELINE: ['SCENE_PLAN', 'NARRATION', 'ASSETS'],
   RENDER: ['TIMELINE'],
   QA: ['RENDER'],
   PUBLISH: ['QA'],
@@ -18,12 +18,7 @@ const DEPENDENCIES = Object.freeze({
 class EpisodeWorkflow {
   constructor({ pipelineService, episodes, artifacts, qa, approvals, maxStageCost = null }) {
     if (!pipelineService) throw new TypeError('pipelineService is required');
-    this.pipeline = pipelineService;
-    this.episodes = episodes || null;
-    this.artifacts = artifacts || null;
-    this.qa = qa || null;
-    this.approvals = approvals || null;
-    this.maxStageCost = maxStageCost;
+    this.pipeline = pipelineService; this.episodes = episodes || null; this.artifacts = artifacts || null; this.qa = qa || null; this.approvals = approvals || null; this.maxStageCost = maxStageCost;
   }
 
   async execute({ episodeId, brief, stages = PIPELINE_STAGES, actor = 'workflow' }) {
@@ -34,9 +29,7 @@ class EpisodeWorkflow {
     const requested = new Set(stages);
     for (const stage of stages) for (const dependency of DEPENDENCIES[stage]) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency} in the same workflow request`);
 
-    let previous = { brief };
-    const outputs = [];
-    const stageVersions = new Map();
+    let previous = { brief }; const outputs = []; const stageVersions = new Map();
     for (const stage of stages) {
       const inputVersionIds = DEPENDENCIES[stage].flatMap((dependency) => stageVersions.get(dependency) || []);
       const request = this.#stageRequest(stage, previous, brief);
@@ -44,15 +37,9 @@ class EpisodeWorkflow {
       if (!result.run || result.run.status !== 'SUCCEEDED') throw new Error(`Stage ${stage} did not succeed`);
       const cost = result.run.actualCost ?? result.run.estimatedCost;
       if (this.maxStageCost !== null && cost !== null && cost > this.maxStageCost) throw Object.assign(new Error(`Stage ${stage} exceeded the configured cost guard`), { code: 'COST_GUARD' });
-      const versionIds = result.artifacts.map((artifact) => artifact.versionId);
-      stageVersions.set(stage, versionIds);
-      outputs.push({ stage, ...result, inputVersionIds });
+      const versionIds = result.artifacts.map((artifact) => artifact.versionId); stageVersions.set(stage, versionIds); outputs.push({ stage, ...result, inputVersionIds });
       previous = { ...previous, [stage]: result.artifacts, lastResult: result };
-      if (stage === 'SCENE_PLAN' && result.artifacts[0]?.content) {
-        const rawPlan = result.artifacts[0].content;
-        const candidate = rawPlan && rawPlan.content && rawPlan.content.scenes ? rawPlan.content : rawPlan;
-        previous.normalizedScenePlan = normalizeScenePlan(candidate);
-      }
+      if (stage === 'SCENE_PLAN' && result.artifacts[0]?.content) { const rawPlan = result.artifacts[0].content; const candidate = rawPlan && rawPlan.content && rawPlan.content.scenes ? rawPlan.content : rawPlan; previous.normalizedScenePlan = normalizeScenePlan(candidate); }
     }
     return { episodeId, status: 'SUCCEEDED', stages: outputs, artifactIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.id)), versionIds: outputs.flatMap((stage) => stage.artifacts.map((artifact) => artifact.versionId)) };
   }
