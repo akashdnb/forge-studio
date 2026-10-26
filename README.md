@@ -14,13 +14,14 @@ Forge Studio is the production control plane for long-form educational video epi
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
 - Async episode orchestration: research → script → scene plan → narration → transcription → assets → timeline → captions → render → QA → publish.
+- Production media lifecycle reconciliation with bounded scans, checksum/provenance verification, stale lease recovery, orphan partial cleanup, duplicate-output diagnostics and auditable idempotent repairs.
 - Real bounded Whisper-compatible transcription worker with immutable input checksum verification and deterministic transcript artifacts.
 - Built-in configurable HTTP adapters for generation stages plus a Forge-owned deterministic media QA worker.
 - Deterministic captions worker downstream of transcript/timeline provenance.
 - YouTube publishing adapter using resumable upload and OAuth refresh-token support.
 - Lightweight operational dashboard and gated Forge → Shorts handoff.
 
-Forge media QA validates real rendered MP4 bytes with FFmpeg/ffprobe. It does not fake success or require a QA provider endpoint. See `docs/MEDIA_QA.md` for the contract, resource limits, S3-compatible storage settings and security boundary.
+Forge media QA validates real rendered MP4 bytes with FFmpeg/ffprobe. It does not fake success or require a QA provider endpoint. See `docs/MEDIA_QA.md` for the contract, resource limits, S3-compatible storage settings and security boundary. Media lifecycle recovery is documented in `docs/MEDIA_RECONCILIATION.md`.
 
 ## Validate locally
 
@@ -54,15 +55,21 @@ DATABASE_URL='postgres://...' npm start
 DATABASE_URL='postgres://...' npm run worker
 ```
 
-Migration `003_jobs_outbox.sql` adds durable jobs, the transactional outbox and persisted idempotency records. Migration `004_production_workflow.sql` adds research provenance, channels/style profiles, timeline snapshots, storage lifecycle records, publish runs, project membership and workflow-job dependencies. Migration `005_captions.sql` adds deterministic caption provenance and lifecycle; migration `006_artifact_storage.sql` adds trusted storage keys, checksum status and reconciliation metadata.
+Migration `003_jobs_outbox.sql` adds durable jobs, the transactional outbox and persisted idempotency records. Migration `004_production_workflow.sql` adds research provenance, channels/style profiles, timeline snapshots, storage lifecycle records, publish runs, project membership and workflow-job dependencies. Migration `005_captions.sql` adds deterministic caption provenance and lifecycle; migration `006_artifact_storage.sql` adds trusted storage keys, checksum status and reconciliation metadata; migration `007_media_reconciliation.sql` adds durable reconciliation runs and repair records.
 
-Jobs are dependency-ordered. Downstream jobs are not claimable until their dependency succeeds; jobs whose dependency permanently fails/cancels are automatically cancelled. Workers lease, heartbeat and recover jobs after crashes.
+Jobs are dependency-ordered. Downstream jobs are not claimable until their dependency succeeds; jobs whose dependency permanently fails/cancels are automatically cancelled. Workers lease, heartbeat and recover jobs after crashes. The media reconciler also audits expired leases and recent terminal jobs without resurrecting cancelled or superseded work.
 
 ## Artifact storage
 
 Configure the worker with `FORGE_STORAGE_DRIVER=local` for development/tests or `FORGE_STORAGE_DRIVER=s3` in production. See [`docs/ARTIFACT_STORAGE.md`](docs/ARTIFACT_STORAGE.md) for the full contract and configuration.
 
 The worker accepts binary provider results as `artifact.contentBase64` plus `mediaType` and optional `contentHash`. Forge streams the bytes through a bounded SHA-256 verifier, derives an immutable content-addressed key, persists trusted storage metadata and resolves later through the artifact/version graph. Provider-supplied `storageUri` values are not opened or followed, preventing path traversal and SSRF-style storage access.
+
+## Production media reconciliation
+
+The worker periodically audits active and recently completed jobs. It verifies referenced artifacts by provenance and real checksum, records `MISSING`/`CORRUPT` storage state, recovers expired leases, repairs inconsistent terminal job state, flags duplicate logical outputs, and removes only stale local `.part` files. Immutable artifacts and approved outputs are never silently replaced. See `docs/MEDIA_RECONCILIATION.md` for the operator runbook and bounded configuration.
+
+An on-demand reconciliation is a normal durable job: enqueue `workflow:media-reconcile` with an optional reason payload. Reconciliation uses a PostgreSQL advisory lock, deterministic repair fingerprints and the same worker lease/retry lifecycle as other production jobs.
 
 ## Real Whisper transcription
 
@@ -120,7 +127,7 @@ See [`docs/ffmpeg-render-worker.md`](docs/ffmpeg-render-worker.md) for the bound
 
 ## Configure production stage services
 
-The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets` and `workflow:timeline`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required. It also registers `workflow:captions`, the local Whisper `workflow:transcription` handler and the built-in FFmpeg `workflow:render` handler.
+The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets` and `workflow:timeline`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required. It also registers `workflow:captions`, the local Whisper `workflow:transcription` handler, the built-in FFmpeg `workflow:render` handler and `workflow:media-reconcile`.
 
 Configure these environment variables on the worker for provider-backed stages:
 - `FORGE_STAGE_RESEARCH_ENDPOINT`
@@ -159,4 +166,4 @@ Forge remains authoritative for long-form provenance; `purffle-shorts` is the de
 
 The `public/` UI supports connection configuration, readiness, episode creation and episode inspection. It is not yet the full editorial script/scene/timeline editor.
 
-`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, artifact storage configuration, Whisper settings, QA bounds/host allowlist, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
+`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, artifact storage configuration, Whisper settings, QA bounds/host allowlist, reconciliation bounds, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
