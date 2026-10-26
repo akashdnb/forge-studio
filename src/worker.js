@@ -1,6 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { JobQueue } = require('./persistence/job-queue');
+const { createPublishingHandlers } = require('./publishing/job-handler');
 
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool });
@@ -25,9 +26,7 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
     } catch (error) {
       logger.error?.(`Forge job ${job.id} (${job.kind}) failed: ${error.message}`);
       await queue.fail(job.id, workerId, error, { retry: error?.retryable !== false });
-    } finally {
-      clearInterval(heartbeat);
-    }
+    } finally { clearInterval(heartbeat); }
   }
 
   async function run() {
@@ -36,27 +35,25 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
       if (!stopping) await new Promise((resolve) => { timer = setTimeout(resolve, pollMs); timer.unref?.(); });
     }
   }
-
-  async function stop() {
-    stopping = true;
-    if (timer) clearTimeout(timer);
-  }
-
+  async function stop() { stopping = true; if (timer) clearTimeout(timer); }
   return { queue, run, stop, workerId };
 }
 
-function loadHandlers() {
+function loadHandlers({ pool } = {}) {
+  const handlers = pool ? createPublishingHandlers({ pool }) : {};
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
-  if (!modulePath) return {};
-  const loaded = require(path.resolve(modulePath));
-  return loaded.handlers || loaded;
+  if (modulePath) {
+    const loaded = require(path.resolve(modulePath));
+    Object.assign(handlers, loaded.handlers || loaded);
+  }
+  return handlers;
 }
 
 if (require.main === module) {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '5', 10) });
-  const worker = createWorker({ pool, handlers: loadHandlers() });
+  const worker = createWorker({ pool, handlers: loadHandlers({ pool }) });
   const shutdown = async () => { await worker.stop(); await pool.end(); process.exit(0); };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
