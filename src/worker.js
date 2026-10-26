@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { JobQueue } = require('./persistence/job-queue');
 const { createPublishingHandlers } = require('./publishing/job-handler');
+const { createCanonicalPackageGate } = require('./publishing/package-gate');
 const { createHttpWorkflowHandlers } = require('./pipeline/http-workflow-handlers');
 const { createCaptionJobHandler } = require('./captions/job-handler');
 const { createTranscriptionHandlers } = require('./transcription/whisper-worker');
@@ -9,6 +10,7 @@ const { createNarrationHandlers, createProviderRegistry } = require('./narration
 const { createStorageFromEnv } = require('./storage');
 const { createFfmpegRenderHandler } = require('./pipeline/ffmpeg-render-handler');
 const { EpisodeWorkflowIntegration } = require('./pipeline/episode-workflow-integration');
+const { createPackagingHandlers } = require('./packaging/worker');
 
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool });
@@ -58,7 +60,8 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
 function loadHandlers({ pool } = {}) {
   const storage = pool ? createStorageFromEnv() : null; let providerRegistry = null; let providerConfigError = null;
   if (pool) { try { providerRegistry = createProviderRegistry(); } catch (error) { providerConfigError = error; providerRegistry = { get: () => ({ name: 'unconfigured-tts', execute: async () => { throw providerConfigError; } }) }; } }
-  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool }), ...createPackagingHandlers({ pool, storage }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
+  if (pool) handlers['publish:youtube'] = createCanonicalPackageGate({ pool, publishHandler: handlers['publish:youtube'] });
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
   if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
   return handlers;
