@@ -9,6 +9,7 @@ function fakePool() {
     async query(sql, params = []) {
       calls.push({ scope: 'pool', sql, params });
       if (sql.includes('SELECT * FROM episodes WHERE id = $1')) return { rows: [{ id: params[0], revision: 1 }] };
+      if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
       if (sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0], revision: 1, state: 'DRAFT', project_id: 'p' }] };
       if (sql.includes('UPDATE episodes SET state')) return { rows: [{ id: params[1], state: params[0], revision: 2 }] };
       if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
