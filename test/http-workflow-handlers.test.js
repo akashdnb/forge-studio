@@ -62,7 +62,7 @@ test('HTTP stage provider persists normalized artifact response and records prov
     assert.equal(result.episodeId, 'episode-1');
     assert.ok(result.versionId);
     assert.ok(result.artifactId);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
     assert.equal(calls.filter((call) => call.sql.startsWith('INSERT INTO version_dependencies')).length, 1);
   } finally {
     if (old === undefined) delete process.env.FORGE_STAGE_SCRIPT_ENDPOINT;
