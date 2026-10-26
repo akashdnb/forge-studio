@@ -67,7 +67,7 @@ test('episode transition uses row lock and revision compare-and-swap in a transa
   const result = await repo.transitionEpisode({ id: 'ep-1', nextState: 'SCRIPT_DRAFT', expectedRevision: 1, actor: 'test' });
   assert.equal(result.revision, 2);
   assert.ok(pool.calls.some((c) => c.sql.includes('FOR UPDATE')));
-  assert.ok(pool.calls.some((c) => c.sql.includes('WHERE id = $2 AND revision = $3')));
+  assert.ok(pool.calls.some((c) => c.sql.includes('WHERE id=$2 AND revision=$3')));
   assert.ok(pool.calls.some((c) => c.sql.includes('INSERT INTO audit_events')));
 });
 
