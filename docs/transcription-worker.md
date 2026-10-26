@@ -22,9 +22,11 @@ Configure a real Whisper-compatible CLI:
 
 ```text
 FORGE_WHISPER_COMMAND=whisper
-FORGE_WHISPER_MODEL=large-v3
+FORGE_WHISPER_MODEL=turbo
 FORGE_WHISPER_ARGS=--model ${model} --output_format json --output_dir ${outDir} ${input}
 ```
+
+The official OpenAI Whisper CLI accepts an audio path plus `--model`, `--output_dir`, and `--output_format json`, and writes JSON containing timestamped segments. citeturn0search0turn0search2
 
 The command must return Whisper JSON either on stdout or as a `.json` file in `${outDir}`. The JSON must contain `language` and `segments[]`; each segment requires `start`, `end`, and non-empty `text`. `confidence` is accepted directly and `avg_logprob` is converted to a bounded confidence value.
 
@@ -51,7 +53,7 @@ Timestamps are normalized to milliseconds and segment ordering is validated. The
 
 The normal Forge worker leases the job, heartbeats it, and reconciles `SUCCEEDED`/`FAILED` through `JobQueue`. Provider timeouts are retryable; invalid input, checksum mismatches, missing configuration, malformed provider output, and approval/provenance failures are permanent. The persisted artifact is checked before provider execution so a retried job reuses an existing transcript.
 
-The GitHub Actions runner uses `scripts/run-transcription-job.js`. It only accepts a durable `workflow:transcription` job already in `RUNNING`, applies a 20-minute workflow limit plus an internal 14-minute provider limit, and reconciles the job in PostgreSQL. A pre-signed HTTPS `FORGE_TRANSCRIPTION_OUTPUT_URL` may be supplied for an immutable object-store upload; the uploaded bytes carry their own SHA-256 header.
+The GitHub Actions runner uses `scripts/run-transcription-job.js`. It only accepts a durable `workflow:transcription` job already in `RUNNING`, applies a 20-minute workflow limit plus an internal 14-minute provider limit, and reconciles the job in PostgreSQL. Set repository variable `FORGE_WHISPER_INSTALL=true` to install the official `openai-whisper` package on the ephemeral runner; otherwise `FORGE_WHISPER_COMMAND` must point to an already available Whisper-compatible executable. A pre-signed HTTPS `FORGE_TRANSCRIPTION_OUTPUT_URL` may be supplied for an immutable object-store upload; the uploaded bytes carry their own SHA-256 header.
 
 ## GitHub Actions secrets
 
@@ -60,5 +62,9 @@ The GitHub Actions runner uses `scripts/run-transcription-job.js`. It only accep
 - `FORGE_WHISPER_ARGS`
 - `FORGE_WHISPER_MODEL`
 - optional `FORGE_TRANSCRIPTION_OUTPUT_URL` (pre-signed HTTPS PUT URL)
+
+Repository variable:
+
+- `FORGE_WHISPER_INSTALL=true` to install `openai-whisper` on the ephemeral runner.
 
 Use `workflow_dispatch` with a durable job id or `repository_dispatch` with `client_payload.job_id`. The workflow uses `contents: read`, disables checkout credentials, and does not require `akashdnb/purffle-shorts`.
