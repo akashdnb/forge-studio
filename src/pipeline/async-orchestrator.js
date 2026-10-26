@@ -16,17 +16,15 @@ class AsyncEpisodeOrchestrator {
       for (const dependency of WORKFLOW_DEPENDENCIES[stage] || []) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency}`);
     }
     const jobs = [];
-    const jobByStage = new Map();
+    let dependsOnJobId = null;
     for (const stage of stages) {
-      const dependencyJobs = (WORKFLOW_DEPENDENCIES[stage] || []).map((dependency) => jobByStage.get(dependency)).filter(Boolean);
-      if (dependencyJobs.length > 1) throw new Error(`Stage ${stage} has multiple dependencies; durable queue currently supports one dependency`);
-      const dependsOnJobId = dependencyJobs[0]?.id || null;
       const job = await this.queue.enqueue({
         projectId, episodeId, kind: `workflow:${stage.toLowerCase()}`,
         payload: { episodeId, projectId, brief, stage, actor },
         idempotencyKey: `${idempotencyPrefix}:${episodeId}:${stage}`, createdBy: actor, dependsOnJobId,
       });
-      jobs.push(job); jobByStage.set(stage, job);
+      jobs.push(job);
+      dependsOnJobId = job.id;
     }
     return { episodeId, jobs };
   }
