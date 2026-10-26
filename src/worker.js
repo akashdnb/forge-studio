@@ -25,7 +25,7 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
 function loadHandlers({ pool } = {}) {
   const storage = pool ? createStorageFromEnv() : null; let providerRegistry = null; let providerConfigError = null;
   if (pool) { try { providerRegistry = createProviderRegistry(); } catch (error) { providerConfigError = error; providerRegistry = { get: () => ({ name: 'unconfigured-tts', execute: async () => { throw providerConfigError; } }) }; } }
-  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool, storage }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
   if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
   return handlers;

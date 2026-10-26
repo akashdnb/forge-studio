@@ -85,6 +85,8 @@ services:
         sync: false
       - key: FORGE_WORKER_HANDLERS
         sync: false
+      - key: FORGE_YOUTUBE_MODE
+        value: production
       - key: YOUTUBE_ACCESS_TOKEN
         sync: false
       - key: YOUTUBE_REFRESH_TOKEN
@@ -93,6 +95,12 @@ services:
         sync: false
       - key: YOUTUBE_CLIENT_SECRET
         sync: false
+      - key: YOUTUBE_MAX_ATTEMPTS
+        value: "3"
+      - key: YOUTUBE_TIMEOUT_MS
+        value: "900000"
+      - key: YOUTUBE_RETRY_BASE_MS
+        value: "500"
   - type: web
     name: forge-studio-ui
     runtime: static

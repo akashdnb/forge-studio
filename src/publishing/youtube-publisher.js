@@ -1,78 +1,49 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const os = require('node:os');
-const path = require('node:path');
-const { Readable } = require('node:stream');
-const { pipeline } = require('node:stream/promises');
-
+const { createHash } = require('node:crypto');
 const UPLOAD_URL = 'https://www.googleapis.com/upload/youtube/v3/videos';
+const VIDEOS_URL = 'https://www.googleapis.com/youtube/v3/videos';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-
+const WATCH_URL = 'https://www.youtube.com/watch?v=';
+const MAX_TITLE = 100; const MAX_DESCRIPTION = 5000; const MAX_TAGS = 500; const MAX_TAG_LENGTH = 500;
 class YouTubePublisher {
-  constructor({ accessToken = process.env.YOUTUBE_ACCESS_TOKEN || '', refreshToken = process.env.YOUTUBE_REFRESH_TOKEN || '', clientId = process.env.YOUTUBE_CLIENT_ID || '', clientSecret = process.env.YOUTUBE_CLIENT_SECRET || '', fetchImpl = fetch } = {}) {
-    this.accessToken = accessToken; this.refreshToken = refreshToken; this.clientId = clientId; this.clientSecret = clientSecret; this.fetchImpl = fetchImpl;
-  }
-  async token() {
-    if (this.accessToken) return this.accessToken;
-    if (!this.refreshToken || !this.clientId) throw Object.assign(new Error('YouTube OAuth credentials are not configured'), { retryable: false });
-    const body = new URLSearchParams({ client_id: this.clientId, refresh_token: this.refreshToken, grant_type: 'refresh_token' });
-    if (this.clientSecret) body.set('client_secret', this.clientSecret);
-    const response = await this.fetchImpl(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.access_token) throw Object.assign(new Error(`YouTube token refresh failed (${response.status})`), { retryable: response.status >= 500 });
-    this.accessToken = data.access_token; return this.accessToken;
-  }
-  async request(url, options = {}, retry = true) {
-    const token = await this.token();
-    const response = await this.fetchImpl(url, { ...options, headers: { ...(options.headers || {}), authorization: `Bearer ${token}` } });
-    if (response.status === 401 && retry && this.refreshToken) { this.accessToken = ''; await this.token(); return this.request(url, options, false); }
-    return response;
-  }
-  async publish({ sourceUri, metadata = {}, externalId = null }) {
-    if (!sourceUri) throw new TypeError('sourceUri is required');
-    const file = await materialize(sourceUri, this.fetchImpl);
-    try {
-      if (externalId) {
-        const existing = await this.request(`https://www.googleapis.com/youtube/v3/videos?part=id,status&id=${encodeURIComponent(externalId)}`);
-        if (existing.ok && (await existing.json()).items?.[0]?.id === externalId) return { id: externalId, url: `https://www.youtube.com/watch?v=${externalId}`, reconciled: true };
+  constructor({ accessToken = process.env.YOUTUBE_ACCESS_TOKEN || '', refreshToken = process.env.YOUTUBE_REFRESH_TOKEN || '', clientId = process.env.YOUTUBE_CLIENT_ID || '', clientSecret = process.env.YOUTUBE_CLIENT_SECRET || '', mode = process.env.FORGE_YOUTUBE_MODE || 'production', fetchImpl = fetch, maxAttempts = Number(process.env.YOUTUBE_MAX_ATTEMPTS || 3), timeoutMs = Number(process.env.YOUTUBE_TIMEOUT_MS || 900000), retryBaseMs = Number(process.env.YOUTUBE_RETRY_BASE_MS || 500) } = {}) { this.accessToken = accessToken; this.refreshToken = refreshToken; this.clientId = clientId; this.clientSecret = clientSecret; this.mode = mode; this.fetchImpl = fetchImpl; this.maxAttempts = Math.max(1, Math.min(5, maxAttempts)); this.timeoutMs = Math.max(1000, Math.min(1800000, timeoutMs)); this.retryBaseMs = Math.max(0, Math.min(10000, retryBaseMs)); }
+  hasCredentials() { return Boolean(this.accessToken || (this.refreshToken && this.clientId)); }
+  async token() { if (this.accessToken) return this.accessToken; if (!this.refreshToken || !this.clientId) throw Object.assign(new Error('YouTube OAuth credentials are not configured'), { code: 'AUTH_NOT_CONFIGURED', retryable: false, terminalState: 'FAILED' }); const body = new URLSearchParams({ client_id: this.clientId, refresh_token: this.refreshToken, grant_type: 'refresh_token' }); if (this.clientSecret) body.set('client_secret', this.clientSecret); const response = await this.fetchWithTimeout(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }); const data = await response.json().catch(() => ({})); if (!response.ok || !data.access_token) throw Object.assign(new Error(`YouTube token refresh failed (${response.status})`), { code: 'AUTH_FAILED', status: response.status, retryable: response.status >= 500 }); this.accessToken = data.access_token; return this.accessToken; }
+  async fetchWithTimeout(url, options = {}) { const timeoutController = new AbortController(); const timer = setTimeout(() => timeoutController.abort(), this.timeoutMs); const signal = options.signal ? AbortSignal.any([options.signal, timeoutController.signal]) : timeoutController.signal; try { return await this.fetchImpl(url, { ...options, signal }); } catch (error) { if (options.signal?.aborted) throw Object.assign(new Error('YouTube publication was cancelled'), { code: 'JOB_CANCELLED', retryable: false, terminalState: 'CANCELLED', cause: error }); if (error?.name === 'AbortError') throw Object.assign(new Error('YouTube request timed out'), { code: 'PROVIDER_TIMEOUT', retryable: true, cause: error }); throw Object.assign(new Error('YouTube network request failed'), { code: 'NETWORK_ERROR', retryable: true, cause: error }); } finally { clearTimeout(timer); } }
+  async request(url, options = {}, { retryAuth = true } = {}) { const token = await this.token(); const response = await this.fetchWithTimeout(url, { ...options, headers: { ...(options.headers || {}), authorization: `Bearer ${token}` } }); if (response.status === 401 && retryAuth && this.refreshToken) { this.accessToken = ''; await this.token(); return this.request(url, options, { retryAuth: false }); } return response; }
+  async publish({ sourcePath, metadata = {}, externalId = null, uploadSessionUri = null, onSession = async () => {}, signal = null }) {
+    if (!sourcePath) throw Object.assign(new TypeError('sourcePath is required'), { retryable: false, terminalState: 'FAILED' }); const stat = await fsp.stat(sourcePath).catch(() => null); if (!stat?.isFile()) throw Object.assign(new Error('YouTube source artifact is unavailable'), { code: 'ARTIFACT_NOT_FOUND', retryable: false, terminalState: 'FAILED' }); validateMetadata(metadata);
+    if (this.mode === 'deterministic') return deterministicResult(sourcePath, metadata, externalId); if (this.mode !== 'production') throw Object.assign(new Error(`Unsupported FORGE_YOUTUBE_MODE: ${this.mode}`), { code: 'INVALID_CONFIG', retryable: false, terminalState: 'FAILED' }); if (!this.hasCredentials()) throw Object.assign(new Error('YouTube OAuth credentials are not configured'), { code: 'AUTH_NOT_CONFIGURED', retryable: false, terminalState: 'FAILED' });
+    if (externalId) { const reconciled = await this.getVideo(externalId, signal); if (reconciled) return { id: externalId, url: WATCH_URL + externalId, reconciled: true, response: reconciled }; }
+    let sessionUri = uploadSessionUri; let resumeOffset = 0;
+    if (sessionUri) { const resumed = await this.resumeSession(sessionUri, sourcePath, stat.size, signal); if (resumed) return this.result(resumed, true); sessionUri = null; await onSession(null); }
+    if (!sessionUri) { const session = await this.startSession(validateMetadata(metadata), stat.size, signal); sessionUri = session.location; await onSession(sessionUri); }
+    let lastError = null;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      try { return this.result(await this.uploadFromOffset(sessionUri, sourcePath, stat.size, resumeOffset, signal), false); }
+      catch (error) {
+        lastError = error; if (error.code === 'UPLOAD_SESSION_EXPIRED') { await onSession(null); throw Object.assign(error, { retryable: false, terminalState: 'RECONCILIATION_REQUIRED' }); }
+        if (!isRetryable(error) || attempt === this.maxAttempts) throw error; await sleep(this.retryBaseMs * (2 ** (attempt - 1)));
+        const status = await this.checkSession(sessionUri, stat.size, signal).catch((probeError) => ({ error: probeError }));
+        if (status?.result) return this.result(status.result, true); if (status?.expired) { await onSession(null); throw Object.assign(new Error('YouTube resumable upload session expired before completion'), { code: 'UPLOAD_SESSION_EXPIRED', retryable: false, terminalState: 'RECONCILIATION_REQUIRED' }); }
+        if (Number.isInteger(status?.offset) && status.offset > resumeOffset) resumeOffset = status.offset;
       }
-      const stat = await fsp.stat(file);
-      const resource = stripUndefined({
-        snippet: { title: String(metadata.title || '').trim(), description: String(metadata.description || ''), tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 500).map(String) : undefined, categoryId: String(metadata.categoryId || '27'), defaultLanguage: metadata.defaultLanguage },
-        status: { privacyStatus: ['private', 'unlisted', 'public'].includes(metadata.privacyStatus) ? metadata.privacyStatus : 'private', publishAt: metadata.publishAt, selfDeclaredMadeForKids: Boolean(metadata.selfDeclaredMadeForKids), containsSyntheticMedia: metadata.containsSyntheticMedia == null ? undefined : Boolean(metadata.containsSyntheticMedia) },
-      });
-      if (!resource.snippet.title) throw new TypeError('YouTube title is required');
-      const session = await this.request(`${UPLOAD_URL}?uploadType=resumable&part=snippet,status`, { method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-length': String(stat.size), 'x-upload-content-type': 'video/mp4' }, body: JSON.stringify(resource) });
-      if (!session.ok) throw await providerError('YouTube upload session failed', session);
-      const location = session.headers.get('location');
-      if (!location) throw Object.assign(new Error('YouTube did not return a resumable upload URL'), { retryable: true });
-      const upload = await this.request(location, { method: 'PUT', headers: { 'content-type': 'video/mp4', 'content-length': String(stat.size) }, body: fs.createReadStream(file), duplex: 'half' });
-      if (!upload.ok) throw await providerError('YouTube video upload failed', upload);
-      const result = await upload.json();
-      if (!result.id) throw Object.assign(new Error('YouTube upload completed without a video id'), { retryable: true });
-      return { id: result.id, url: `https://www.youtube.com/watch?v=${result.id}`, reconciled: false, response: result };
-    } finally {
-      if (file.startsWith(path.join(os.tmpdir(), 'forge-youtube-'))) await fsp.rm(file, { force: true }).catch(() => {});
     }
+    throw lastError || new Error('YouTube upload failed');
   }
+  async getVideo(id, signal = null) { const response = await this.request(`${VIDEOS_URL}?part=id,status,snippet&id=${encodeURIComponent(id)}`, { signal }); if (response.status === 404) return null; if (!response.ok) throw await providerError('YouTube reconciliation failed', response); const data = await response.json(); return data.items?.[0] || null; }
+  async startSession(resource, size, signal = null) { for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) { const response = await this.request(`${UPLOAD_URL}?uploadType=resumable&part=snippet,status`, { method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-length': String(size), 'x-upload-content-type': 'video/mp4' }, body: JSON.stringify(resource), signal }); if (response.ok) { const location = response.headers.get('location'); if (!location) throw Object.assign(new Error('YouTube did not return a resumable upload URL'), { code: 'PROVIDER_PROTOCOL_ERROR', retryable: true }); return { location }; } const error = await providerError('YouTube upload session failed', response); if (!isRetryable(error) || attempt === this.maxAttempts) throw error; await sleep(this.retryBaseMs * (2 ** (attempt - 1))); } throw new Error('Unable to create YouTube upload session'); }
+  async checkSession(sessionUri, size, signal = null) { const response = await this.request(sessionUri, { method: 'PUT', headers: { 'content-length': '0', 'content-range': `bytes */${size}` }, body: '', signal }); if (response.status === 200 || response.status === 201) return { result: await response.json() }; if (response.status === 308) return { offset: parseRange(response.headers.get('range')) }; if (response.status === 404 || response.status === 410) return { expired: true }; throw await providerError('YouTube upload status check failed', response); }
+  async resumeSession(sessionUri, sourcePath, size, signal = null) { const status = await this.checkSession(sessionUri, size, signal); if (status.result) return status.result; return this.uploadFromOffset(sessionUri, sourcePath, size, status.offset || 0, signal); }
+  async uploadFromOffset(sessionUri, sourcePath, size, offset, signal = null, hops = 0) { if (hops > this.maxAttempts * 2) throw Object.assign(new Error('YouTube resumable upload exceeded recovery bound'), { code: 'UPLOAD_RECOVERY_EXHAUSTED', retryable: true }); if (offset >= size) { const status = await this.checkSession(sessionUri, size, signal); if (status.result) return status.result; throw Object.assign(new Error('YouTube resumable session has no remaining bytes but is incomplete'), { code: 'UPLOAD_PROTOCOL_ERROR', retryable: true }); } const remaining = size - offset; const stream = fs.createReadStream(sourcePath, { start: offset }); let response; try { response = await this.request(sessionUri, { method: 'PUT', headers: { 'content-type': 'video/mp4', 'content-length': String(remaining), 'content-range': `bytes ${offset}-${size - 1}/${size}` }, body: stream, duplex: 'half', signal }); } catch (error) { stream.destroy(); throw error; } if (response.status === 200 || response.status === 201) return response.json(); if (response.status === 308) { const nextOffset = parseRange(response.headers.get('range')) || offset; if (nextOffset <= offset) throw Object.assign(new Error('YouTube resumable upload made no forward progress'), { code: 'UPLOAD_PROTOCOL_ERROR', retryable: true }); return this.uploadFromOffset(sessionUri, sourcePath, size, nextOffset, signal, hops + 1); } if (response.status === 404 || response.status === 410) throw Object.assign(new Error('YouTube resumable upload session expired'), { code: 'UPLOAD_SESSION_EXPIRED', retryable: false }); throw await providerError('YouTube video upload failed', response); }
+  result(result, reconciled) { if (!result?.id) throw Object.assign(new Error('YouTube upload completed without a video id'), { code: 'PROVIDER_PROTOCOL_ERROR', retryable: true }); return { id: result.id, url: WATCH_URL + result.id, reconciled, response: redactProviderResponse(result) }; }
 }
-
-async function materialize(uri, fetchImpl) {
-  if (uri.startsWith('file://')) return new URL(uri).pathname;
-  if (!/^https?:\/\//i.test(uri)) return uri;
-  const response = await fetchImpl(uri);
-  if (!response.ok || !response.body) throw Object.assign(new Error(`Unable to fetch render artifact (${response.status})`), { retryable: response.status >= 500 });
-  const file = path.join(os.tmpdir(), `forge-youtube-${Date.now()}-${Math.random().toString(16).slice(2)}.mp4`);
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(file, { flags: 'wx' }));
-  return file;
-}
-function stripUndefined(value) {
-  if (Array.isArray(value)) return value.map(stripUndefined);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).map(([k, v]) => [k, stripUndefined(v)]));
-  return value;
-}
-async function providerError(prefix, response) {
-  const body = await response.text().catch(() => '');
-  return Object.assign(new Error(`${prefix} (${response.status})`), { status: response.status, providerBody: body.slice(0, 4000), retryable: response.status === 408 || response.status === 429 || response.status >= 500 });
-}
-module.exports = { YouTubePublisher, materialize };
+function validateMetadata(metadata = {}) { const title = String(metadata.title || '').trim(); const description = String(metadata.description || ''); const privacyStatus = metadata.privacyStatus || 'private'; const categoryId = String(metadata.categoryId || '27'); const tags = metadata.tags == null ? undefined : metadata.tags; if (!title) throw Object.assign(new TypeError('YouTube title is required'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (title.length > MAX_TITLE) throw Object.assign(new TypeError('YouTube title exceeds 100 characters'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (description.length > MAX_DESCRIPTION) throw Object.assign(new TypeError('YouTube description exceeds 5000 characters'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (!/^\d{1,3}$/.test(categoryId)) throw Object.assign(new TypeError('YouTube categoryId must be numeric'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (!['private', 'unlisted', 'public'].includes(privacyStatus)) throw Object.assign(new TypeError('YouTube privacyStatus must be private, unlisted, or public'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (tags !== undefined && (!Array.isArray(tags) || tags.length > MAX_TAGS || tags.some((tag) => String(tag).length > MAX_TAG_LENGTH))) throw Object.assign(new TypeError('YouTube tags are invalid'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); if (metadata.publishAt != null && (privacyStatus !== 'private' || Number.isNaN(Date.parse(metadata.publishAt)))) throw Object.assign(new TypeError('publishAt requires private privacy and a valid timestamp'), { code: 'INVALID_METADATA', retryable: false, terminalState: 'FAILED' }); return { snippet: { title, description, categoryId, ...(tags ? { tags: tags.map(String) } : {}), ...(metadata.defaultLanguage ? { defaultLanguage: String(metadata.defaultLanguage) } : {}) }, status: { privacyStatus, ...(metadata.publishAt ? { publishAt: new Date(metadata.publishAt).toISOString() } : {}), selfDeclaredMadeForKids: Boolean(metadata.selfDeclaredMadeForKids), ...(metadata.containsSyntheticMedia == null ? {} : { containsSyntheticMedia: Boolean(metadata.containsSyntheticMedia) }) } }; }
+async function deterministicResult(sourcePath, metadata, externalId) { const hash = createHash('sha256'); await new Promise((resolve, reject) => { const stream = fs.createReadStream(sourcePath); stream.on('error', reject); stream.on('data', (chunk) => hash.update(chunk)); stream.on('end', resolve); }); const contentHash = hash.digest('hex'); const id = externalId || `test-${contentHash.slice(0, 11)}`; return { id, url: WATCH_URL + id, reconciled: Boolean(externalId), response: { id, status: { uploadStatus: 'processed', privacyStatus: metadata.privacyStatus || 'private' }, contentHash, deterministic: true } }; }
+function parseRange(value) { if (!value) return 0; const match = /^bytes=\d+-(\d+)$/.exec(value); return match ? Number(match[1]) + 1 : 0; }
+function isRetryable(error) { return error?.retryable === true || [408, 429, 500, 502, 503, 504].includes(error?.status); }
+async function providerError(prefix, response) { const body = await response.text().catch(() => ''); let parsed = null; try { parsed = JSON.parse(body); } catch {} const reason = parsed?.error?.errors?.[0]?.reason || parsed?.error?.status || null; const retryable = response.status === 408 || response.status === 429 || response.status >= 500 || reason === 'rateLimitExceeded'; return Object.assign(new Error(`${prefix} (${response.status})`), { code: response.status === 401 ? 'AUTH_FAILED' : ['quotaExceeded','dailyLimitExceeded'].includes(reason) ? 'QUOTA_EXCEEDED' : 'PROVIDER_ERROR', status: response.status, providerReason: reason, retryable, terminalState: retryable ? undefined : 'FAILED' }); }
+function redactProviderResponse(value) { if (!value || typeof value !== 'object') return {}; const clone = JSON.parse(JSON.stringify(value)); const redact = (node) => { if (!node || typeof node !== 'object') return; for (const key of Object.keys(node)) { if (/token|secret|authorization|credential|cookie|upload_uri/i.test(key)) delete node[key]; else redact(node[key]); } }; redact(clone); return clone; }
+function sleep(ms) { return ms ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve(); }
+module.exports = { YouTubePublisher, validateMetadata, redactProviderResponse, parseRange };
