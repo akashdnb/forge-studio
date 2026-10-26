@@ -78,7 +78,8 @@ test('provider run insert uses unique idempotency key with conflict-safe lookup'
     id: 'run-1', episodeId: 'ep-1', capability: 'tts', provider: 'fake', idempotencyKey: 'tts:ep-1:v1',
   });
   assert.equal(result.idempotency_key, 'tts:ep-1:v1');
-  assert.ok(pool.calls.at(-1).sql.includes('ON CONFLICT (idempotency_key)'));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('INSERT INTO provider_runs')));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')));
 });
 
 test('cost record ownership is checked before insert inside transaction', async () => {
