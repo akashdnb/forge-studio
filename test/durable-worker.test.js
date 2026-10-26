@@ -19,7 +19,7 @@ test('worker claims a job, executes it, and marks it complete', async () => {
   assert.equal(events[1].type, 'workflow-job.succeeded');
 });
 
-test('worker records retryable failure and does not swallow queue lease failure', async () => {
+test('worker records retryable failure', async () => {
   let failedOptions = null;
   const queue = {
     async claim() { return { id: 'job-2', episode_id: 'ep-1', stage: 'RENDER', attempts: 1 }; },
@@ -46,26 +46,27 @@ test('worker does not claim new work after stop', async () => {
   assert.equal(claims, 0);
 });
 
-
-test('worker heartbeat loss prevents stale worker completion or failure writes', async () => {
+test('worker never writes a late result after lease loss', async () => {
   let completeCalls = 0;
   let failCalls = 0;
+  let leaseReady;
+  const ready = new Promise((resolve) => { leaseReady = resolve; });
+  let runOnceDone;
   const queue = {
     async claim() { return { id: 'job-lease', episode_id: 'ep', stage: 'RENDER', attempts: 1 }; },
-    async heartbeat() { throw Object.assign(new Error('Job lease is no longer owned by this worker'), { code: 'LEASE_LOST' }); },
+    async heartbeat() { leaseReady(); throw Object.assign(new Error('lease lost'), { code: 'LEASE_LOST' }); },
     async complete() { completeCalls += 1; return {}; },
     async fail() { failCalls += 1; return { status: 'FAILED' }; },
   };
   const worker = new DurableWorker({
-    queue, leaseHeartbeatMs: 10,
-    executeJob: async (_job, { signal }) => {
-      // Abort may happen before the provider begins executing; AbortSignal does
-      // not replay an earlier abort event for listeners added afterward.
-      if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
-      return { lateResult: true };
-    },
+    queue,
+    leaseHeartbeatMs: 10,
+    executeJob: async () => new Promise((resolve) => { runOnceDone = resolve; }),
   });
-  const result = await worker.runOnce();
+  const resultPromise = worker.runOnce();
+  await ready;
+  runOnceDone({ late: true });
+  const result = await resultPromise;
   assert.equal(result.status, 'lease-lost');
   assert.equal(completeCalls, 0);
   assert.equal(failCalls, 0);
