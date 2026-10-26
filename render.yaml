@@ -21,6 +21,7 @@ services:
     name: forge-studio-worker
     runtime: docker
     plan: starter
+    dockerCommand: node src/worker.js
     disk:
       name: forge-render-disk
       mountPath: /var/lib/forge
