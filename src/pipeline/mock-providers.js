@@ -11,7 +11,7 @@ class MockTextProvider {
   }
 
   async execute(request, context) {
-    const text = typeof request.text === 'string' ? request.text : JSON.stringify(request);
+    const text = typeof request.text === 'string' ? request.text : (request.brief?.title || request.brief?.topic || JSON.stringify(request));
     const versionId = request.versionId || `${context.runId}-v1`;
     return {
       artifacts: [{
