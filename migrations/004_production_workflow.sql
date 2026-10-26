@@ -14,8 +14,9 @@ CREATE TABLE IF NOT EXISTS channels (
 );
 CREATE INDEX IF NOT EXISTS channels_project_idx ON channels(project_id);
 
-ALTER TABLE episodes ADD CONSTRAINT episodes_channel_fk
-  FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT;
+DO $$ BEGIN
+  ALTER TABLE episodes ADD CONSTRAINT episodes_channel_fk FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS style_profiles (
   id text PRIMARY KEY,
@@ -118,5 +119,8 @@ CREATE TABLE IF NOT EXISTS project_members (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(project_id, actor_id)
 );
+
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS depends_on_job_id text REFERENCES forge_jobs(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS forge_jobs_dependency_idx ON forge_jobs(depends_on_job_id);
 
 COMMIT;
