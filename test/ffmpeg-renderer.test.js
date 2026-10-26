@@ -1,0 +1,25 @@
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+const { renderTimeline, sha256Json, buildFfmpegArgs, validateRenderInput } = require('../src/pipeline/ffmpeg-renderer');
+function hasFfmpeg() { try { execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } }
+test('render input hash is deterministic and rejects mutation', () => {
+  const timeline = { durationSeconds: 1, tracks: [{ type: 'VIDEO', segments: [{ id: 'scene-1', start: 0, duration: 1, sourcePath: 'fixtures/scene.mp4' }] }] };
+  const hash = sha256Json(timeline); assert.equal(hash, sha256Json(JSON.parse(JSON.stringify(timeline))));
+  assert.throws(() => validateRenderInput({ timeline: { ...timeline, durationSeconds: 2 }, timelineVersionId: 'timeline:v1', timelineContentHash: hash, workDir: process.cwd() }), /hash mismatch/);
+});
+test('ffmpeg command is bounded, explicit and strips source metadata', () => {
+  const timeline = { durationSeconds: 2, tracks: [{ type: 'VIDEO', segments: [{ id: 'scene-1', start: 0, duration: 2, sourcePath: 'fixtures/scene.mp4' }] }] };
+  const args = buildFfmpegArgs({ timeline, workDir: '/tmp', durationSeconds: 2 }, '/tmp/out.mp4');
+  assert.ok(args.includes('-t')); assert.ok(args.includes('2')); assert.ok(args.includes('-map_metadata')); assert.ok(args.includes('-1')); assert.ok(args.includes('libx264'));
+});
+test('renderer produces a real MP4 with checksum and metadata', { skip: !hasFfmpeg() }, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-render-')); const fixtureDir = path.join(root, 'fixtures'); await fs.mkdir(fixtureDir); const source = path.join(fixtureDir, 'scene.mp4');
+  execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=320x180:r=30', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', source]);
+  const timeline = { durationSeconds: 1, tracks: [{ type: 'VIDEO', segments: [{ id: 'scene-1', start: 0, duration: 1, sourcePath: 'fixtures/scene.mp4' }] }] };
+  const result = await renderTimeline({ input: { timeline, timelineVersionId: 'timeline:v1', timelineContentHash: sha256Json(timeline), inputVersionIds: ['timeline:v1'] }, workDir: root, outputPath: path.join(root, 'out.mp4'), timeoutMs: 60000 });
+  assert.match(result.checksum, /^[a-f0-9]{64}$/); assert.ok(result.sizeBytes > 0); assert.equal(result.metadata.mediaType, 'video/mp4'); assert.equal(result.metadata.timelineVersionId, 'timeline:v1'); assert.equal((await fs.stat(path.join(root, 'out.mp4'))).size, result.sizeBytes); assert.equal(JSON.parse(await fs.readFile(path.join(root, 'out.mp4.json'), 'utf8')).sha256, result.checksum);
+});
