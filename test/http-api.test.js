@@ -4,7 +4,7 @@ const { createServer } = require('node:http');
 const { createApiServer, openApiDocument } = require('../src/http-api');
 
 async function withApi(run) {
-  const { server, service } = createApiServer({ logger: { error() {} } });
+  const { server, service } = createApiServer({ logger: { error() {} }, allowUnauthenticatedRead: true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   try {
