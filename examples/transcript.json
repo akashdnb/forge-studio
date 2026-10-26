@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "forge-transcript-v1",
+  "language": "en-US",
+  "source": "whisper-compatible",
+  "model": "whisper-large-v3",
+  "segments": [
+    { "id": "seg-001", "start": 0.0, "end": 2.2, "text": "Volcanoes are openings in Earth's crust.", "confidence": 0.98 },
+    { "id": "seg-002", "start": 2.2, "end": 4.9, "text": "They can release lava, ash, and gases.", "confidence": 0.97 }
+  ]
+}
