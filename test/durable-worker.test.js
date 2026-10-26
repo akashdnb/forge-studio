@@ -56,19 +56,16 @@ test('worker heartbeat loss prevents stale worker completion or failure writes',
     async complete() { completeCalls += 1; return {}; },
     async fail() { failCalls += 1; return { status: 'FAILED' }; },
   };
-  let signalSeen;
-  const signalReady = new Promise((resolve) => { signalSeen = resolve; });
   const worker = new DurableWorker({
     queue, leaseHeartbeatMs: 10,
     executeJob: async (_job, { signal }) => {
-      signalSeen();
-      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      // Abort may happen before the provider begins executing; AbortSignal does
+      // not replay an earlier abort event for listeners added afterward.
+      if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
       return { lateResult: true };
     },
   });
-  const promise = worker.runOnce();
-  await signalReady;
-  const result = await promise;
+  const result = await worker.runOnce();
   assert.equal(result.status, 'lease-lost');
   assert.equal(completeCalls, 0);
   assert.equal(failCalls, 0);
