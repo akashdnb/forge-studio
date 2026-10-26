@@ -12,13 +12,12 @@ Forge Studio is the production control plane for long-form educational video epi
 - Bearer-token protected API with project-scoped authorization, readiness/liveness and request IDs.
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
-- Transactional outbox and request-idempotency persistence primitives.
 - Async nine-stage episode orchestration: research → script → scene plan → narration → assets → timeline → render → QA → publish.
-- Production YouTube publishing adapter using resumable upload and OAuth refresh-token support.
-- Lightweight operational dashboard under `public/`.
-- Forge → Shorts handoff manifest gated on the exact approved render.
+- Built-in configurable HTTP adapters for the eight generation/QA stages.
+- YouTube publishing adapter using resumable upload and OAuth refresh-token support.
+- Lightweight operational dashboard and gated Forge → Shorts handoff.
 
-The remaining media-generation/rendering providers remain explicit worker adapters. Forge does not fake paid vendor capabilities: deployments register the stage handlers that match their selected LLM/TTS/asset/render infrastructure.
+Media quality remains dependent on the selected provider services and their credentials; Forge does not fake a successful production render when a real media provider is not configured.
 
 ## Validate locally
 
@@ -28,7 +27,7 @@ npm run check
 npm run demo -- "Why volcanoes erupt"
 ```
 
-The demo is deterministic and uses mock providers. It does not call paid APIs, create a real MP4/audio file, publish to YouTube, or dispatch a Shorts handoff.
+The deterministic demo uses mock providers. It does not call paid APIs, create a real MP4/audio file, publish to YouTube, or dispatch a Shorts handoff.
 
 ## Run the API
 
@@ -42,7 +41,7 @@ curl http://localhost:8080/readyz
 curl -H 'Authorization: Bearer local-dev-secret' http://localhost:8080/v1/episodes
 ```
 
-For production, configure `API_BEARER_TOKEN` and keep unauthenticated reads disabled. Supply `X-Actor-Id` with the authenticated actor identity; project membership is enforced server-side for persistent routes.
+For production, configure `API_BEARER_TOKEN` and keep unauthenticated reads disabled. `X-Actor-Id` is currently the application actor identifier used for project membership checks; put the API behind a trusted identity-aware gateway or replace this mapping with a verified identity claim before exposing the service to untrusted clients.
 
 ## PostgreSQL + worker
 
@@ -54,7 +53,7 @@ DATABASE_URL='postgres://...' npm run worker
 
 Migration `003_jobs_outbox.sql` adds durable jobs, the transactional outbox and persisted idempotency records. Migration `004_production_workflow.sql` adds research provenance, channels/style profiles, timeline snapshots, storage lifecycle records, publish runs, project membership and workflow-job dependencies.
 
-Workflow jobs are dependency-ordered. A downstream job is not claimable until its dependency succeeds; jobs whose dependency permanently fails/cancels are automatically cancelled. Workers lease, heartbeat and recover jobs after crashes.
+Jobs are dependency-ordered. Downstream jobs are not claimable until their dependency succeeds; jobs whose dependency permanently fails/cancels are automatically cancelled. Workers lease, heartbeat and recover jobs after crashes.
 
 ## Workflow API
 
@@ -69,24 +68,40 @@ Content-Type: application/json
 {"brief":"A 15 minute educational episode about volcanoes"}
 ```
 
-Inspect jobs with `GET /v1/jobs` or `GET /v1/jobs/:id`.
+Inspect jobs using `GET /v1/jobs` or `GET /v1/jobs/:id`.
 
 Research is persisted as an immutable version plus source/claim records:
-
 - `POST /v1/episodes/:episodeId/research`
 - `GET /v1/episodes/:episodeId/research`
 
 Timeline snapshots are validated and persisted through:
-
 - `POST /v1/episodes/:episodeId/timeline`
 - `GET /v1/episodes/:episodeId/timeline`
 
+## Configure production stage services
+
+The worker registers built-in handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline`, `workflow:render` and `workflow:qa`. Each handler sends a versioned JSON request to its configured endpoint and persists the normalized artifact response.
+
+Configure these environment variables on the worker:
+- `FORGE_STAGE_RESEARCH_ENDPOINT`
+- `FORGE_STAGE_SCRIPT_ENDPOINT`
+- `FORGE_STAGE_SCENE_PLAN_ENDPOINT`
+- `FORGE_STAGE_NARRATION_ENDPOINT`
+- `FORGE_STAGE_ASSETS_ENDPOINT`
+- `FORGE_STAGE_TIMELINE_ENDPOINT`
+- `FORGE_STAGE_RENDER_ENDPOINT`
+- `FORGE_STAGE_QA_ENDPOINT`
+- `FORGE_STAGE_PROVIDER_TOKEN` (optional shared bearer token)
+
+The endpoint must accept POST JSON with `contractVersion: "forge-stage-v1"`, `stage`, `capability`, `payload` and job metadata. It must return either `{"artifact":{"content":{...}}}` or `{"artifact":{"storageUri":"https://..."}}`, with optional `id`, `versionId`, `contentHash`, `mediaType`, `inputVersionIds` and `metadata`. Non-2xx responses are retried only for timeout, 408, 429 and 5xx responses.
+
+Custom handlers can still be loaded via `FORGE_WORKER_HANDLERS`. Custom handlers override built-in handlers by job kind.
+
 ## YouTube publishing
 
-Publishing is only accepted for an exact approved render with a passing QA result. Forge creates an idempotent `publish_run`, moves the episode into `PUBLISHING`, and queues the upload for the worker.
+Publishing requires the exact approved render and a passing QA result. Forge creates an idempotent `publish_run`, moves the episode to `PUBLISHING`, and queues the upload for the worker.
 
-Configure either a current access token or an OAuth refresh token plus client credentials:
-
+Configure either a current access token or a refresh token plus client credentials:
 ```text
 YOUTUBE_ACCESS_TOKEN
 YOUTUBE_REFRESH_TOKEN
@@ -94,24 +109,16 @@ YOUTUBE_CLIENT_ID
 YOUTUBE_CLIENT_SECRET
 ```
 
-The publisher uses YouTube's resumable upload flow and reconciles an existing external video ID before creating another upload. Google recommends offline OAuth access/refresh tokens for server-side applications that need to act when the user is not present.
-
-## Provider adapters
-
-Implement `execute(request, context)` and return normalized artifacts and usage/cost metadata. `src/pipeline/http-provider.js` supplies a timeout/retry-safe JSON adapter and an OpenAI-compatible chat adapter. Provider credentials must be injected through environment/secret management; never commit them.
-
-For long-running production stages, set `FORGE_WORKER_HANDLERS` to a module exporting a `handlers` object keyed by workflow job kind, for example `workflow:script`, `workflow:render` and `workflow:qa`. The worker loop owns durability/retries; the stage handler owns the vendor-specific execution and artifact persistence contract.
+The publisher uses YouTube's resumable upload flow and reconciles a known external video ID before creating another upload. Start with private uploads until the OAuth scopes, channel, quota, metadata and compliance settings are verified.
 
 ## Forge → Shorts
 
-`POST /v1/episodes/:episodeId/shorts/handoff` emits the versioned manifest only after the episode is approved/published and the exact approved render is selected. The manifest preserves source episode/render/version identity and candidate segments and explicitly grants no publication permission to Shorts.
+`POST /v1/episodes/:episodeId/shorts/handoff` emits the versioned manifest only after the episode is approved/published and the exact approved render is selected. It preserves source episode/render/version identity and candidate segments and explicitly grants no publication permission to Shorts.
 
-`purffle-shorts` remains independently deployable. Forge is the authoritative source for the long-form render and provenance; Shorts is the derivative generation/distribution system. A network dispatcher can consume the handoff manifest through the configured integration boundary without making long-form completion depend on Shorts publishing.
+Forge remains authoritative for long-form provenance; `purffle-shorts` is the derivative generation/distribution system. The manifest is the contract boundary rather than an assumption about a network endpoint in the Shorts service.
 
-## Dashboard
+## Dashboard and deployment
 
-The `public/` dashboard is a deliberately small operational UI for connection configuration, readiness, episode creation and episode inspection. It is not a replacement for the full editorial script/scene/timeline editor described by the architecture model.
+The `public/` UI supports connection configuration, readiness, episode creation and episode inspection. It is not yet the full editorial script/scene/timeline editor.
 
-## Render deployment
-
-`render.yaml` defines the authenticated API, durable worker and static dashboard. Configure `DATABASE_URL`, `API_BEARER_TOKEN`, `CORS_ORIGIN`, `FORGE_WORKER_HANDLERS` and the YouTube OAuth secrets in Render. Apply migrations before exposing the API to traffic, or explicitly opt into `RUN_MIGRATIONS_ON_START=true` when that operational policy is acceptable.
+`render.yaml` declares the authenticated API, worker and static dashboard. The Render Blueprint has been validated. Set the database/API credentials, stage endpoint secrets and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.

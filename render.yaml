@@ -21,14 +21,33 @@ services:
     name: forge-studio-worker
     runtime: docker
     plan: starter
-    startCommand: node src/worker.js
     envVars:
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
         sync: false
+      - key: PORT
+        value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_STAGE_RESEARCH_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_SCRIPT_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_SCENE_PLAN_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_NARRATION_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_ASSETS_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_TIMELINE_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_RENDER_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_QA_ENDPOINT
+        sync: false
+      - key: FORGE_STAGE_PROVIDER_TOKEN
+        sync: false
       - key: FORGE_WORKER_HANDLERS
         sync: false
       - key: YOUTUBE_ACCESS_TOKEN
