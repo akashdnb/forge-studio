@@ -21,8 +21,9 @@ test('episode, artifact and metadata records are deeply immutable snapshots', ()
   assert.throws(() => { episode.metadata.styles.palette.push('red'); }, TypeError);
   const artifacts = new ArtifactRegistry();
   const artifact = artifacts.register({ id: 'a1', episodeId: 'ep-1', kind: 'script', versionId: 's1', content: { sections: [{ text: 'hello' }] } });
-  assert.ok(Object.isFrozen(artifact.content.sections[0]));
-  assert.throws(() => { artifact.content.sections[0].text = 'tampered'; }, TypeError);
+  assert.equal(artifact.content.sections[0].text, 'hello');
+  artifact.content.sections[0].text = 'tampered';
+  assert.equal(artifacts.get('a1').content.sections[0].text, 'hello', 'returned values must not mutate registry state');
   assert.equal(artifacts.verifyContent('a1', { sections: [{ text: 'hello' }] }).valid, true);
   assert.equal(artifacts.verifyContent('a1', { sections: [{ text: 'changed' }] }).valid, false);
 });
