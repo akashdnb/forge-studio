@@ -8,11 +8,24 @@ const { createTranscriptionHandlers } = require('./transcription/whisper-worker'
 const { createNarrationHandlers, createProviderRegistry } = require('./narration/tts-worker');
 const { createStorageFromEnv } = require('./storage');
 const { createFfmpegRenderHandler } = require('./pipeline/ffmpeg-render-handler');
-function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
-  const queue = new JobQueue({ pool }); let stopping = false; let timer = null;
+const { createGithubActionsExecutionBackend } = require('./execution/github-actions-backend');
+
+function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console, executionBackend = null } = {}) {
+  const queue = new JobQueue({ pool });
+  const githubBackend = executionBackend || (process.env.FORGE_GITHUB_ACTIONS_ENABLED === 'true' ? createGithubActionsExecutionBackend({ pool, queue, logger }) : null);
+  let stopping = false; let timer = null;
   async function tick() {
-    if (stopping) return; await queue.recoverExpiredLeases(); await queue.recoverBlockedDependencies(); const job = await queue.claim({ workerId }); if (!job) return;
-    const handler = handlers[job.kind]; if (typeof handler !== 'function') { await queue.fail(job.id, workerId, Object.assign(new Error(`No worker handler registered for ${job.kind}`), { retryable: false }), { retry: false }); return; }
+    if (stopping) return;
+    if (githubBackend) await githubBackend.reconcile();
+    await queue.recoverExpiredLeases();
+    await queue.recoverBlockedDependencies();
+    if (githubBackend) await githubBackend.dispatchNext({ workerId });
+    const normalKinds = Object.keys(handlers).filter((kind) => !githubBackend?.isExternalKind(kind));
+    if (!normalKinds.length) return;
+    const job = await queue.claim({ workerId, kinds: normalKinds });
+    if (!job) return;
+    const handler = handlers[job.kind];
+    if (typeof handler !== 'function') { await queue.fail(job.id, workerId, Object.assign(new Error(`No worker handler registered for ${job.kind}`), { retryable: false }), { retry: false }); return; }
     const heartbeat = setInterval(() => queue.heartbeat(job.id, workerId).catch((e) => logger.error?.('Forge worker heartbeat failed', e)), 30000); heartbeat.unref?.();
     try { const result = await handler(job.payload, job); await queue.succeed(job.id, workerId, result || {}); }
     catch (error) { logger.error?.(`Forge job ${job.id} (${job.kind}) failed: ${error.message}`); await queue.fail(job.id, workerId, error, { retry: error?.retryable !== false }); }
@@ -20,7 +33,7 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
   }
   async function run() { while (!stopping) { try { await tick(); } catch (error) { logger.error?.('Forge worker loop failed', error); } if (!stopping) await new Promise((resolve) => { timer = setTimeout(resolve, pollMs); timer.unref?.(); }); } }
   async function stop() { stopping = true; if (timer) clearTimeout(timer); }
-  return { queue, run, stop, workerId };
+  return { queue, run, stop, workerId, executionBackend: githubBackend };
 }
 function loadHandlers({ pool } = {}) {
   const storage = pool ? createStorageFromEnv() : null; let providerRegistry = null; let providerConfigError = null;
