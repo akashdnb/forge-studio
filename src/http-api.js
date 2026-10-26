@@ -221,6 +221,25 @@ async function handlePersistent({ request, url, path, requestId, repository, act
   if (path[0] === 'v1' && path[1] === 'versions' && path[2] && path[3] === 'invalidation-plan' && request.method === 'POST') {
     return { handled: true, statusCode: 200, body: { items: await repository.invalidationPlan(decodeURIComponent(path[2])) } };
   }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'jobs' && request.method === 'POST') {
+    const body = await readJson(request);
+    return { handled: true, statusCode: 202, body: { item: await repository.enqueueJob({ ...body, episodeId: decodeURIComponent(path[2]), createdBy: actor }) } };
+  }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'jobs' && request.method === 'GET') {
+    const items = await repository.listJobs({ episodeId: decodeURIComponent(path[2]), status: url.searchParams.get('status') || undefined,
+      limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50,
+      offset: url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0 });
+    return { handled: true, statusCode: 200, body: { items } };
+  }
+  if (path[0] === 'v1' && path[1] === 'jobs' && path[2] && request.method === 'GET') {
+    const item = await repository.getJob(decodeURIComponent(path[2]));
+    return item ? { handled: true, statusCode: 200, body: { item } }
+      : { handled: true, statusCode: 404, body: { error: { code: 'NOT_FOUND', message: 'Job not found' }, requestId } };
+  }
+  if (path[0] === 'v1' && path[1] === 'jobs' && path[2] && path[3] === 'cancel' && request.method === 'POST') {
+    const item = await repository.cancelJob(decodeURIComponent(path[2]));
+    return { handled: true, statusCode: 200, body: { item } };
+  }
   return { handled: false };
 }
 
