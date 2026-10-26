@@ -1,0 +1,61 @@
+name: Forge bounded media render
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Durable workflow:render job id
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: forge-render-${{ inputs.job_id }}
+  cancel-in-progress: false
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout immutable worker code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Install dependencies
+        run: npm install --ignore-scripts --omit=dev
+      - name: Validate ffmpeg
+        run: ffmpeg -version
+      - name: Execute bounded render job
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORGE_RENDER_TIMEOUT_MS: 900000
+          FORGE_RENDER_LEASE_SECONDS: 1800
+          FORGE_RENDER_STORAGE_URI_PREFIX: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/run-render-job.js "${{ inputs.job_id }}"
+      - name: Verify render artifact metadata and checksum
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: node scripts/verify-render-job.js "${{ inputs.job_id }}"
+      - name: Upload real MP4 and metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-render-${{ inputs.job_id }}
+          path: |
+            .forge-render-output/*.mp4
+            .forge-render-output/*.mp4.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Reconcile success explicitly
+        if: ${{ success() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/reconcile-render-job.js "${{ inputs.job_id }}" SUCCEEDED
+      - name: Reconcile failure explicitly
+        if: ${{ failure() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/reconcile-render-job.js "${{ inputs.job_id }}" FAILED
