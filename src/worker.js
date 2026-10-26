@@ -4,6 +4,7 @@ const { JobQueue } = require('./persistence/job-queue');
 const { createPublishingHandlers } = require('./publishing/job-handler');
 const { createHttpWorkflowHandlers } = require('./pipeline/http-workflow-handlers');
 const { createCaptionJobHandler } = require('./captions/job-handler');
+const { createFfmpegRenderHandler } = require('./pipeline/ffmpeg-render-handler');
 
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool }); let stopping = false; let timer = null;
@@ -24,7 +25,7 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
 }
 
 function loadHandlers({ pool } = {}) {
-  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }) } : {};
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool }), ...createPublishingHandlers({ pool }), 'workflow:captions': createCaptionJobHandler({ pool }), 'workflow:render': createFfmpegRenderHandler({ pool }) } : {};
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
   if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
   return handlers;
