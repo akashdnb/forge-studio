@@ -48,8 +48,6 @@ class DurableWorker {
       this.onEvent({ type: 'workflow-job.succeeded', jobId: job.id, stage: job.stage });
       return { status: 'succeeded', job: completed, result };
     } catch (error) {
-      // A worker that lost the lease must not overwrite the state of the new
-      // owner. The claim operation will reclaim/requeue or finalize the job.
       if (leaseLost || error?.code === 'LEASE_LOST') {
         this.onEvent({ type: 'workflow-job.lease-lost', jobId: job.id, stage: job.stage });
         return { status: 'lease-lost', job: { id: job.id }, error: { message: (leaseLost || error).message } };
