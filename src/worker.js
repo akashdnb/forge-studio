@@ -25,7 +25,11 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
     if (stopping) return;
     await queue.recoverExpiredLeases();
     await queue.recoverBlockedDependencies();
-    if (integration) await integration.recover({ actor: workerId }).catch((error) => logger.error?.('Forge workflow recovery failed', error));
+    if (integration) {
+      await integration.recover({ actor: workerId }).catch((error) => logger.error?.('Forge workflow recovery failed', error));
+      const blocked = await pool.query(`SELECT DISTINCT w.id FROM episode_workflows w JOIN episode_workflow_stages s ON s.workflow_id=w.id WHERE w.status IN ('QUEUED','RUNNING') AND s.status='BLOCKED'`);
+      for (const row of blocked.rows) await integration.dispatchReady(row.id, workerId).catch((error) => { if (!['APPROVAL_BLOCKED', 'QA_BLOCKED'].includes(error?.code)) logger.error?.('Forge blocked-stage dispatch failed', error); });
+    }
     const job = await queue.claim({ workerId });
     if (!job) return;
     const handler = handlers[job.kind];
