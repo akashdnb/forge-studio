@@ -40,6 +40,12 @@ async function start() {
     apiToken: process.env.API_BEARER_TOKEN || null,
     allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true',
   });
+  server.prependListener('request', (_request, response) => {
+    response.setHeader('x-frame-options', 'DENY');
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+    response.setHeader('content-security-policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+  });
   server.listen(port, host, () => {
     console.log(`Forge Studio API listening on ${host}:${port}; persistence=${repository ? 'postgres' : 'in-memory'}`);
   });
