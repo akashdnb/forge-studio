@@ -13,3 +13,9 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+  - type: web
+    name: forge-studio-ui
+    runtime: static
+    plan: starter
+    buildCommand: ""
+    staticPublishPath: ./public
