@@ -16,12 +16,14 @@ class ArtifactRegistry {
     versionId = requiredString(versionId, 'versionId');
     if (this.#artifacts.has(id)) throw new Error(`Artifact already exists: ${id}`);
     if (!storageUri && content === null) throw new TypeError('storageUri or content is required');
-    const serializedContent = content === null ? null : JSON.stringify(content);
+    // Clone before hashing and freezing: caller-owned objects must never be frozen or retained.
+    const contentSnapshot = content === null ? null : JSON.parse(JSON.stringify(content));
+    const serializedContent = contentSnapshot === null ? null : JSON.stringify(contentSnapshot);
     const digest = contentHash || (serializedContent !== null
       ? crypto.createHash('sha256').update(serializedContent).digest('hex') : null);
     const now = new Date().toISOString();
     const artifact = immutableRecord({
-      id, episodeId, kind, versionId, storageUri, content: content === null ? null : content,
+      id, episodeId, kind, versionId, storageUri, content: contentSnapshot,
       contentHash: digest, mediaType, providerRunId, source, license,
       inputVersionIds: [...new Set(inputVersionIds)], metadata, createdBy, createdAt: now,
     });
