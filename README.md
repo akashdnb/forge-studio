@@ -7,6 +7,7 @@ Forge Studio is the production control plane for long-form educational video epi
 - Durable PostgreSQL persistence with ordered/checksummed migrations.
 - Project/channel/style-profile primitives and project membership roles.
 - Immutable version/artifact provenance and dependency invalidation.
+- Content-addressed artifact storage with local and S3-compatible backends, bounded streaming I/O and checksum verification.
 - First-class research packages, sources and claim provenance.
 - Declarative timeline snapshots with deterministic validation and content hashes.
 - Bearer-token protected API with project-scoped authorization, readiness/liveness and request IDs.
@@ -51,9 +52,15 @@ DATABASE_URL='postgres://...' npm start
 DATABASE_URL='postgres://...' npm run worker
 ```
 
-Migration `003_jobs_outbox.sql` adds durable jobs, the transactional outbox and persisted idempotency records. Migration `004_production_workflow.sql` adds research provenance, channels/style profiles, timeline snapshots, storage lifecycle records, publish runs, project membership and workflow-job dependencies.
+Migration `003_jobs_outbox.sql` adds durable jobs, the transactional outbox and persisted idempotency records. Migration `004_production_workflow.sql` adds research provenance, channels/style profiles, timeline snapshots, storage lifecycle records, publish runs, project membership and workflow-job dependencies. Migration `005_captions.sql` adds deterministic caption provenance and lifecycle; migration `006_artifact_storage.sql` adds trusted storage keys, checksum status and reconciliation metadata.
 
 Jobs are dependency-ordered. Downstream jobs are not claimable until their dependency succeeds; jobs whose dependency permanently fails/cancels are automatically cancelled. Workers lease, heartbeat and recover jobs after crashes.
+
+## Artifact storage
+
+Configure the worker with `FORGE_STORAGE_DRIVER=local` for development/tests or `FORGE_STORAGE_DRIVER=s3` in production. See [`docs/ARTIFACT_STORAGE.md`](docs/ARTIFACT_STORAGE.md) for the full contract and configuration.
+
+The worker accepts binary provider results as `artifact.contentBase64` plus `mediaType` and optional `contentHash`. Forge streams the bytes through a bounded SHA-256 verifier, derives an immutable content-addressed key, persists trusted storage metadata and resolves later through the artifact/version graph. Provider-supplied `storageUri` values are not opened or followed, preventing path traversal and SSRF-style storage access.
 
 ## Workflow API
 
@@ -92,7 +99,7 @@ Configure these environment variables on the worker for provider-backed stages:
 - `FORGE_STAGE_RENDER_ENDPOINT`
 - `FORGE_STAGE_PROVIDER_TOKEN` (optional shared bearer token)
 
-Provider endpoints accept POST JSON with `contractVersion: "forge-stage-v1"`, `stage`, `capability`, `payload` and job metadata. They return either `{"artifact":{"content":{...}}}` or `{"artifact":{"storageUri":"https://..."}}`, with optional `id`, `versionId`, `contentHash`, `mediaType`, `inputVersionIds` and `metadata`. Non-2xx responses are retried only for timeout, 408, 429 and 5xx responses.
+Provider endpoints accept POST JSON with `contractVersion: "forge-stage-v1"`, `stage`, `capability`, `payload` and job metadata. JSON artifacts may use `artifact.content`. Binary artifacts must use `artifact.contentBase64`, with optional `id`, `versionId`, `contentHash`, `mediaType`, `inputVersionIds` and `metadata`. A provider may not supply a filesystem path or arbitrary URL for Forge to fetch. Non-2xx responses are retried only for timeout, 408, 429 and 5xx responses.
 
 Custom handlers can still be loaded via `FORGE_WORKER_HANDLERS`. Custom handlers override built-in handlers by job kind.
 
@@ -120,4 +127,4 @@ Forge remains authoritative for long-form provenance; `purffle-shorts` is the de
 
 The `public/` UI supports connection configuration, readiness, episode creation and episode inspection. It is not yet the full editorial script/scene/timeline editor.
 
-`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, QA bounds/host allowlist, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
+`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, artifact storage configuration, QA bounds/host allowlist, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.

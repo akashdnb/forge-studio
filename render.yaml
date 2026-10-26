@@ -30,6 +30,18 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_STORAGE_DRIVER
+        value: s3
+      - key: FORGE_STORAGE_MAX_BYTES
+        value: "10737418240"
+      - key: FORGE_STORAGE_S3_BUCKET
+        sync: false
+      - key: FORGE_STORAGE_S3_REGION
+        sync: false
+      - key: FORGE_STORAGE_S3_ENDPOINT
+        sync: false
+      - key: FORGE_STORAGE_S3_FORCE_PATH_STYLE
+        value: "false"
       - key: FORGE_STAGE_RESEARCH_ENDPOINT
         sync: false
       - key: FORGE_STAGE_SCRIPT_ENDPOINT
