@@ -1,22 +1,23 @@
 /**
- * Small immutable-record helper for the Forge domain.
- * This core is intentionally dependency-free; persistence is an adapter.
+ * Small immutable-record helper for Forge domain snapshots.
  */
 function cloneJson(value) {
   if (value === undefined) return undefined;
   return JSON.parse(JSON.stringify(value));
 }
 
-function deepFreeze(value) {
-  if (!value || typeof value !== 'object') return value;
-  // JSON cloning guarantees there are no shared object references or cycles.
-  for (const child of Object.values(value)) deepFreeze(child);
-  if (!Object.isFrozen(value)) Object.freeze(value);
+function deepFreeze(value, seen = new WeakSet()) {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) deepFreeze(value[key], seen);
+  Object.freeze(value);
   return value;
 }
 
 function immutableRecord(value) {
-  return deepFreeze(cloneJson(value));
+  const cloned = cloneJson(value);
+  return deepFreeze(cloned);
 }
 
 function requiredString(value, field) {
