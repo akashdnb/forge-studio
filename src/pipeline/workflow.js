@@ -57,7 +57,10 @@ class EpisodeWorkflow {
       outputs.push({ stage, ...result, inputVersionIds });
       previous = { ...previous, [stage]: result.artifacts, lastResult: result };
       if (stage === 'SCENE_PLAN' && result.artifacts[0]?.content) {
-        const validation = normalizeScenePlan(result.artifacts[0].content);
+        const rawPlan = result.artifacts[0].content;
+        // Providers may return a full scene plan directly or a content envelope.
+        const candidate = rawPlan && rawPlan.content && rawPlan.content.scenes ? rawPlan.content : rawPlan;
+        const validation = normalizeScenePlan(candidate);
         previous.normalizedScenePlan = validation;
       }
     }
