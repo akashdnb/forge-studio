@@ -39,13 +39,11 @@ class YouTubePublisher {
     if (parsed.origin !== YOUTUBE_API_ORIGIN) throw Object.assign(new Error('YouTube API request origin is not permitted'), { retryable: false });
     const token = await this.token();
     const response = await this.fetchImpl(parsed.href, { ...options, redirect: 'error', headers: { ...(options.headers || {}), authorization: `Bearer ${token}` } });
-    if (response.status === 401 && retry && this.refreshToken) {
-      this.accessToken = ''; await this.token(); return this.request(parsed.href, options, false);
-    }
+    if (response.status === 401 && retry && this.refreshToken) { this.accessToken = ''; await this.token(); return this.request(parsed.href, options, false); }
     return response;
   }
 
-  async createSession({ sourceUri, metadata = {}, requestFingerprint, existingSessionUri = null }) {
+  async createSession({ sourceUri, metadata = {}, requestFingerprint, existingSessionUri = null, onSession = null }) {
     const file = await materialize(sourceUri, this.fetchImpl, { allowedHosts: this.allowedArtifactHosts });
     try {
       const stat = await fsp.stat(file);
@@ -59,9 +57,7 @@ class YouTubePublisher {
       let location = existingSessionUri;
       if (location) {
         const parsed = new URL(location);
-        if (parsed.protocol !== 'https:' || parsed.origin !== YOUTUBE_API_ORIGIN || !parsed.pathname.startsWith('/upload/')) {
-          throw Object.assign(new Error('Persisted YouTube upload session URI is invalid'), { retryable: false });
-        }
+        if (parsed.protocol !== 'https:' || parsed.origin !== YOUTUBE_API_ORIGIN || !parsed.pathname.startsWith('/upload/')) throw Object.assign(new Error('Persisted YouTube upload session URI is invalid'), { retryable: false });
         const status = await this.request(location, { method: 'PUT', headers: { 'content-length': '0', 'content-type': 'video/mp4', 'content-range': `bytes */${stat.size}` }, body: Buffer.alloc(0), duplex: 'half' });
         if (status.status === 200 || status.status === 201) {
           const done = await status.json();
@@ -73,12 +69,10 @@ class YouTubePublisher {
         } else {
           const range = status.headers.get('range');
           const uploadedBytes = range ? Number(range.match(/-(\d+)$/)?.[1] || -1) + 1 : 0;
-          if (uploadedBytes >= stat.size) throw Object.assign(new Error('YouTube reports the full file uploaded but has not returned a video resource; reconcile before creating a new session'), { retryable: true, uploadSessionUri: location, requestFingerprint });
-          const fileStream = fs.createReadStream(file, { start: Math.max(0, uploadedBytes) });
+          if (uploadedBytes >= stat.size) throw Object.assign(new Error('YouTube reports full file uploaded without a video resource; reconcile before creating another session'), { retryable: true, uploadSessionUri: location, requestFingerprint });
           const upload = await this.request(location, {
-            method: 'PUT',
-            headers: { 'content-type': 'video/mp4', 'content-length': String(stat.size - uploadedBytes), 'content-range': `bytes ${uploadedBytes}-${stat.size - 1}/${stat.size}` },
-            body: fileStream, duplex: 'half',
+            method: 'PUT', headers: { 'content-type': 'video/mp4', 'content-length': String(stat.size - uploadedBytes), 'content-range': `bytes ${uploadedBytes}-${stat.size - 1}/${stat.size}` },
+            body: fs.createReadStream(file, { start: Math.max(0, uploadedBytes) }), duplex: 'half',
           });
           if (upload.status === 308) throw Object.assign(new Error('YouTube resumable upload remains incomplete'), { retryable: true, uploadSessionUri: location, uploadRange: upload.headers.get('range') || null, requestFingerprint });
           if (!upload.ok) throw await providerError('YouTube resumed upload failed', upload);
@@ -90,21 +84,17 @@ class YouTubePublisher {
 
       if (!location) {
         const session = await this.request(`${UPLOAD_URL}?uploadType=resumable&part=snippet,status`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-length': String(stat.size), 'x-upload-content-type': 'video/mp4', 'x-goog-resumable': 'start' },
+          method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-length': String(stat.size), 'x-upload-content-type': 'video/mp4', 'x-goog-resumable': 'start' },
           body: JSON.stringify(resource),
         });
         if (!session.ok) throw await providerError('YouTube upload session failed', session);
         location = session.headers.get('location');
         if (!location) throw Object.assign(new Error('YouTube did not return a resumable upload URL'), { retryable: true });
-        // Persist the session immediately, before moving video bytes. If this fails,
-        // do not upload and risk an untracked duplicate.
-        if (typeof arguments[0]?.onSession === 'function') await arguments[0].onSession(location);
+        if (typeof onSession === 'function') await onSession(location);
       }
 
       const upload = await this.request(location, {
-        method: 'PUT',
-        headers: { 'content-type': 'video/mp4', 'content-length': String(stat.size), 'content-range': `bytes 0-${stat.size - 1}/${stat.size}`, 'x-upload-content-length': String(stat.size) },
+        method: 'PUT', headers: { 'content-type': 'video/mp4', 'content-length': String(stat.size), 'content-range': `bytes 0-${stat.size - 1}/${stat.size}` },
         body: fs.createReadStream(file), duplex: 'half',
       });
       if (upload.status === 308) throw Object.assign(new Error('YouTube upload is resumable but incomplete'), { retryable: true, uploadSessionUri: location, uploadRange: upload.headers.get('range') || null, requestFingerprint });
