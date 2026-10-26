@@ -13,11 +13,11 @@ Forge Studio is the production control plane for long-form educational video epi
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
 - Async nine-stage episode orchestration: research → script → scene plan → narration → assets → timeline → render → QA → publish.
-- Built-in configurable HTTP adapters for the eight generation/QA stages.
+- Built-in configurable HTTP adapters for generation/QA stages plus a built-in deterministic FFmpeg render stage.
 - YouTube publishing adapter using resumable upload and OAuth refresh-token support.
 - Lightweight operational dashboard and gated Forge → Shorts handoff.
 
-Media quality remains dependent on the selected provider services and their credentials; Forge does not fake a successful production render when a real media provider is not configured.
+Forge never records render success from a placeholder response. The render stage must produce a real MP4, verify its checksum/metadata, and persist immutable provenance before the durable render job can succeed.
 
 ## Validate locally
 
@@ -78,22 +78,37 @@ Timeline snapshots are validated and persisted through:
 - `POST /v1/episodes/:episodeId/timeline`
 - `GET /v1/episodes/:episodeId/timeline`
 
+## Production render
+
+`workflow:render` is handled by Forge's built-in FFmpeg renderer rather than `FORGE_STAGE_RENDER_ENDPOINT`. The handler loads the persisted timeline version, verifies its SHA-256 content hash, validates source paths, runs bounded FFmpeg, produces H.264/AAC MP4 output, computes the output checksum, writes metadata, and persists the render artifact plus storage lifecycle record.
+
+Render artifacts use deterministic IDs derived from the durable job ID (`render:<job-id>`), so retries reconcile the same artifact. Permanent input/provenance errors are not retried; execution failures use the existing bounded job retry/lease lifecycle.
+
+Production worker configuration:
+
+```text
+FORGE_RENDER_WORKDIR=/var/lib/forge
+FORGE_RENDER_OUTPUT_DIR=/var/lib/forge/renders
+FORGE_RENDER_TIMEOUT_MS=900000
+```
+
+The Render Blueprint provisions FFmpeg in the production image, runs `node src/worker.js` for the worker service, and mounts a 10 GB persistent render disk at `/var/lib/forge`.
+
+See [`docs/ffmpeg-render-worker.md`](docs/ffmpeg-render-worker.md) for the bounded GitHub Actions executor and reconciliation flow.
+
 ## Configure production stage services
 
-The worker registers built-in handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline`, `workflow:render` and `workflow:qa`. Each handler sends a versioned JSON request to its configured endpoint and persists the normalized artifact response.
+The worker registers built-in handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline`, `workflow:render` and `workflow:qa`. All stages except render can use their configured HTTP provider endpoints. Render is intentionally local and deterministic.
 
-Configure these environment variables on the worker:
+Configure these environment variables on the worker for the HTTP-backed stages:
 - `FORGE_STAGE_RESEARCH_ENDPOINT`
 - `FORGE_STAGE_SCRIPT_ENDPOINT`
 - `FORGE_STAGE_SCENE_PLAN_ENDPOINT`
 - `FORGE_STAGE_NARRATION_ENDPOINT`
 - `FORGE_STAGE_ASSETS_ENDPOINT`
 - `FORGE_STAGE_TIMELINE_ENDPOINT`
-- `FORGE_STAGE_RENDER_ENDPOINT`
 - `FORGE_STAGE_QA_ENDPOINT`
 - `FORGE_STAGE_PROVIDER_TOKEN` (optional shared bearer token)
-
-The endpoint must accept POST JSON with `contractVersion: "forge-stage-v1"`, `stage`, `capability`, `payload` and job metadata. It must return either `{"artifact":{"content":{...}}}` or `{"artifact":{"storageUri":"https://..."}}`, with optional `id`, `versionId`, `contentHash`, `mediaType`, `inputVersionIds` and `metadata`. Non-2xx responses are retried only for timeout, 408, 429 and 5xx responses.
 
 Custom handlers can still be loaded via `FORGE_WORKER_HANDLERS`. Custom handlers override built-in handlers by job kind.
 
@@ -121,4 +136,4 @@ Forge remains authoritative for long-form provenance; `purffle-shorts` is the de
 
 The `public/` UI supports connection configuration, readiness, episode creation and episode inspection. It is not yet the full editorial script/scene/timeline editor.
 
-`render.yaml` declares the authenticated API, worker and static dashboard. The Render Blueprint has been validated. Set the database/API credentials, stage endpoint secrets and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
+`render.yaml` declares the authenticated API, durable worker and static dashboard. Set the database/API credentials, HTTP stage endpoint secrets and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
