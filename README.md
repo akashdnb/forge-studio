@@ -12,7 +12,7 @@ Forge Studio is the production control plane for long-form educational video epi
 - Bearer-token protected API with project-scoped authorization, readiness/liveness and request IDs.
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
-- Async nine-stage episode orchestration: research → script → scene plan → narration → transcription → assets → timeline → render → QA → publish.
+- Async episode orchestration: research → script → scene plan → narration → transcription → assets → timeline → render → QA → publish.
 - Real bounded Whisper-compatible transcription worker with immutable input checksum verification and deterministic transcript artifacts.
 - Built-in configurable HTTP adapters for the generation/QA stages.
 - YouTube publishing adapter using resumable upload and OAuth refresh-token support.
@@ -64,7 +64,7 @@ A narration artifact must explicitly carry `metadata.approved=true` after its ap
 
 ```bash
 FORGE_WHISPER_COMMAND=whisper
-FORGE_WHISPER_MODEL=large-v3
+FORGE_WHISPER_MODEL=turbo
 FORGE_WHISPER_ARGS='--model ${model} --output_format json --output_dir ${outDir} ${input}'
 FORGE_TRANSCRIPTION_TIMEOUT_MS=840000
 FORGE_TRANSCRIPTION_MAX_INPUT_BYTES=2147483648
