@@ -61,7 +61,7 @@ test('HTTP stage provider persists normalized artifact response', async () => {
     assert.equal(result.episodeId, 'episode-1');
     assert.ok(result.versionId);
     assert.ok(result.artifactId);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3);
   } finally {
     if (old === undefined) delete process.env.FORGE_STAGE_SCRIPT_ENDPOINT;
     else process.env.FORGE_STAGE_SCRIPT_ENDPOINT = old;
