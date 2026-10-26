@@ -16,8 +16,9 @@ Execution states are `DISPATCHING`, `QUEUED`, `IN_PROGRESS`, `COMPLETED`, `FAILE
 | `workflow:render` | media-ffmpeg | `.github/workflows/forge-render.yml` |
 | `workflow:captions` | captions | `.github/workflows/forge-caption.yml` |
 | `workflow:qa` | qa | `.github/workflows/forge-qa.yml` |
+| `workflow:package` | package | `.github/workflows/forge-package.yml` |
 
-The wrappers call `.github/workflows/forge-worker.yml`; they contain no business logic. Successful/failed external jobs invoke the existing `EpisodeWorkflowIntegration` hooks so stage dependencies, blocked-stage handling and downstream dispatch continue to work exactly as they do for local workers.
+The wrappers call `.github/workflows/forge-worker.yml`; they contain no business logic. Successful/failed external jobs invoke the existing `EpisodeWorkflowIntegration` hooks so stage dependencies, blocked-stage handling and downstream dispatch continue to work exactly as they do for local workers. Packaging is routed through the same bounded runner backend while retaining the production packaging worker's provenance/idempotency logic.
 
 ## Dispatch contract and security
 
@@ -56,7 +57,7 @@ The dispatch credential needs only the repository permissions required to dispat
 - `DATABASE_URL` for the existing task-specific handlers;
 - `FORGE_RUNNER_CALLBACK_TOKEN` shared with the Forge API;
 - `FORGE_RUNNER_CALLBACK_URL` pointing at `/internal/github-actions/callback`;
-- S3 credentials for render/QA/transcription where required;
+- S3 credentials for render/QA/transcription/packaging where required;
 - Whisper configuration only for transcription.
 
 Wrappers explicitly pass only the secrets needed by their worker. Do not replace these mappings with `secrets: inherit`.
@@ -74,4 +75,4 @@ npm install --no-audit --no-fund
 npm run check
 ```
 
-The check script includes the execution backend, callback handler and generic runner entrypoint plus the complete Node test suite.
+The check script includes the execution backend, callback handler, packaging adapter and generic runner entrypoint plus the complete Node test suite.
