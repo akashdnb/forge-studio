@@ -38,10 +38,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FORGE_RENDER_TIMEOUT_MS: 900000
           FORGE_RENDER_LEASE_SECONDS: 1800
+          FORGE_RENDER_STORAGE_URI_PREFIX: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: node scripts/run-render-job.js "${{ inputs.job_id }}"
 
-      - name: Verify render artifact metadata
+      - name: Verify render artifact metadata and checksum
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: node scripts/verify-render-job.js "${{ inputs.job_id }}"
