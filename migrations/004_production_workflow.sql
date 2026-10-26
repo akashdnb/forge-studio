@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS style_profiles (
 );
 
 ALTER TABLE version_records DROP CONSTRAINT IF EXISTS version_records_kind_check;
-ALTER TABLE version_records ADD CONSTRAINT version_records_kind_check CHECK (kind IN ('episode','research','script','scene-plan','scene','asset','narration','render','qa','timeline','caption','thumbnail'));
+ALTER TABLE version_records ADD CONSTRAINT version_records_kind_check CHECK (kind IN ('episode','research','script','scene-plan','scene','asset','narration','render','qa','timeline','caption','thumbnail','publish-record'));
 
 CREATE TABLE IF NOT EXISTS research_packages (
   id text PRIMARY KEY,
