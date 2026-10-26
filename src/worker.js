@@ -101,6 +101,7 @@ async function main() {
 
   const worker = new DurableWorker({
     queue, executeJob, pollIntervalMs: Number.parseInt(process.env.WORKER_POLL_INTERVAL_MS || '1000', 10),
+    leaseHeartbeatMs: Number.parseInt(process.env.WORKER_HEARTBEAT_MS || '30000', 10),
     workerId, onEvent: (event) => process.stdout.write(`[worker] ${JSON.stringify(event)}\n`),
   });
   const controller = new AbortController();
