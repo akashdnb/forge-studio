@@ -4,7 +4,7 @@ const { createServer } = require('node:http');
 const { createApiServer, openApiDocument } = require('../src/http-api');
 
 async function withApi(run) {
-  const { server, service } = createApiServer({ logger: { error() {} }, allowUnauthenticatedRead: true });
+  const { server, service } = createApiServer({ logger: { error() {} }, apiToken: 'test-token', allowUnauthenticatedRead: true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   try {
@@ -16,7 +16,7 @@ async function withApi(run) {
 
 async function request(base, path, { method = 'GET', body, headers = {} } = {}) {
   const response = await fetch(base + path, {
-    method, headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+    method, headers: { authorization: 'Bearer test-token', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: response.status, headers: response.headers, body: await response.json() };
@@ -47,7 +47,7 @@ test('creates, lists and retrieves episodes with request IDs', async () => {
 
 test('validation, malformed JSON and illegal transitions return structured errors', async () => {
   await withApi(async (base) => {
-    const bad = await fetch(base + '/v1/episodes', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"id":' });
+    const bad = await fetch(base + '/v1/episodes', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer test-token' }, body: '{"id":' });
     assert.equal(bad.status, 400);
     assert.equal((await bad.json()).error.code, 'BAD_REQUEST');
 
@@ -65,7 +65,7 @@ test('validation, malformed JSON and illegal transitions return structured error
 test('oversized request body is rejected with 413', async () => {
   await withApi(async (base) => {
     const oversized = 'x'.repeat(1_048_577);
-    const response = await fetch(base + '/v1/episodes', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ oversized }) });
+    const response = await fetch(base + '/v1/episodes', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer test-token' }, body: JSON.stringify({ oversized }) });
     assert.equal(response.status, 413);
     assert.equal((await response.json()).error.code, 'BAD_REQUEST');
   });
