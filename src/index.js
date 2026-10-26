@@ -10,8 +10,13 @@ module.exports = {
   ...require('./pipeline/pipeline-service'),
   ...require('./pipeline/scene-plan'),
   ...require('./pipeline/workflow'),
+  ...require('./pipeline/async-orchestrator'),
+  ...require('./pipeline/production-contracts'),
   ...require('./pipeline/mock-providers'),
+  ...require('./pipeline/http-provider'),
   ...require('./derivatives/shorts-handoff'),
   ...require('./persistence/postgres-repository'),
   ...require('./persistence/production-repository'),
+  ...require('./persistence/job-queue'),
+  ...require('./publishing/youtube-publisher'),
 };

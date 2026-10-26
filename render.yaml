@@ -15,6 +15,8 @@ services:
         sync: false
       - key: CORS_ORIGIN
         sync: false
+      - key: RUN_MIGRATIONS_ON_START
+        value: "false"
   - type: worker
     name: forge-studio-worker
     runtime: docker
@@ -27,6 +29,16 @@ services:
         sync: false
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_WORKER_HANDLERS
+        sync: false
+      - key: YOUTUBE_ACCESS_TOKEN
+        sync: false
+      - key: YOUTUBE_REFRESH_TOKEN
+        sync: false
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
   - type: web
     name: forge-studio-ui
     runtime: static
