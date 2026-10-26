@@ -1,21 +1,15 @@
 const crypto = require('node:crypto');
 const { randomUUID } = require('node:crypto');
-const { Readable } = require('node:stream');
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 const NON_TERMINAL = new Set(['QUEUED', 'RUNNING']);
 const IMMUTABLE_KINDS = new Set(['render', 'audio', 'image', 'caption', 'package']);
 
-function sha(value) {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
+function sha(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function json(value) { return JSON.stringify(value ?? {}); }
 function isSuperseded(job) { return job?.payload?.lifecycleState === 'SUPERSEDED' || job?.payload?.superseded === true; }
 function isCancelled(job) { return job?.status === 'CANCELLED' || job?.payload?.lifecycleState === 'CANCELLED' || job?.payload?.cancelled === true; }
-function terminalIntent(job) {
-  const requested = job?.result?.terminalStatus || job?.payload?.terminalStatus;
-  return TERMINAL.has(requested) ? requested : null;
-}
+function terminalIntent(job) { const requested = job?.result?.terminalStatus || job?.payload?.terminalStatus; return TERMINAL.has(requested) ? requested : null; }
 
 async function consume(stream, signal) {
   if (!stream) return;
@@ -64,16 +58,13 @@ class MediaLifecycleReconciler {
   async reconcileJob(client, runId, job) {
     if (this.signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' });
     let repaired = 0;
-
-    if (job.status === 'RUNNING' && job.leased_until && new Date(job.leased_until) < new Date()) {
-      if (!isCancelled(job) && !isSuperseded(job)) {
-        const updated = await client.query(
-          `UPDATE forge_jobs SET status='QUEUED',worker_id=NULL,leased_until=NULL,available_at=now(),error=$1::jsonb,updated_at=now()
-           WHERE id=$2 AND status='RUNNING' AND leased_until < now() RETURNING status`,
-          [json({ code: 'STALE_LEASE_RECOVERED', message: 'Worker lease expired; job returned to the durable queue' }), job.id],
-        );
-        if (updated.rows[0] && await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'RECOVER_STALE_LEASE', fromState: 'RUNNING', toState: 'QUEUED', severity: 'RECOVERABLE', diagnostic: { workerId: job.worker_id } })) repaired++;
-      }
+    if (job.status === 'RUNNING' && job.leased_until && new Date(job.leased_until) < new Date() && !isCancelled(job) && !isSuperseded(job)) {
+      const updated = await client.query(
+        `UPDATE forge_jobs SET status='QUEUED',worker_id=NULL,leased_until=NULL,available_at=now(),error=$1::jsonb,updated_at=now()
+         WHERE id=$2 AND status='RUNNING' AND leased_until < now() RETURNING status`,
+        [json({ code: 'STALE_LEASE_RECOVERED', message: 'Worker lease expired; job returned to the durable queue' }), job.id],
+      );
+      if (updated.rows[0] && await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'RECOVER_STALE_LEASE', fromState: 'RUNNING', toState: 'QUEUED', severity: 'RECOVERABLE', diagnostic: { workerId: job.worker_id } })) repaired++;
     }
 
     if (job.finished_at && NON_TERMINAL.has(job.status)) {
@@ -85,8 +76,7 @@ class MediaLifecycleReconciler {
           `SELECT a.*,e.project_id,v.episode_id AS version_episode_id,s.storage_key,s.status,s.content_hash AS stored_hash
            FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN version_records v ON v.id=a.version_id
            LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE a.id=ANY($1::text[])`, [expectedIds]) : { rows: [] };
-        const checks = expectedIds.map((id) => artifacts.rows.find((row) => row.id === id));
-        if (checks.length !== expectedIds.length || checks.some((row) => !row)) {
+        if (expectedIds.length === 0 || expectedIds.some((id) => !artifacts.rows.find((row) => row.id === id))) {
           await client.query(`UPDATE forge_jobs SET status='FAILED',error=$1::jsonb,worker_id=NULL,leased_until=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE id=$2 AND status IN ('QUEUED','RUNNING')`, [json({ code: 'MISSING_EXPECTED_ARTIFACT', message: 'Terminal success lacked a referenced artifact' }), job.id]);
           if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'REPAIR_TERMINAL_SUCCESS_TO_FAILED', fromState: job.status, toState: 'FAILED', severity: 'PERMANENT', diagnostic: { code: 'MISSING_EXPECTED_ARTIFACT' } })) repaired++;
         }
@@ -117,40 +107,37 @@ class MediaLifecycleReconciler {
             if (updated.rows[0] && await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, artifactId: artifact.id, action: 'FAIL_JOB_FOR_INVALID_ARTIFACT', fromState: 'SUCCEEDED', toState: 'FAILED', severity: 'PERMANENT', diagnostic: check })) repaired++;
           } else if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, artifactId: artifact.id, action: 'MARK_ARTIFACT_INVALID', severity: check.code === 'CHECKSUM_MISMATCH' ? 'PERMANENT' : 'RECOVERABLE', diagnostic: check })) repaired++;
         } else if (artifact.status !== 'READY' || artifact.stored_hash !== artifact.content_hash) {
-          await client.query('UPDATE storage_objects SET status=\'READY\',checksum_verified=true,content_hash=$1 WHERE artifact_id=$2', [artifact.content_hash, artifact.id]);
+          await client.query("UPDATE storage_objects SET status='READY',checksum_verified=true,content_hash=$1 WHERE artifact_id=$2", [artifact.content_hash, artifact.id]);
           if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, artifactId: artifact.id, action: 'RESTORE_STORAGE_HEALTH', toState: 'READY', severity: 'RECOVERABLE', diagnostic: { verified: true } })) repaired++;
         }
       }
-
       const duplicates = await client.query(
         `SELECT kind,version_id,COALESCE(metadata->>'logicalOutputKey',kind || ':' || version_id) AS logical_key,COUNT(*)::int AS count,MIN(id) AS canonical_id
          FROM artifacts WHERE episode_id=$1 AND kind=ANY($2::text[])
          GROUP BY kind,version_id,COALESCE(metadata->>'logicalOutputKey',kind || ':' || version_id) HAVING COUNT(*) > 1 LIMIT $3`,
         [job.episode_id, [...IMMUTABLE_KINDS], this.scanLimit],
       );
-      for (const duplicate of duplicates.rows) {
-        if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'FLAG_DUPLICATE_LOGICAL_OUTPUT', severity: 'CONFLICT', diagnostic: duplicate })) repaired++;
-      }
+      for (const duplicate of duplicates.rows) if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'FLAG_DUPLICATE_LOGICAL_OUTPUT', severity: 'CONFLICT', diagnostic: duplicate })) repaired++;
     }
     return repaired;
   }
 
   async run({ reason = 'scheduled' } = {}) {
     const runId = randomUUID();
+    await this.pool.query('INSERT INTO forge_reconciliation_runs(id,worker_id,status,diagnostics) VALUES($1,$2,\'RUNNING\',$3::jsonb)', [runId, this.workerId, json({ reason, scanLimit: this.scanLimit })]);
     const client = await this.pool.connect();
     let scanned = 0; let repaired = 0;
     try {
       await client.query('BEGIN');
       const lock = await client.query("SELECT pg_try_advisory_xact_lock(hashtext('forge-media-reconciliation')) AS locked");
-      if (!lock.rows[0]?.locked) { await client.query('ROLLBACK'); return { status: 'SKIPPED_CONCURRENT', scanned: 0, repaired: 0 }; }
-      await client.query('INSERT INTO forge_reconciliation_runs(id,worker_id,status,diagnostics) VALUES($1,$2,\'RUNNING\',$3::jsonb)', [runId, this.workerId, json({ reason, scanLimit: this.scanLimit })]);
+      if (!lock.rows[0]?.locked) { await client.query('ROLLBACK'); await this.pool.query("UPDATE forge_reconciliation_runs SET status='CANCELLED',finished_at=now(),diagnostics='{""reason"":""concurrent-run""}'::jsonb WHERE id=$1", [runId]); return { status: 'SKIPPED_CONCURRENT', scanned: 0, repaired: 0 }; }
       const jobs = await client.query(
         `SELECT * FROM forge_jobs
          WHERE status IN ('QUEUED','RUNNING') OR (finished_at >= now() - ($1::text || ' minutes')::interval)
          ORDER BY updated_at DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
         [this.recentWindowMinutes, this.scanLimit],
       );
-      for (const job of jobs.rows) { await this.reconcileJob(client, runId, job); scanned++; repaired = (await client.query('SELECT COUNT(*)::int AS count FROM forge_reconciliation_repairs WHERE run_id=$1', [runId])).rows[0].count; }
+      for (const job of jobs.rows) { repaired += await this.reconcileJob(client, runId, job); scanned++; }
       if (this.storage.cleanupPartials) {
         const cleaned = await this.storage.cleanupPartials({ maxAgeMs: this.partialMaxAgeMinutes * 60 * 1000, maxFiles: this.scanLimit, signal: this.signal });
         repaired += Number(cleaned?.removed || 0);
@@ -167,10 +154,7 @@ class MediaLifecycleReconciler {
 }
 
 function createMediaLifecycleReconciliationHandler(options) {
-  return async (payload = {}, job = {}) => {
-    const reconciler = new MediaLifecycleReconciler({ ...options, workerId: `${options.workerId || 'forge-worker'}:job:${job.id || randomUUID()}` });
-    return reconciler.run({ reason: payload.reason || 'on-demand' });
-  };
+  return async (payload = {}, job = {}) => new MediaLifecycleReconciler({ ...options, workerId: `${options.workerId || 'forge-worker'}:job:${job.id || randomUUID()}` }).run({ reason: payload.reason || 'on-demand' });
 }
 
 module.exports = { MediaLifecycleReconciler, createMediaLifecycleReconciliationHandler, TERMINAL, consume };
