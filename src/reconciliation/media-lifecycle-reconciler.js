@@ -1,10 +1,8 @@
 const crypto = require('node:crypto');
 const { randomUUID } = require('node:crypto');
-
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 const NON_TERMINAL = new Set(['QUEUED', 'RUNNING']);
 const IMMUTABLE_KINDS = new Set(['render', 'audio', 'image', 'caption', 'package']);
-
 function sha(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function json(value) { return JSON.stringify(value ?? {}); }
 function isSuperseded(job) { return job?.payload?.lifecycleState === 'SUPERSEDED' || job?.payload?.superseded === true; }
@@ -22,10 +20,7 @@ class MediaLifecycleReconciler {
     if (!artifact?.id || !artifact.storage_key || !artifact.content_hash) return { healthy: false, code: 'ARTIFACT_NOT_FOUND', reason: 'trusted storage metadata missing' };
     if (artifact.version_episode_id !== artifact.episode_id) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact/version episode mismatch' };
     const inputVersionIds = Array.isArray(artifact.input_version_ids) ? artifact.input_version_ids : [];
-    if (inputVersionIds.length) {
-      const result = await this.pool.query('SELECT COUNT(*)::int AS count FROM version_records WHERE episode_id=$1 AND id=ANY($2::text[])', [artifact.episode_id, inputVersionIds]);
-      if (Number(result.rows[0]?.count || 0) !== inputVersionIds.length) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact references a missing or cross-episode input version' };
-    }
+    if (inputVersionIds.length) { const result = await this.pool.query('SELECT COUNT(*)::int AS count FROM version_records WHERE episode_id=$1 AND id=ANY($2::text[])', [artifact.episode_id, inputVersionIds]); if (Number(result.rows[0]?.count || 0) !== inputVersionIds.length) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact references a missing or cross-episode input version' }; }
     if (artifact.stored_hash && artifact.stored_hash !== artifact.content_hash) return { healthy: false, code: 'CHECKSUM_MISMATCH', reason: 'database storage checksum differs from artifact checksum' };
     try { const resolved = await this.storage.download({ key: artifact.storage_key, expectedSha256: artifact.content_hash }); await consume(resolved.stream, this.signal); return { healthy: true, code: 'HEALTHY' }; }
     catch (error) { return { healthy: false, code: error.code === 'ARTIFACT_NOT_FOUND' ? 'ARTIFACT_NOT_FOUND' : error.code === 'CHECKSUM_MISMATCH' ? 'CHECKSUM_MISMATCH' : 'ARTIFACT_CORRUPT', reason: error.message }; }
@@ -46,9 +41,16 @@ class MediaLifecycleReconciler {
       if (next === 'SUCCEEDED') {
         const expectedIds = Array.isArray(job.result?.artifactIds) ? job.result.artifactIds : [];
         const artifacts = expectedIds.length ? await client.query(`SELECT a.*,e.project_id,v.episode_id AS version_episode_id,s.storage_key,s.status,s.content_hash AS stored_hash FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN version_records v ON v.id=a.version_id LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE a.id=ANY($1::text[])`, [expectedIds]) : { rows: [] };
-        if (expectedIds.length === 0 || expectedIds.some((id) => !artifacts.rows.find((row) => row.id === id))) {
-          await client.query(`UPDATE forge_jobs SET status='FAILED',error=$1::jsonb,worker_id=NULL,leased_until=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE id=$2 AND status IN ('QUEUED','RUNNING')`, [json({ code: 'MISSING_EXPECTED_ARTIFACT', message: 'Terminal success lacked a referenced artifact' }), job.id]);
-          if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'REPAIR_TERMINAL_SUCCESS_TO_FAILED', fromState: job.status, toState: 'FAILED', severity: 'PERMANENT', diagnostic: { code: 'MISSING_EXPECTED_ARTIFACT' } })) repaired++;
+        const missing = expectedIds.find((id) => !artifacts.rows.find((row) => row.id === id));
+        let invalid = null;
+        if (!missing) for (const artifact of artifacts.rows) { const check = await this.verifyArtifact(artifact); if (!check.healthy) { invalid = { artifact, check }; break; } }
+        if (missing || invalid) {
+          const diagnostic = missing ? { code: 'MISSING_EXPECTED_ARTIFACT', artifactId: missing } : invalid.check;
+          await client.query(`UPDATE forge_jobs SET status='FAILED',error=$1::jsonb,worker_id=NULL,leased_until=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE id=$2 AND status IN ('QUEUED','RUNNING')`, [json(diagnostic), job.id]);
+          if (await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, artifactId: invalid?.artifact?.id || missing, action: 'REPAIR_TERMINAL_SUCCESS_TO_FAILED', fromState: job.status, toState: 'FAILED', severity: 'PERMANENT', diagnostic })) repaired++;
+        } else {
+          const updated = await client.query(`UPDATE forge_jobs SET status='SUCCEEDED',worker_id=NULL,leased_until=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE id=$1 AND status IN ('QUEUED','RUNNING') RETURNING id`, [job.id]);
+          if (updated.rows[0] && await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'REPAIR_TERMINAL_STATE', fromState: job.status, toState: 'SUCCEEDED', severity: 'RECOVERABLE', diagnostic: { verifiedArtifactIds: expectedIds } })) repaired++;
         }
       } else {
         const updated = await client.query(`UPDATE forge_jobs SET status=$1,worker_id=NULL,leased_until=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE id=$2 AND status IN ('QUEUED','RUNNING') RETURNING status`, [next, job.id]);
