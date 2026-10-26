@@ -1,0 +1,185 @@
+const crypto = require('node:crypto');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const { Readable } = require('node:stream');
+const { randomUUID } = require('node:crypto');
+const { ArtifactStorageService } = require('../storage/artifact-storage-service');
+
+const DEFAULTS = Object.freeze({
+  maxBytes: Number(process.env.FORGE_ASSET_MAX_BYTES || 1073741824),
+  maxDurationSeconds: Number(process.env.FORGE_ASSET_MAX_DURATION_SECONDS || 3600),
+  maxWidth: Number(process.env.FORGE_ASSET_MAX_WIDTH || 16384),
+  maxHeight: Number(process.env.FORGE_ASSET_MAX_HEIGHT || 16384),
+  timeoutMs: Number(process.env.FORGE_ASSET_VALIDATION_TIMEOUT_MS || 120000),
+  maxRetries: Number(process.env.FORGE_ASSET_MAX_RETRIES || 3),
+});
+
+const MEDIA = Object.freeze({
+  image: new Set(['image/png', 'image/jpeg', 'image/webp']),
+  audio: new Set(['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/ogg', 'audio/flac']),
+  video: new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska']),
+});
+const ALL_TYPES = new Set([...MEDIA.image, ...MEDIA.audio, ...MEDIA.video]);
+const CODECS = new Set((process.env.FORGE_ASSET_ALLOWED_CODECS || 'h264,hevc,vp9,av1,aac,mp3,opus,vorbis,flac,pcm_s16le').split(',').map((v) => v.trim()).filter(Boolean));
+const CONTAINERS = new Set((process.env.FORGE_ASSET_ALLOWED_CONTAINERS || 'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,mp3,wav,ogg,flac,image2').split(',').map((v) => v.trim()).filter(Boolean));
+
+function diagnostic(code, message, details = {}) { return { code, message, details, at: new Date().toISOString() }; }
+function fail(message, code, details = {}, retryable = false) { throw Object.assign(new Error(message), { code, details, retryable }); }
+function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
+function provenanceFingerprint({ sourceVersionId = null, inputVersionIds = [], sceneId = null, assetRole = null }) {
+  return sha256(JSON.stringify({ sourceVersionId, inputVersionIds: [...new Set(inputVersionIds)].sort(), sceneId, assetRole }));
+}
+function classify(mediaType) {
+  for (const [kind, types] of Object.entries(MEDIA)) if (types.has(mediaType)) return kind;
+  return null;
+}
+
+function runProcess(command, args, { timeoutMs, signal }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = ''; let done = false;
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(Object.assign(new Error(`${command} timed out after ${timeoutMs}ms`), { code: 'ASSET_TIMEOUT', retryable: true })); }, timeoutMs);
+    timer.unref?.();
+    const abort = () => { child.kill('SIGKILL'); reject(Object.assign(new Error('Asset validation cancelled'), { code: 'ASSET_CANCELLED', retryable: false })); };
+    signal?.addEventListener('abort', abort, { once: true });
+    child.stdout.on('data', (chunk) => { stdout += chunk; if (stdout.length > 2 * 1024 * 1024) child.kill('SIGKILL'); });
+    child.stderr.on('data', (chunk) => { stderr += chunk; if (stderr.length > 2 * 1024 * 1024) child.kill('SIGKILL'); });
+    child.on('error', (error) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(error); });
+    child.on('close', (code) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); if (code !== 0) reject(Object.assign(new Error(`${command} failed: ${stderr.trim() || `exit ${code}`}`), { code: 'MEDIA_CORRUPT', retryable: false, stderr: stderr.trim() })); else resolve(stdout); });
+  });
+}
+
+async function probeMedia(filePath, { timeoutMs, signal, probeImpl } = {}) {
+  if (probeImpl) return probeImpl(filePath, { timeoutMs, signal });
+  const raw = await runProcess(process.env.FORGE_FFPROBE_COMMAND || 'ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath], { timeoutMs, signal });
+  try { return JSON.parse(raw); } catch { fail('ffprobe returned invalid JSON', 'MEDIA_CORRUPT'); }
+}
+
+function validateProbe(probe, { mediaType, sizeBytes, config }) {
+  const type = classify(mediaType);
+  if (!type) fail(`Unsupported media type: ${mediaType}`, 'UNSUPPORTED_MEDIA_TYPE');
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > config.maxBytes) fail(`Asset exceeds maximum size of ${config.maxBytes} bytes`, 'ASSET_TOO_LARGE', { sizeBytes, maxBytes: config.maxBytes });
+  const streams = Array.isArray(probe?.streams) ? probe.streams : [];
+  if (!streams.length || !probe?.format) fail('Media probe contains no usable streams/format', 'MEDIA_CORRUPT');
+  const duration = Number(probe.format.duration || 0);
+  if (!Number.isFinite(duration) || duration < 0) fail('Media duration is invalid', 'MEDIA_CORRUPT');
+  if (duration > config.maxDurationSeconds) fail(`Asset duration exceeds ${config.maxDurationSeconds}s`, 'DURATION_LIMIT', { duration, maxDurationSeconds: config.maxDurationSeconds });
+  const formatName = String(probe.format.format_name || '').split(',')[0];
+  if (formatName && !CONTAINERS.has(formatName)) fail(`Unsupported media container: ${formatName}`, 'UNSUPPORTED_CONTAINER', { format: formatName });
+  const primary = streams.find((stream) => stream.codec_type === type) || streams[0];
+  if (!primary || primary.codec_type !== type) fail(`Media type ${mediaType} does not match probed stream type`, 'MEDIA_TYPE_MISMATCH');
+  if (primary.codec_name && !CODECS.has(primary.codec_name)) fail(`Unsupported codec: ${primary.codec_name}`, 'UNSUPPORTED_CODEC', { codec: primary.codec_name });
+  const width = Number(primary.width || 0); const height = Number(primary.height || 0);
+  if (type !== 'audio' && (!width || !height || width > config.maxWidth || height > config.maxHeight)) fail('Media dimensions are invalid or exceed configured limits', 'DIMENSION_LIMIT', { width, height, maxWidth: config.maxWidth, maxHeight: config.maxHeight });
+  return { type, durationSeconds: duration, width: width || null, height: height || null, codec: primary.codec_name || null, container: formatName || null, streamCount: streams.length, bitRate: Number(probe.format.bit_rate || primary.bit_rate || 0) || null };
+}
+
+async function readBounded(source, { maxBytes, signal }) {
+  if (Buffer.isBuffer(source)) {
+    if (source.length > maxBytes) fail(`Asset exceeds maximum size of ${maxBytes} bytes`, 'ASSET_TOO_LARGE', { sizeBytes: source.length, maxBytes });
+    return source;
+  }
+  if (source instanceof Uint8Array) return readBounded(Buffer.from(source), { maxBytes, signal });
+  if (!source || typeof source[Symbol.asyncIterator] !== 'function') fail('Asset source must be a Buffer or async iterable', 'INVALID_SOURCE');
+  const chunks = []; let total = 0;
+  for await (const chunk of source) { if (signal?.aborted) fail('Asset ingestion cancelled', 'ASSET_CANCELLED'); total += chunk.length; if (total > maxBytes) fail(`Asset exceeds maximum size of ${maxBytes} bytes`, 'ASSET_TOO_LARGE', { sizeBytes: total, maxBytes }); chunks.push(Buffer.from(chunk)); }
+  return Buffer.concat(chunks, total);
+}
+
+class AssetIngestionWorker {
+  constructor({ repository, storage, config = {}, probeImpl, logger = console } = {}) {
+    if (!repository?.db?.pool) throw new TypeError('repository with db.pool is required');
+    if (!storage) throw new TypeError('artifact storage backend is required');
+    this.repository = repository; this.storageService = storage instanceof ArtifactStorageService ? storage : new ArtifactStorageService({ storage, repository });
+    this.config = { ...DEFAULTS, ...config }; this.probeImpl = probeImpl; this.logger = logger;
+  }
+
+  async execute(payload = {}, job = {}) {
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.config.timeoutMs); timer.unref?.();
+    try {
+      const episodeId = payload.episodeId || job.episode_id; if (!episodeId) fail('episodeId is required', 'INVALID_INPUT');
+      const episode = await this.repository.db.getEpisode(episodeId); if (!episode) fail(`Episode not found: ${episodeId}`, 'NOT_FOUND');
+      if (job.id) { const current = await this.repository.db.pool.query('SELECT status,worker_id FROM forge_jobs WHERE id=$1', [job.id]); if (current.rows[0]?.status === 'CANCELLED') fail('Asset ingestion cancelled', 'ASSET_CANCELLED'); }
+      const inputVersionIds = [...new Set(payload.inputVersionIds || [])];
+      const sourceVersionId = payload.sourceVersionId || inputVersionIds[0] || null;
+      if (!sourceVersionId && payload.requireProvenance !== false) fail('An immutable source version is required', 'INVALID_PROVENANCE');
+      for (const versionId of inputVersionIds) {
+        const row = await this.repository.db.pool.query('SELECT id,kind,episode_id FROM version_records WHERE id=$1 AND episode_id=$2', [versionId, episodeId]);
+        if (!row.rows[0]) fail(`Source version is not part of episode: ${versionId}`, 'INVALID_PROVENANCE');
+        if (!['scene-plan','scene','asset'].includes(row.rows[0].kind)) fail(`Unsupported provenance input kind: ${row.rows[0].kind}`, 'INVALID_PROVENANCE');
+      }
+      const sourceArtifactId = payload.sourceArtifactId || null;
+      let source;
+      if (sourceArtifactId) {
+        const opened = await this.storageService.openArtifact({ artifactId: sourceArtifactId, projectId: episode.projectId, expectedVersionId: sourceVersionId || undefined });
+        source = await readBounded(opened.stream, { maxBytes: this.config.maxBytes, signal: controller.signal });
+      } else if (typeof payload.contentBase64 === 'string') {
+        source = Buffer.from(payload.contentBase64, 'base64');
+      } else if (payload.content != null) {
+        source = Buffer.from(typeof payload.content === 'string' ? payload.content : JSON.stringify(payload.content));
+      } else {
+        fail('No approved asset reference or configured binary source supplied', 'MISSING_SOURCE');
+      }
+      if (controller.signal.aborted) fail('Asset ingestion timed out', 'ASSET_TIMEOUT', {}, true);
+      const actualSha256 = sha256(source);
+      const expectedSha256 = payload.expectedSha256 || payload.contentHash || null;
+      if (expectedSha256 && actualSha256 !== expectedSha256) fail(`Asset checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`, 'CHECKSUM_MISMATCH', { expected: expectedSha256, actual: actualSha256 });
+      const provenance = provenanceFingerprint({ sourceVersionId, inputVersionIds, sceneId: payload.sceneId || null, assetRole: payload.assetRole || null });
+      const existing = await this.repository.db.pool.query('SELECT * FROM asset_ingestions WHERE episode_id=$1 AND source_checksum=$2 AND provenance_fingerprint=$3', [episodeId, actualSha256, provenance]);
+      if (existing.rows[0]?.status === 'READY' && existing.rows[0].artifact_id) return { status: 'READY', deduplicated: true, artifactId: existing.rows[0].artifact_id, versionId: existing.rows[0].version_id, checksum: actualSha256, metadata: existing.rows[0].metadata };
+      const ingestionId = existing.rows[0]?.id || `asset-ingest:${actualSha256}:${provenance}`;
+      await this.repository.db.pool.query(`INSERT INTO asset_ingestions(id,episode_id,project_id,source_checksum,source_kind,source_artifact_id,source_version_id,provenance_fingerprint,status,metadata,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PROCESSING',$9::jsonb,$10) ON CONFLICT (episode_id,source_checksum,provenance_fingerprint) DO UPDATE SET status='PROCESSING',updated_at=now()`, [ingestionId, episodeId, episode.projectId, actualSha256, sourceArtifactId ? 'ARTIFACT' : 'INLINE', sourceArtifactId, sourceVersionId, provenance, JSON.stringify({ assetRole: payload.assetRole || null, sceneId: payload.sceneId || null }), payload.actor || 'worker']);
+      const tmp = path.join(os.tmpdir(), `forge-asset-${randomUUID()}.bin`); await fs.writeFile(tmp, source, { mode: 0o600 });
+      let validated;
+      try { validated = validateProbe(await probeMedia(tmp, { timeoutMs: this.config.timeoutMs, signal: controller.signal, probeImpl: this.probeImpl }), { mediaType: payload.mediaType, sizeBytes: source.length, config: this.config }); }
+      finally { await fs.rm(tmp, { force: true }); }
+      const kind = validated.type;
+      const versionId = `asset:${actualSha256}`;
+      const artifactId = `asset:${actualSha256}`;
+      const metadata = { immutable: true, validated: true, checksum: actualSha256, sizeBytes: source.length, ...validated, sourceVersionId, inputVersionIds, provenanceFingerprint: provenance, assetRole: payload.assetRole || null, sceneId: payload.sceneId || null };
+      const existingVersion = await this.repository.db.pool.query('SELECT id,episode_id,kind,content_hash FROM version_records WHERE id=$1', [versionId]);
+      if (!existingVersion.rows[0]) await this.repository.db.pool.query('INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,\'asset\',$3::jsonb,$4,$5)', [versionId, episodeId, JSON.stringify(metadata), actualSha256, payload.actor || 'worker']);
+      else if (existingVersion.rows[0].episode_id !== episodeId || existingVersion.rows[0].kind !== 'asset' || existingVersion.rows[0].content_hash !== actualSha256) fail('Immutable asset version identity conflict', 'IDEMPOTENCY_CONFLICT');
+      for (const dependency of inputVersionIds) await this.repository.db.pool.query('INSERT INTO version_dependencies(episode_id,version_id,depends_on_version_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [episodeId, versionId, dependency]);
+      let artifact;
+      try {
+        artifact = await this.storageService.putArtifact({ episodeId, projectId: episode.projectId, versionId, artifactId, kind, content: source, contentType: payload.mediaType, expectedSha256: actualSha256, inputVersionIds, source: 'asset-ingestion', metadata, createdBy: payload.actor || 'worker' });
+      } catch (error) {
+        await this.reconcileStorage({ episodeId, projectId: episode.projectId, ingestionId, versionId, artifactId, kind, mediaType: payload.mediaType, checksum: actualSha256, inputVersionIds, metadata, createdBy: payload.actor || 'worker' }).catch((reconcileError) => this.logger.warn?.('Asset reconciliation failed', reconcileError));
+        throw error;
+      }
+      await this.repository.db.pool.query('UPDATE asset_ingestions SET status=\'READY\',artifact_id=$1,version_id=$2,diagnostics=$3::jsonb,metadata=$4::jsonb,updated_at=now() WHERE id=$5', [artifact.id, versionId, JSON.stringify([]), JSON.stringify(metadata), ingestionId]);
+      this.logger.log?.(`Forge asset ingestion completed: ${artifact.id}`);
+      return { status: 'READY', deduplicated: false, artifactId: artifact.id, versionId, checksum: actualSha256, metadata };
+    } catch (error) {
+      if (error.code === 'ASSET_TIMEOUT' || error.name === 'AbortError') error.retryable = true;
+      if (error.code === 'ASSET_CANCELLED') error.retryable = false;
+      if (!error.retryable && payload.episodeId) await this.markFailed(payload.episodeId, error).catch(() => {});
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
+  async reconcileStorage({ episodeId, projectId, ingestionId, versionId, artifactId, kind, mediaType, checksum, inputVersionIds, metadata, createdBy }) {
+    const key = typeof this.storageService.storage.keyFor === 'function' ? this.storageService.storage.keyFor({ tenantId: 'forge', projectId, kind, sha256: checksum, contentType: mediaType }) : null;
+    if (!key || !(await this.storageService.storage.head(key))) return false;
+    const row = await this.repository.db.pool.query('SELECT id FROM artifacts WHERE id=$1 AND episode_id=$2', [artifactId, episodeId]);
+    if (!row.rows[0]) await this.repository.registerArtifact({ id: artifactId, episodeId, kind, versionId, storageUri: `storage://${key}`, contentHash: checksum, mediaType, inputVersionIds, source: 'asset-ingestion', metadata, createdBy });
+    await this.repository.db.pool.query('UPDATE asset_ingestions SET status=\'READY\',artifact_id=$1,version_id=$2,updated_at=now() WHERE id=$3', [artifactId, versionId, ingestionId]);
+    return true;
+  }
+
+  async markFailed(episodeId, error) {
+    await this.repository.db.pool.query("UPDATE asset_ingestions SET status='FAILED',diagnostics=diagnostics || $1::jsonb,updated_at=now() WHERE episode_id=$2 AND status='PROCESSING'", [JSON.stringify([diagnostic(error.code || 'INGESTION_FAILED', error.message, error.details || {})]), episodeId]);
+  }
+}
+
+function createAssetIngestionHandler({ pool, storage, config, probeImpl, logger } = {}) {
+  const { PersistentProductionRepository } = require('../persistence/production-repository');
+  const repository = new PersistentProductionRepository({ pool });
+  const worker = new AssetIngestionWorker({ repository, storage, config, probeImpl, logger });
+  return (payload, job) => worker.execute(payload, job);
+}
+
+module.exports = { AssetIngestionWorker, createAssetIngestionHandler, validateProbe, classify, provenanceFingerprint, sha256, DEFAULTS };
