@@ -9,6 +9,7 @@ function cloneJson(value) {
 
 function deepFreeze(value) {
   if (!value || typeof value !== 'object') return value;
+  // JSON cloning guarantees there are no shared object references or cycles.
   for (const child of Object.values(value)) deepFreeze(child);
   if (!Object.isFrozen(value)) Object.freeze(value);
   return value;
