@@ -1,4 +1,4 @@
-const { requiredString } = require('../domain/records');
+const { immutableRecord, requiredString } = require('../domain/records');
 
 const PIPELINE_STAGES = Object.freeze([
   'RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'ASSETS', 'TIMELINE', 'RENDER', 'QA', 'PUBLISH',
