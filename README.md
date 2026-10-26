@@ -13,8 +13,10 @@ Forge Studio is the production control plane for long-form educational video epi
 - Bearer-token protected API with project-scoped authorization, readiness/liveness and request IDs.
 - Provider registry, timeout/retry/idempotency contracts and HTTP JSON/OpenAI-compatible adapters.
 - Durable PostgreSQL job queue with leases, retries, dependency ordering, blocked-job cancellation and crash recovery.
-- Async nine-stage episode orchestration: research → script → scene plan → narration → assets → timeline → render → QA → publish.
+- Async episode orchestration: research → script → scene plan → narration → transcription → assets → timeline → captions → render → QA → publish.
+- Real bounded Whisper-compatible transcription worker with immutable input checksum verification and deterministic transcript artifacts.
 - Built-in configurable HTTP adapters for generation stages plus a Forge-owned deterministic media QA worker.
+- Deterministic captions worker downstream of transcript/timeline provenance.
 - YouTube publishing adapter using resumable upload and OAuth refresh-token support.
 - Lightweight operational dashboard and gated Forge → Shorts handoff.
 
@@ -62,6 +64,23 @@ Configure the worker with `FORGE_STORAGE_DRIVER=local` for development/tests or 
 
 The worker accepts binary provider results as `artifact.contentBase64` plus `mediaType` and optional `contentHash`. Forge streams the bytes through a bounded SHA-256 verifier, derives an immutable content-addressed key, persists trusted storage metadata and resolves later through the artifact/version graph. Provider-supplied `storageUri` values are not opened or followed, preventing path traversal and SSRF-style storage access.
 
+## Real Whisper transcription
+
+Transcription is a first-class durable job (`workflow:transcription`) between narration and timeline. The worker resolves the current approved narration artifact, verifies its SHA-256 checksum after a bounded HTTPS download, runs a real configured Whisper-compatible command, validates timestamped segments/language/confidence, and persists an immutable `transcript` version plus artifact. Retries are idempotent and cannot create duplicate transcript versions for the same source/output.
+
+A narration artifact must explicitly carry `metadata.approved=true` after its approval gate. Configure the worker with a real Whisper implementation:
+
+```bash
+FORGE_WHISPER_COMMAND=whisper
+FORGE_WHISPER_MODEL=turbo
+FORGE_WHISPER_ARGS='--model ${model} --output_format json --output_dir ${outDir} ${input}'
+FORGE_TRANSCRIPTION_TIMEOUT_MS=840000
+FORGE_TRANSCRIPTION_MAX_INPUT_BYTES=2147483648
+FORGE_TRANSCRIPTION_MAX_OUTPUT_BYTES=67108864
+```
+
+There is no fake-success fallback. Missing provider/model/input/checksum or malformed provider output fails the job clearly. See `docs/transcription-worker.md` for the full contract and GitHub Actions runner configuration.
+
 ## Workflow API
 
 Start the durable pipeline for an episode:
@@ -87,7 +106,7 @@ Timeline snapshots are validated and persisted through:
 
 ## Configure production stage services
 
-The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline` and `workflow:render`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required.
+The worker registers HTTP handlers for `workflow:research`, `workflow:script`, `workflow:scene_plan`, `workflow:narration`, `workflow:assets`, `workflow:timeline` and `workflow:render`. `workflow:qa` is Forge-owned and directly validates the render artifact, so `FORGE_STAGE_QA_ENDPOINT` is not required. It also registers `workflow:captions` and the local Whisper `workflow:transcription` handler.
 
 Configure these environment variables on the worker for provider-backed stages:
 - `FORGE_STAGE_RESEARCH_ENDPOINT`
@@ -127,4 +146,4 @@ Forge remains authoritative for long-form provenance; `purffle-shorts` is the de
 
 The `public/` UI supports connection configuration, readiness, episode creation and episode inspection. It is not yet the full editorial script/scene/timeline editor.
 
-`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, artifact storage configuration, QA bounds/host allowlist, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
+`render.yaml` declares the authenticated API, worker and static dashboard. The worker image includes FFmpeg. Configure database/API credentials, provider endpoint secrets, artifact storage configuration, Whisper settings, QA bounds/host allowlist, S3-compatible storage credentials and YouTube OAuth values in Render. Apply migrations before routing production traffic; the blueprint intentionally sets `RUN_MIGRATIONS_ON_START=false`.
