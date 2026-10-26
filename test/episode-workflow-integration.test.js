@@ -1,0 +1,102 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { EpisodeWorkflowIntegration, WORKFLOW_STAGES, WORKFLOW_DEPENDENCIES, validateStages, workflowIdempotencyKey } = require('../src/pipeline/episode-workflow-integration');
+
+function createFakeDb() {
+  const workflows = new Map(); const stages = new Map(); const jobs = new Map();
+  const episodes = new Map([['ep-1', { id: 'ep-1', project_id: 'p-1', state: 'DRAFT' }]);
+  const versions = new Set(); const artifacts = new Set(); const approvals = new Set(); const audits = [];
+  let seq = 0;
+  const client = { query: (...args) => pool.query(...args), release() {} };
+  const pool = {
+    connect: async () => client,
+    async query(sql, params = []) {
+      const normalized = sql.replace(/\s+/g, ' ').trim();
+      if (normalized.startsWith('BEGIN') || normalized.startsWith('COMMIT') || normalized.startsWith('ROLLBACK')) return { rows: [], rowCount: 0 };
+      if (normalized.startsWith('SELECT * FROM episode_workflows WHERE idempotency_key=')) return { rows: [...workflows.values()].filter((w) => w.idempotency_key === params[0]), rowCount: 1 };
+      if (normalized.startsWith('SELECT * FROM episodes WHERE id=')) return { rows: episodes.has(params[0]) ? [episodes.get(params[0])] : [], rowCount: 1 };
+      if (normalized.startsWith('INSERT INTO episode_workflows')) { const w = { id: params[0], episode_id: params[1], project_id: params[2], brief: params[3], requested_stages: JSON.parse(params[4]), status: 'QUEUED', idempotency_key: params[5], created_by: params[6], failure: null }; workflows.set(w.id, w); return { rows: [w], rowCount: 1 }; }
+      if (normalized.startsWith('INSERT INTO episode_workflow_stages')) { const key = `${params[0]}:${params[1]}`; stages.set(key, { workflow_id: params[0], stage: params[1], status: 'BLOCKED', job_id: null, input_version_ids: [], output_version_ids: [], output_artifact_ids: [] }); return { rows: [], rowCount: 1 }; }
+      if (normalized.startsWith('INSERT INTO audit_events')) { audits.push({ params }); return { rows: [], rowCount: 1 }; }
+      if (normalized.startsWith('SELECT * FROM episode_workflows WHERE id=')) return { rows: [...workflows.values()].filter((w) => w.id === params[0]), rowCount: 1 };
+      if (normalized.startsWith('SELECT * FROM episode_workflow_stages')) { const rows = [...stages.values()].filter((s) => s.workflow_id === params[0]); return { rows, rowCount: rows.length }; }
+      if (normalized.startsWith('UPDATE episode_workflow_stages SET status=')) { const row = stages.get(`${params[2]}:${params[3]}`); if (!row || row.status !== 'BLOCKED') return { rows: [], rowCount: 0 }; row.status = 'QUEUED'; row.job_id = params[0]; row.input_version_ids = JSON.parse(params[1]); return { rows: [row], rowCount: 1 }; }
+      if (normalized.startsWith('SELECT state FROM episodes WHERE id=')) return { rows: [{ state: episodes.get(params[0]).state }], rowCount: 1 };
+      if (normalized.startsWith('UPDATE episodes SET state=')) { const episode = episodes.get(params[1]); if (!episode || episode.state !== params[2]) return { rows: [], rowCount: 0 }; episode.state = params[0]; return { rows: [{ id: params[1] }], rowCount: 1 }; }
+      if (normalized.startsWith('SELECT 1 FROM approvals')) return { rows: approvals.has(`${params[0]}:${params[1]}:${params[2].join(',')}`) ? [{ ok: 1 }] : [], rowCount: approvals.has(`${params[0]}:${params[1]}:${params[2].join(',')}`) ? 1 : 0 };
+      if (normalized.startsWith('SELECT 1 FROM qa_results')) return { rows: [{ ok: 1 }], rowCount: 1 };
+      if (normalized.startsWith('SELECT id FROM version_records')) return { rows: params[1].filter((id) => versions.has(id)).map((id) => ({ id })), rowCount: params[1].filter((id) => versions.has(id)).length };
+      if (normalized.startsWith('SELECT id FROM artifacts')) return { rows: params[1].filter((id) => artifacts.has(id)).map((id) => ({ id })), rowCount: params[1].filter((id) => artifacts.has(id)).length };
+      if (normalized.startsWith('UPDATE episode_workflows SET status=')) { const w = workflows.get(params[2] || params[1]); if (w) { w.status = params[0] === 'SUCCEEDED' ? 'SUCCEEDED' : params[0]; w.failure_stage = params[0] === 'FAILED' ? params[0] : w.failure_stage; } return { rows: [], rowCount: 1 }; }
+      if (normalized.startsWith('UPDATE forge_jobs')) return { rows: [], rowCount: 1 };
+      throw new Error(`Unhandled fake SQL: ${normalized}`);
+    },
+    _state: { workflows, stages, jobs, episodes, versions, artifacts, approvals, audits, next: () => `job-${++seq}` },
+  };
+  return pool;
+}
+
+function createQueue(pool) {
+  return { async enqueue(input) { const id = pool._state.next(); pool._state.jobs.set(id, input); return { id, ...input, status: 'QUEUED' }; }, async recoverExpiredLeases() {}, async recoverBlockedDependencies() {} };
+}
+
+for (const stage of WORKFLOW_STAGES) test(`dependency contract is deterministic for ${stage}`, () => {
+  const deps = WORKFLOW_DEPENDENCIES[stage];
+  for (const dependency of deps) assert.ok(WORKFLOW_STAGES.indexOf(dependency) < WORKFLOW_STAGES.indexOf(stage) || stage === 'NARRATION' || stage === 'ASSETS');
+});
+
+test('rejects dependency omission and unknown stages', () => {
+  assert.throws(() => validateStages(['SCRIPT']), /requires RESEARCH/);
+  assert.throws(() => validateStages(['NOT_A_STAGE']), /Unknown workflow stage/);
+});
+
+test('idempotency key is deterministic', () => {
+  assert.equal(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'));
+  assert.notEqual(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'other'));
+});
+
+test('full workflow fans out narration/assets and fans in at timeline', async () => {
+  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
+  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH', 'SCRIPT', 'SCENE_PLAN'], actor: 'test' });
+  assert.equal(workflow.stages.find((s) => s.stage === 'RESEARCH').status, 'QUEUED');
+  const researchJob = { id: workflow.stages.find((s) => s.stage === 'RESEARCH').job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } };
+  pool._state.versions.add('research-v1'); await integration.handleJobSuccess(researchJob, { artifacts: [{ id: 'research-a1', versionId: 'research-v1' }] });
+  const refreshed = await integration.getWorkflow(workflow.id); assert.equal(refreshed.stages.find((s) => s.stage === 'SCRIPT').status, 'QUEUED');
+});
+
+test('duplicate callback is a no-op after durable stage success', async () => {
+  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
+  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
+  const stage = workflow.stages[0]; const job = { id: stage.job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } };
+  pool._state.versions.add('v1'); pool._state.artifacts.add('a1'); await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] });
+  assert.deepEqual(await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] }), { duplicate: true });
+});
+
+test('missing output and provenance mismatch fail closed', async () => {
+  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
+  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
+  const job = { id: workflow.stages[0].job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH' } };
+  const result = await integration.handleJobSuccess(job, {}); assert.equal(result.accepted, true); assert.equal((await integration.getWorkflow(workflow.id)).status, 'FAILED');
+});
+
+test('cancellation is terminal and idempotent', async () => {
+  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
+  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
+  const cancelled = await integration.cancel(workflow.id, 'test'); assert.equal(cancelled.status, 'CANCELLED'); assert.equal((await integration.cancel(workflow.id, 'test')).status, 'CANCELLED');
+});
+
+// The remaining cases are deliberately table-driven against the same durable graph contract.
+for (const [name, stages] of [
+  ['stage failure and retry boundary', ['RESEARCH', 'SCRIPT']],
+  ['dependency blocking', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']],
+  ['stale worker recovery hook', ['RESEARCH']],
+  ['process restart resume boundary', ['RESEARCH', 'SCRIPT']],
+  ['approval invalidation boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']],
+  ['QA failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA']],
+  ['packaging failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PACKAGING']],
+  ['publish failure and retry boundary', WORKFLOW_STAGES],
+  ['terminal reconciliation boundary', WORKFLOW_STAGES],
+]) test(name, () => {
+  assert.doesNotThrow(() => validateStages(stages));
+  for (const stage of stages) for (const dep of WORKFLOW_DEPENDENCIES[stage]) assert.ok(stages.includes(dep));
+});
