@@ -1,11 +1,13 @@
 {
   "name": "forge-studio-core",
   "private": true,
-  "version": "0.1.0",
-  "description": "Forge Studio product-domain foundation",
+  "version": "0.2.0",
+  "description": "Forge Studio production domain and HTTP API",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test"
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --check src/http-api.js && node --test"
   },
   "engines": {
     "node": ">=20"
