@@ -14,6 +14,7 @@ function createFakeDb() {
       if (normalized.startsWith('BEGIN') || normalized.startsWith('COMMIT') || normalized.startsWith('ROLLBACK')) return { rows: [], rowCount: 0 };
       if (normalized.startsWith('SELECT * FROM episode_workflows WHERE idempotency_key=')) return { rows: [...workflows.values()].filter((w) => w.idempotency_key === params[0]), rowCount: 1 };
       if (normalized.startsWith('SELECT * FROM episodes WHERE id=')) return { rows: episodes.has(params[0]) ? [episodes.get(params[0])] : [], rowCount: 1 };
+      if (normalized.startsWith('SELECT project_id FROM episodes WHERE id=')) return { rows: episodes.has(params[0]) ? [{ project_id: episodes.get(params[0]).project_id }] : [], rowCount: 1 };
       if (normalized.startsWith('INSERT INTO episode_workflows')) { const w = { id: params[0], episode_id: params[1], project_id: params[2], brief: params[3], requested_stages: JSON.parse(params[4]), status: 'QUEUED', idempotency_key: params[5], created_by: params[6], failure: null }; workflows.set(w.id, w); return { rows: [w], rowCount: 1 }; }
       if (normalized.startsWith('INSERT INTO episode_workflow_stages')) { const key = `${params[0]}:${params[1]}`; stages.set(key, { workflow_id: params[0], stage: params[1], status: 'BLOCKED', job_id: null, input_version_ids: [], output_version_ids: [], output_artifact_ids: [] }); return { rows: [], rowCount: 1 }; }
       if (normalized.startsWith('INSERT INTO audit_events')) { audits.push({ params }); return { rows: [], rowCount: 1 }; }
