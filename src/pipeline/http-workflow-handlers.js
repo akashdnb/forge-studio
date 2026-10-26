@@ -42,9 +42,6 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
   try {
-    // Resolve prior successful stages from durable job results, not from
-    // untrusted provider-supplied IDs. This gives every generated artifact
-    // real, same-episode upstream provenance.
     const upstream = dependencies.length
       ? await repository.db.pool.query(
         `SELECT kind, result FROM forge_jobs
@@ -55,9 +52,18 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
       : { rows: [] };
     const latestByKind = new Map();
     for (const row of upstream.rows) {
-      if (!latestByKind.has(row.kind) && row.result) latestByKind.set(row.kind, row.result);
+      // A job result is stored as JSONB by JobQueue.succeed. Accept JSON strings
+      // as well for test fixtures or older writer versions.
+      let result = row.result;
+      if (typeof result === 'string') {
+        try { result = JSON.parse(result); } catch { result = null; }
+      }
+      if (result && !latestByKind.has(row.kind)) latestByKind.set(row.kind, result);
     }
-    const missing = dependencies.filter((name) => !latestByKind.has('workflow:' + name) || !latestByKind.get('workflow:' + name).versionId);
+    const missing = dependencies.filter((name) => {
+      const result = latestByKind.get('workflow:' + name);
+      return !result || typeof result.versionId !== 'string' || !result.versionId;
+    });
     if (missing.length) throw Object.assign(new Error('Upstream stage result missing: ' + missing.join(', ')), { retryable: false });
     const upstreamResults = Object.fromEntries(dependencies.map((name) => [name, latestByKind.get('workflow:' + name)]));
     const dependencyVersionIds = [...new Set(dependencies.map((name) => latestByKind.get('workflow:' + name).versionId))];
