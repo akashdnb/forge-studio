@@ -1,10 +1,16 @@
 const crypto = require('node:crypto');
 const { requiredString } = require('./records');
 
-// Return immutable-by-ownership JSON snapshots without Object.freeze side effects.
+function deepFreeze(value, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Object.keys(value)) deepFreeze(value[key], seen);
+  return Object.freeze(value);
+}
+
 function snapshot(value) {
   if (value === undefined) return undefined;
-  return JSON.parse(JSON.stringify(value));
+  return deepFreeze(JSON.parse(JSON.stringify(value)));
 }
 
 function digest(value) {
