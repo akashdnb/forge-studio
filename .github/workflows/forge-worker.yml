@@ -12,6 +12,7 @@ on:
     secrets:
       DATABASE_URL: { required: true }
       FORGE_RUNNER_CALLBACK_TOKEN: { required: false }
+      FORGE_RUNNER_CALLBACK_URL: { required: false }
       FORGE_STORAGE_S3_BUCKET: { required: false }
       FORGE_STORAGE_S3_REGION: { required: false }
       FORGE_STORAGE_S3_ENDPOINT: { required: false }
@@ -20,16 +21,6 @@ on:
       FORGE_WHISPER_COMMAND: { required: false }
       FORGE_WHISPER_MODEL: { required: false }
       FORGE_WHISPER_ARGS: { required: false }
-    vars:
-      FORGE_RUNNER_CALLBACK_URL: { required: false }
-      FORGE_STORAGE_S3_FORCE_PATH_STYLE: { required: false }
-      FORGE_QA_TIMEOUT_MS: { required: false }
-      FORGE_QA_MAX_BYTES: { required: false }
-      FORGE_QA_ALLOWED_MEDIA_HOSTS: { required: false }
-      FORGE_RENDER_TIMEOUT_MS: { required: false }
-      FORGE_TRANSCRIPTION_TIMEOUT_MS: { required: false }
-      FORGE_TRANSCRIPTION_MAX_INPUT_BYTES: { required: false }
-      FORGE_TRANSCRIPTION_MAX_OUTPUT_BYTES: { required: false }
 permissions:
   contents: read
 concurrency:
@@ -41,7 +32,7 @@ jobs:
     timeout-minutes: 30
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      FORGE_RUNNER_CALLBACK_URL: ${{ vars.FORGE_RUNNER_CALLBACK_URL }}
+      FORGE_RUNNER_CALLBACK_URL: ${{ secrets.FORGE_RUNNER_CALLBACK_URL }}
       FORGE_RUNNER_CALLBACK_TOKEN: ${{ secrets.FORGE_RUNNER_CALLBACK_TOKEN }}
       FORGE_STORAGE_DRIVER: s3
       FORGE_STORAGE_S3_BUCKET: ${{ secrets.FORGE_STORAGE_S3_BUCKET }}
