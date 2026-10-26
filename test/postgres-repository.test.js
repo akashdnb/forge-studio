@@ -20,7 +20,7 @@ function fakePool() {
       const client = {
         async query(sql, params = []) {
           calls.push({ scope: 'client', sql, params });
-          if (sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0], revision: 1, state: 'DRAFT', project_id: 'p' }] };
+          if (sql.includes('SELECT * FROM episodes WHERE id=$1 FOR UPDATE') || sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0], revision: 1, state: 'DRAFT', project_id: 'p' }] };
           if (sql.includes('UPDATE episodes SET state')) return { rows: [{ id: params[1], state: params[0], revision: 2 }] };
           if (sql.includes('SELECT id FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0] }] };
           if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
@@ -79,7 +79,7 @@ test('provider run insert uses unique idempotency key with conflict-safe lookup'
   });
   assert.equal(result.idempotency_key, 'tts:ep-1:v1');
   assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('INSERT INTO provider_runs')));
-  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('SELECT * FROM provider_runs WHERE idempotency_key=$1 FOR UPDATE')));
 });
 
 test('cost record ownership is checked before insert inside transaction', async () => {
