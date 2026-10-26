@@ -7,8 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/http-api.js && node --check src/pipeline/provider-pipeline.js && node --check src/persistence/production-repository.js && node --test",
-    "migrate": "node src/migrate.js"
+    "check": "node --check src/server.js && node --check src/http-api.js && node --check src/pipeline/provider-pipeline.js && node --check src/pipeline/workflow.js && node --check scripts/demo-workflow.js && node --check src/persistence/production-repository.js && node --test",
+    "migrate": "node src/migrate.js",
+    "demo": "node scripts/demo-workflow.js"
   },
   "engines": {
     "node": ">=20"
