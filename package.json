@@ -1,7 +1,7 @@
 {
   "name": "forge-studio-core",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Forge Studio production domain and HTTP API",
   "type": "commonjs",
   "scripts": {
@@ -11,5 +11,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.1"
   }
 }
