@@ -1,0 +1,13 @@
+{
+  "name": "forge-studio-core",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Forge Studio product-domain foundation",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
