@@ -53,6 +53,14 @@ services:
         value: "/var/lib/forge/renders"
       - key: FORGE_RENDER_TIMEOUT_MS
         value: "900000"
+      - key: FORGE_RECONCILIATION_INTERVAL_MS
+        value: "300000"
+      - key: FORGE_RECONCILIATION_SCAN_LIMIT
+        value: "50"
+      - key: FORGE_RECONCILIATION_RECENT_MINUTES
+        value: "60"
+      - key: FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES
+        value: "60"
       - key: FORGE_STAGE_RESEARCH_ENDPOINT
         sync: false
       - key: FORGE_STAGE_SCRIPT_ENDPOINT
