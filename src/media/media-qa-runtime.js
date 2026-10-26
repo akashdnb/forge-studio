@@ -1,14 +1,20 @@
-const { validateMediaArtifact: validateRaw } = require('./media-qa');
+const { validateMediaArtifact: validateRaw, parseExpectedMetadata } = require('./media-qa');
 
-// Compatibility wrapper for the initial validator implementation: preserve the
-// public result contract as {expected, checksum} even if an older internal
-// validator emitted those two fields in reverse order.
-async function validateMediaArtifact(options) {
-  const result = await validateRaw(options);
-  if (result && result.expected && result.expected.hash && result.checksum && !result.checksum.hash) {
-    return { ...result, expected: result.checksum, checksum: result.expected };
-  }
-  return result;
+function expectedFromOptions(options = {}) {
+  const artifactExpected = parseExpectedMetadata(options.artifact?.metadata || {});
+  const payloadExpected = parseExpectedMetadata(options.payload?.timelineMetadata || options.payload?.metadata || {});
+  const merged = { ...artifactExpected };
+  for (const [key, value] of Object.entries(payloadExpected)) if (value !== null && value !== undefined) merged[key] = value;
+  return merged;
 }
 
-module.exports = { validateMediaArtifact };
+async function validateMediaArtifact(options) {
+  const result = await validateRaw(options);
+  return {
+    ...result,
+    expected: expectedFromOptions(options),
+    checksum: result.expected?.hash ? result.expected : result.checksum,
+  };
+}
+
+module.exports = { validateMediaArtifact, expectedFromOptions };
