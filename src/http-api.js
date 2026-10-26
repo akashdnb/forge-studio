@@ -147,7 +147,27 @@ function createApiServer({
           const item = service.artifacts.register({ ...body, episodeId: decodeURIComponent(path[2]), createdBy: auth.actor });
           return send(response, 201, { item });
         }
-        if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'provider-runs' && request.method === 'POST') {
+        if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'provider-runs' && path[4] && path[5] === 'transitions' && request.method === 'POST') {
+    const body = await readJson(request);
+    return { handled: true, statusCode: 200, body: { item: await repository.transitionProviderRun({
+      id: decodeURIComponent(path[4]), status: body.status, patch: body.patch || {},
+    }) } };
+  }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'qa' && request.method === 'POST') {
+    const body = await readJson(request);
+    return { handled: true, statusCode: 201, body: { item: await repository.recordQa({ ...body, episodeId: decodeURIComponent(path[2]) }) } };
+  }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'approvals' && request.method === 'POST') {
+    const body = await readJson(request);
+    return { handled: true, statusCode: 201, body: { item: await repository.appendApproval({ ...body, episodeId: decodeURIComponent(path[2]), actor }) } };
+  }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'render' && request.method === 'PUT') {
+    const body = await readJson(request);
+    return { handled: true, statusCode: 200, body: { item: await repository.selectRender({
+      id: decodeURIComponent(path[2]), renderArtifactId: body.renderArtifactId, expectedRevision: body.expectedRevision,
+    }) } };
+  }
+  if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'provider-runs' && request.method === 'POST') {
           const body = await readJson(request);
           const item = service.providerRuns.start({ ...body, episodeId: decodeURIComponent(path[2]) });
           return send(response, 201, { item });
