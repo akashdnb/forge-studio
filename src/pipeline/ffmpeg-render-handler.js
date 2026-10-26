@@ -9,12 +9,18 @@ function createFfmpegRenderHandler({ pool, logger = console, render = renderTime
     const episodeId = payload?.episodeId;
     if (!episodeId) throw Object.assign(new Error('Render job is missing episodeId'), { retryable: false });
     const timelineArtifact = Array.isArray(payload.timeline)
-      ? payload.timeline.find((item) => item?.content?.tracks || item?.content?.timeline?.tracks)
+      ? payload.timeline.find((item) => item?.versionId && (item?.content?.tracks || item?.content?.timeline?.tracks))
       : null;
     if (!timelineArtifact?.versionId) throw Object.assign(new Error('Render requires an immutable timeline artifact'), { retryable: false });
-    const timeline = timelineArtifact.content?.timeline?.tracks ? timelineArtifact.content.timeline : timelineArtifact.content;
-    const timelineContentHash = timelineArtifact.contentHash || sha256Json(timeline);
-    if (timelineArtifact.contentHash && timelineArtifact.contentHash !== sha256Json(timeline)) throw Object.assign(new Error('Timeline artifact content hash does not match immutable input'), { retryable: false });
+
+    const timelineVersion = await pool.query('SELECT id,episode_id,kind,payload,content_hash FROM version_records WHERE id=$1 AND episode_id=$2', [timelineArtifact.versionId, episodeId]);
+    const version = timelineVersion.rows[0];
+    if (!version || version.kind !== 'timeline') throw Object.assign(new Error('Render timeline version is missing or not a timeline'), { retryable: false });
+    const timeline = version.payload?.tracks ? version.payload : version.payload?.timeline;
+    if (!timeline?.tracks) throw Object.assign(new Error('Immutable timeline version has no timeline payload'), { retryable: false });
+    const timelineContentHash = version.content_hash || sha256Json(timeline);
+    if (sha256Json(timeline) !== timelineContentHash) throw Object.assign(new Error('Immutable timeline version content hash mismatch'), { retryable: false });
+    if (timelineArtifact.contentHash && timelineArtifact.contentHash !== timelineContentHash) throw Object.assign(new Error('Timeline artifact content hash does not match immutable version'), { retryable: false });
 
     const versionId = `render:${job.id}`;
     const artifactId = `render:${job.id}`;
@@ -53,10 +59,7 @@ function createFfmpegRenderHandler({ pool, logger = console, render = renderTime
       const existingVersion = await client.query('SELECT episode_id,kind FROM version_records WHERE id=$1 FOR UPDATE', [versionId]);
       if (existingVersion.rows[0] && (existingVersion.rows[0].episode_id !== episodeId || existingVersion.rows[0].kind !== 'render')) throw Object.assign(new Error('Render version identity conflicts with episode'), { retryable: false });
       if (!existingVersion.rows[0]) {
-        await client.query(
-          `INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,'render',$3::jsonb,$4,$5)`,
-          [versionId, episodeId, JSON.stringify({ mediaType: 'video/mp4', checksum: result.checksum, timelineVersionId: timelineArtifact.versionId, timelineContentHash }), result.checksum, payload.actor || 'worker'],
-        );
+        await client.query(`INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,'render',$3::jsonb,$4,$5)`, [versionId, episodeId, JSON.stringify({ mediaType: 'video/mp4', checksum: result.checksum, timelineVersionId: timelineArtifact.versionId, timelineContentHash }), result.checksum, payload.actor || 'worker']);
       }
       await client.query(
         `INSERT INTO artifacts(id,episode_id,kind,version_id,storage_uri,content_json,content_hash,media_type,source,input_version_ids,metadata,created_by)
