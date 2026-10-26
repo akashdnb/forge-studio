@@ -282,4 +282,4 @@ function openApiDocument() {
   };
 }
 
-module.exports = { createApiServer, openApiDocument, readJson, authorize };
+module.exports = { createApiServer, openApiDocument, readJson, authorize, tokenMatches };
