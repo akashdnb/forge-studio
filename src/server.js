@@ -1,5 +1,7 @@
 const { createExtendedApiServer } = require('./extended-http-api');
 const { PersistentProductionRepository } = require('./persistence/production-repository');
+const { handleGithubRunnerCallback } = require('./execution/github-actions-callback');
+const { URL } = require('node:url');
 
 const port = Number.parseInt(process.env.PORT || '8080', 10);
 const host = process.env.HOST || '0.0.0.0';
@@ -16,11 +18,21 @@ async function start() {
     if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate();
   }
   const { server } = createExtendedApiServer({ repository, apiToken: process.env.API_BEARER_TOKEN || null, allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true' });
+  const apiHandler = server.listeners('request')[0];
+  server.removeAllListeners('request');
+  server.on('request', async (request, response) => {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname === '/internal/github-actions/callback') {
+      if (!repository) return response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'PERSISTENCE_UNAVAILABLE', message: 'PostgreSQL is required for runner callbacks' } }));
+      return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN });
+    }
+    return apiHandler(request, response);
+  });
   server.prependListener('request', (request, response) => {
     const origin = request.headers.origin; const allowedOrigin = process.env.CORS_ORIGIN || '';
     if (origin && allowedOrigin && (allowedOrigin === '*' || origin === allowedOrigin)) {
       response.setHeader('access-control-allow-origin', allowedOrigin === '*' ? '*' : origin); response.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      response.setHeader('access-control-allow-headers', 'authorization,content-type,x-actor-id,x-request-id'); response.setHeader('access-control-max-age', '600'); response.setHeader('vary', 'Origin');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,x-actor-id,x-request-id,x-forge-runner-token'); response.setHeader('access-control-max-age', '600'); response.setHeader('vary', 'Origin');
       if (request.method === 'OPTIONS') { request.method = 'GET'; request.url = '/healthz'; }
     }
     response.setHeader('x-frame-options', 'DENY'); response.setHeader('x-content-type-options', 'nosniff'); response.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
