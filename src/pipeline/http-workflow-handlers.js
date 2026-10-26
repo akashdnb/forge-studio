@@ -31,23 +31,17 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
   timer.unref?.();
   try {
     const response = await fetchImpl(endpoint, {
-      method: 'POST',
-      redirect: 'error',
+      method: 'POST', redirect: 'error',
       headers: { 'content-type': 'application/json', ...(process.env.FORGE_STAGE_PROVIDER_TOKEN ? { authorization: 'Bearer ' + process.env.FORGE_STAGE_PROVIDER_TOKEN } : {}) },
       body: JSON.stringify({ contractVersion: 'forge-stage-v1', stage: stage.toUpperCase(), capability: CAPABILITIES[stage], payload, job: { id: job?.id, attempts: job?.attempts } }),
       signal: controller.signal,
     });
     const text = await response.text();
     let body;
-    try { body = text ? JSON.parse(text) : {}; }
-    catch { throw Object.assign(new Error('Stage ' + stage + ' provider returned invalid JSON'), { retryable: response.status >= 500 }); }
-    if (!response.ok) {
-      throw Object.assign(new Error('Stage ' + stage + ' provider returned HTTP ' + response.status), { retryable: response.status === 408 || response.status === 429 || response.status >= 500, status: response.status });
-    }
+    try { body = text ? JSON.parse(text) : {}; } catch { throw Object.assign(new Error('Stage ' + stage + ' provider returned invalid JSON'), { retryable: response.status >= 500 }); }
+    if (!response.ok) throw Object.assign(new Error('Stage ' + stage + ' provider returned HTTP ' + response.status), { retryable: response.status === 408 || response.status === 429 || response.status >= 500, status: response.status });
     const artifact = body.artifact || body;
-    if (!artifact || (artifact.content == null && !artifact.storageUri)) {
-      throw Object.assign(new Error('Stage ' + stage + ' response must include artifact.content or artifact.storageUri'), { retryable: false });
-    }
+    if (!artifact || (artifact.content == null && !artifact.storageUri)) throw Object.assign(new Error('Stage ' + stage + ' response must include artifact.content or artifact.storageUri'), { retryable: false });
     const episodeId = payload.episodeId;
     const episode = await repository.db.getEpisode(episodeId);
     if (!episode) throw Object.assign(new Error('Episode not found: ' + episodeId), { retryable: false });
@@ -59,8 +53,7 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
     await repository.db.withTransaction(async (client) => {
       const existingVersion = await client.query('SELECT id, episode_id, kind FROM version_records WHERE id=$1', [versionId]);
       if (!existingVersion.rows[0]) {
-        await client.query('INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,$3,$4::jsonb,$5,$6)',
-          [versionId, episodeId, kind, JSON.stringify(artifact.content == null ? {} : artifact.content), artifact.contentHash || null, payload.actor || 'worker']);
+        await client.query('INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,$3,$4::jsonb,$5,$6)', [versionId, episodeId, kind, JSON.stringify(artifact.content == null ? {} : artifact.content), artifact.contentHash || null, payload.actor || 'worker']);
       } else if (existingVersion.rows[0].episode_id !== episodeId || existingVersion.rows[0].kind !== kind) {
         throw Object.assign(new Error('Provider version identity conflicts with episode or stage'), { retryable: false });
       }
@@ -72,19 +65,13 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
         `INSERT INTO artifacts(id,episode_id,kind,version_id,storage_uri,content_json,content_hash,media_type,source,input_version_ids,metadata,created_by)
          VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,'provider',$9::jsonb,$10::jsonb,$11)
          ON CONFLICT (id) DO NOTHING`,
-        [artifactId, episodeId, kind, versionId, artifact.storageUri || null, artifact.content == null ? null : JSON.stringify(artifact.content),
-          artifact.contentHash || null, artifact.mediaType || null, JSON.stringify(inputVersionIds),
-          JSON.stringify({ ...(artifact.metadata || {}), stage: stage.toUpperCase(), provider: body.provider || null }), payload.actor || 'worker']);
-      for (const dependencyId of inputVersionIds) {
-        await client.query('INSERT INTO version_dependencies(episode_id,version_id,depends_on_version_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [episodeId, versionId, dependencyId]);
-      }
+        [artifactId, episodeId, kind, versionId, artifact.storageUri || null, artifact.content == null ? null : JSON.stringify(artifact.content), artifact.contentHash || null, artifact.mediaType || null, JSON.stringify(inputVersionIds), JSON.stringify({ ...(artifact.metadata || {}), stage: stage.toUpperCase(), provider: body.provider || null }), payload.actor || 'worker']);
+      for (const dependencyId of inputVersionIds) await client.query('INSERT INTO version_dependencies(episode_id,version_id,depends_on_version_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [episodeId, versionId, dependencyId]);
       if (stage === 'qa') {
         const qa = body.qa || artifact.qa || artifact.content?.qa || artifact.content || {};
         const status = String(qa.status || body.status || '').toUpperCase();
-        if (!['PASSED', 'WARNINGS', 'FAILED'].includes(status)) throw Object.assign(new Error('QA stage must return qa.status as PASSED, WARNINGS, or FAILED'), { retryable: false });
-        await client.query(
-          'INSERT INTO qa_results(id,episode_id,artifact_id,version_id,status,checks,runner,metadata) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb)',
-          [randomUUID(), episodeId, artifactId, versionId, status, JSON.stringify(Array.isArray(qa.checks) ? qa.checks : []), String(body.provider || 'http-workflow-provider'), JSON.stringify(qa.metadata || {})]);
+        if (!['PASSED','WARNINGS','FAILED'].includes(status)) throw Object.assign(new Error('QA stage must return qa.status as PASSED, WARNINGS, or FAILED'), { retryable: false });
+        await client.query('INSERT INTO qa_results(id,episode_id,artifact_id,version_id,status,checks,runner,metadata) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb)', [randomUUID(), episodeId, artifactId, versionId, status, JSON.stringify(Array.isArray(qa.checks) ? qa.checks : []), String(body.provider || 'http-workflow-provider'), JSON.stringify(qa.metadata || {})]);
         if (status === 'FAILED') throw Object.assign(new Error('QA provider marked the render as failed'), { retryable: false });
       }
     });
@@ -95,5 +82,4 @@ async function executeStage({ stage, payload, job, repository, fetchImpl = fetch
     throw error;
   } finally { clearTimeout(timer); }
 }
-
 module.exports = { createHttpWorkflowHandlers, executeStage, assertProviderEndpoint, STAGES, CAPABILITIES };
