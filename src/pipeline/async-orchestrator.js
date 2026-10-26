@@ -1,27 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const { JobQueue } = require('../persistence/job-queue');
 const { WORKFLOW_DEPENDENCIES } = require('./workflow');
-
-const ORDER = ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PUBLISH'];
-const CAPTION_DEPENDENCIES = Object.freeze({ ...WORKFLOW_DEPENDENCIES, CAPTIONS: ['TIMELINE'], RENDER: ['TIMELINE', 'CAPTIONS'] });
-
-class AsyncEpisodeOrchestrator {
-  constructor({ pool, leaseSeconds = 300 }) { this.queue = new JobQueue({ pool, leaseSeconds }); }
-
-  async enqueue({ episodeId, projectId = null, brief, stages = ORDER, actor = 'workflow', idempotencyPrefix = randomUUID() }) {
-    if (!episodeId) throw new TypeError('episodeId is required');
-    if (!String(brief || '').trim()) throw new TypeError('brief is required');
-    const requested = new Set(stages); const jobs = [];
-    for (const stage of stages) {
-      if (!ORDER.includes(stage)) throw new TypeError(`Unknown workflow stage: ${stage}`);
-      for (const dependency of CAPTION_DEPENDENCIES[stage] || []) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency}`);
-    }
-    let dependsOnJobId = null;
-    for (const stage of stages) {
-      const job = await this.queue.enqueue({ projectId, episodeId, kind: `workflow:${stage.toLowerCase()}`, payload: { episodeId, projectId, brief, stage, actor }, idempotencyKey: `${idempotencyPrefix}:${episodeId}:${stage}`, createdBy: actor, dependsOnJobId });
-      jobs.push(job); dependsOnJobId = job.id;
-    }
-    return { episodeId, jobs };
-  }
-}
-module.exports = { AsyncEpisodeOrchestrator, WORKFLOW_STAGE_ORDER: ORDER, WORKFLOW_STAGE_DEPENDENCIES: CAPTION_DEPENDENCIES };
+const ORDER = ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PUBLISH'];
+const TRANSCRIPTION_DEPENDENCIES = Object.freeze({ ...WORKFLOW_DEPENDENCIES, TRANSCRIPTION: ['NARRATION'], TIMELINE: ['SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS'], CAPTIONS: ['TIMELINE'], RENDER: ['TIMELINE', 'CAPTIONS'] });
+class AsyncEpisodeOrchestrator { constructor({ pool, leaseSeconds = 300 }) { this.queue = new JobQueue({ pool, leaseSeconds }); } async enqueue({ episodeId, projectId = null, brief, stages = ORDER, actor = 'workflow', idempotencyPrefix = randomUUID() }) { if (!episodeId) throw new TypeError('episodeId is required'); if (!String(brief || '').trim()) throw new TypeError('brief is required'); const requested = new Set(stages); const jobs = []; for (const stage of stages) { if (!ORDER.includes(stage)) throw new TypeError(`Unknown workflow stage: ${stage}`); for (const dependency of TRANSCRIPTION_DEPENDENCIES[stage] || []) if (!requested.has(dependency)) throw new Error(`Stage ${stage} requires ${dependency}`); } let dependsOnJobId = null; for (const stage of stages) { const job = await this.queue.enqueue({ projectId, episodeId, kind: `workflow:${stage.toLowerCase()}`, payload: { episodeId, projectId, brief, stage, actor }, idempotencyKey: `${idempotencyPrefix}:${episodeId}:${stage}`, createdBy: actor, dependsOnJobId }); jobs.push(job); dependsOnJobId = job.id; } return { episodeId, jobs }; } }
+module.exports = { AsyncEpisodeOrchestrator, WORKFLOW_STAGE_ORDER: ORDER, WORKFLOW_STAGE_DEPENDENCIES: TRANSCRIPTION_DEPENDENCIES };
