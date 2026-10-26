@@ -13,9 +13,19 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+  - type: worker
+    name: forge-studio-worker
+    runtime: docker
+    plan: starter
+    startCommand: node src/worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: PG_POOL_MAX
+        value: "5"
   - type: web
     name: forge-studio-ui
     runtime: static
-    plan: starter
-    buildCommand: ""
     staticPublishPath: ./public
