@@ -18,14 +18,8 @@ async function main() {
     }
     if (claimed.kind !== 'workflow:render') throw new Error(`Job ${jobId} is ${claimed.kind}, not workflow:render`);
     const handler = createFfmpegRenderHandler({ pool });
-    try {
-      const result = await handler(claimed.payload, claimed);
-      await queue.succeed(jobId, workerId, result);
-      process.stdout.write(JSON.stringify({ status: 'SUCCEEDED', jobId, result }) + '\n');
-    } catch (error) {
-      await queue.fail(jobId, workerId, error, { retry: error?.retryable !== false });
-      throw error;
-    }
+    const result = await handler(claimed.payload, claimed);
+    process.stdout.write(JSON.stringify({ status: 'RENDERED', jobId, workerId, result }) + '\n');
   } finally {
     await pool.end();
   }
