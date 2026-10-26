@@ -45,3 +45,30 @@ test('worker does not claim new work after stop', async () => {
   assert.deepEqual(await worker.runOnce(), { status: 'stopping' });
   assert.equal(claims, 0);
 });
+
+
+test('worker heartbeat loss prevents stale worker completion or failure writes', async () => {
+  let completeCalls = 0;
+  let failCalls = 0;
+  const queue = {
+    async claim() { return { id: 'job-lease', episode_id: 'ep', stage: 'RENDER', attempts: 1 }; },
+    async heartbeat() { throw Object.assign(new Error('Job lease is no longer owned by this worker'), { code: 'LEASE_LOST' }); },
+    async complete() { completeCalls += 1; return {}; },
+    async fail() { failCalls += 1; return { status: 'FAILED' }; },
+  };
+  let releaseExecution;
+  const execution = new Promise((resolve) => { releaseExecution = resolve; });
+  const worker = new DurableWorker({
+    queue, leaseHeartbeatMs: 10,
+    executeJob: async (_job, { signal }) => {
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      releaseExecution();
+      return { lateResult: true };
+    },
+  });
+  const promise = worker.runOnce();
+  const result = await promise;
+  assert.equal(result.status, 'lease-lost');
+  assert.equal(completeCalls, 0);
+  assert.equal(failCalls, 0);
+});
