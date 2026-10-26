@@ -1,0 +1,56 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { test } = require('node:test');
+const { parseWhisperSegments, downloadImmutableInput, transcribeWithWhisper } = require('../src/transcription/whisper-worker');
+const crypto = require('node:crypto');
+
+function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+
+test('normalizes Whisper timestamps and confidence deterministically', () => {
+  const result = parseWhisperSegments({ language: 'en', segments: [{ start: 0, end: 1.23456, text: ' Hello ', confidence: 0.9876543 }, { start: 1.23456, end: 2.5, text: 'world', avg_logprob: -0.1 }] });
+  assert.equal(result.language, 'en');
+  assert.deepEqual(result.segments[0], { index: 0, start: 0, end: 1.235, text: 'Hello', confidence: 0.987654 });
+  assert.equal(result.segments[1].start, 1.235);
+  assert.equal(result.durationSeconds, 2.5);
+});
+
+test('rejects malformed provider output', () => {
+  assert.throws(() => parseWhisperSegments({ language: 'en', segments: [{ start: 2, end: 1, text: 'bad' }] }), /Invalid Whisper segment/);
+  assert.throws(() => parseWhisperSegments({ segments: [] }), /language/);
+});
+
+test('requires HTTPS and verifies immutable input checksum', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-transcription-test-'));
+  const source = path.join(dir, 'source.wav'); const destination = path.join(dir, 'download.wav');
+  await fs.writeFile(source, Buffer.from('fixture-audio'));
+  const digest = hash(Buffer.from('fixture-audio'));
+  process.env.FORGE_TRANSCRIPTION_ALLOW_FILE = 'true';
+  const result = await downloadImmutableInput(`file://${source}`, destination, { expectedSha256: digest, maxBytes: 1024 });
+  assert.equal(result.sha256, digest);
+  await assert.rejects(() => downloadImmutableInput('http://example.test/audio.wav', destination, { expectedSha256: digest }), /HTTPS/);
+  await assert.rejects(() => downloadImmutableInput(`file://${source}`, destination, { expectedSha256: '0'.repeat(64), maxBytes: 1024 }), /checksum mismatch/);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('fails clearly when Whisper is not configured', async () => {
+  const old = process.env.FORGE_WHISPER_COMMAND;
+  delete process.env.FORGE_WHISPER_COMMAND;
+  await assert.rejects(() => transcribeWithWhisper('/tmp/input.wav', {}), (error) => error.code === 'PROVIDER_NOT_CONFIGURED');
+  if (old) process.env.FORGE_WHISPER_COMMAND = old;
+});
+
+test('executes a real configured Whisper-compatible command and parses its JSON output', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-whisper-command-'));
+  const script = path.join(dir, 'whisper-fixture.js');
+  await fs.writeFile(script, "process.stdout.write(JSON.stringify({language:'en',segments:[{start:0,end:1.25,text:'deterministic fixture',confidence:0.91}]}));\n");
+  const oldCommand = process.env.FORGE_WHISPER_COMMAND; const oldArgs = process.env.FORGE_WHISPER_ARGS;
+  process.env.FORGE_WHISPER_COMMAND = process.execPath; process.env.FORGE_WHISPER_ARGS = `${script}`;
+  const result = await transcribeWithWhisper('/tmp/input.wav', { timeoutMs: 5000 });
+  assert.deepEqual(result.segments[0].text, 'deterministic fixture');
+  assert.equal(result.language, 'en');
+  if (oldCommand) process.env.FORGE_WHISPER_COMMAND = oldCommand; else delete process.env.FORGE_WHISPER_COMMAND;
+  if (oldArgs) process.env.FORGE_WHISPER_ARGS = oldArgs; else delete process.env.FORGE_WHISPER_ARGS;
+  await fs.rm(dir, { recursive: true, force: true });
+});
