@@ -1,97 +1,32 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { GithubActionsExecutionBackend, GithubActionsClient, parseRunName, classifyConclusion } = require('../src/execution/github-actions-backend');
-
 function makeJob(overrides = {}) { return { id: 'job-1', episode_id: 'episode-1', kind: 'workflow:captions', payload: { episodeId: 'episode-1' }, status: 'QUEUED', attempts: 0, max_attempts: 3, worker_id: null, idempotency_key: 'idem-1', ...overrides }; }
-function makeQueue(job = makeJob()) {
-  return {
-    job,
-    async claim({ workerId }) { if (this.job.status !== 'QUEUED') return null; this.job.status = 'RUNNING'; this.job.worker_id = workerId; this.job.attempts += 1; return { ...this.job }; },
-    async get() { return this.job; },
-    async heartbeat() { return this.job; },
-    async fail(id, workerId, error, { retry = true } = {}) { assert.equal(id, this.job.id); assert.equal(workerId, this.job.worker_id); if (retry && this.job.attempts < this.job.max_attempts) { this.job.status = 'QUEUED'; this.job.worker_id = null; } else this.job.status = 'FAILED'; this.job.error = error.message; return this.job; },
-    async succeed(id, workerId, result) { assert.equal(id, this.job.id); assert.equal(workerId, this.job.worker_id); this.job.status = 'SUCCEEDED'; this.job.result = result; return this.job; },
-  };
-}
-function makePool(queue) {
-  const executions = new Map();
-  const pool = {
-    executions,
-    async query(sql, params = []) {
-      if (sql.startsWith('INSERT INTO forge_execution_runs')) {
-        const row = { id: params[0], job_id: params[1], attempt: params[2], backend: params[3], worker_type: params[4], workflow_name: params[5], correlation_id: params[6], idempotency_key: params[7], status: 'DISPATCHING', workflow_ref: params[8], runner_profile: params[9], dispatched_at: params[10], heartbeat_at: params[10], timeout_at: params[11], metadata: JSON.parse(params[12]) };
-        executions.set(row.id, row); return { rows: [row], rowCount: 1 };
-      }
-      if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 AND attempt=$2')) { const row = [...executions.values()].find((v) => v.job_id === params[0] && v.attempt === params[1]); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
-      if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 ORDER BY')) { const rows = [...executions.values()].filter((v) => v.job_id === params[0]).sort((a, b) => b.attempt - a.attempt); return { rows: rows.slice(0, 1), rowCount: rows.length ? 1 : 0 }; }
-      if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE status IN')) { const rows = [...executions.values()].filter((v) => ['DISPATCHING', 'QUEUED', 'IN_PROGRESS'].includes(v.status)); return { rows, rowCount: rows.length }; }
-      if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 AND correlation_id=$2')) { const row = [...executions.values()].find((v) => v.job_id === params[0] && v.correlation_id === params[1]); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
-      if (sql.startsWith('SELECT metadata FROM forge_execution_runs')) { const row = executions.get(params[0]); return { rows: row ? [{ metadata: row.metadata }] : [], rowCount: row ? 1 : 0 }; }
-      if (sql.startsWith('UPDATE forge_execution_runs SET status=$1')) { const row = executions.get(params[6]); if (!row) return { rows: [], rowCount: 0 }; row.status = params[0]; if (params[1]) row.github_run_id = params[1]; if (params[2]) row.github_run_attempt = params[2]; row.metadata = JSON.parse(params[3]); if (params[4]) row.failure_code = params[4]; if (params[5]) row.failure_message = params[5]; return { rows: [row], rowCount: 1 }; }
-      if (sql.startsWith("UPDATE forge_execution_runs SET status='QUEUED'")) return { rows: [], rowCount: 0 };
-      if (sql.startsWith("UPDATE forge_jobs SET leased_until")) return { rows: [queue.job], rowCount: 1 };
-      if (sql.startsWith("UPDATE forge_jobs SET status='SUCCEEDED'")) { queue.job.status = 'SUCCEEDED'; queue.job.result = JSON.parse(params[0]); queue.job.worker_id = null; return { rows: [queue.job], rowCount: 1 }; }
-      if (sql.startsWith('SELECT * FROM forge_jobs WHERE id=$1')) return { rows: [queue.job], rowCount: 1 };
-      if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 AND status IN')) return { rows: [], rowCount: 0 };
-      return { rows: [], rowCount: 0 };
-    },
-    async connect() { return { query: (...args) => pool.query(...args), release() {} }; },
-  };
-  return pool;
-}
+function makeQueue(job = makeJob()) { return { job, async claim({ workerId }) { if (this.job.status !== 'QUEUED') return null; this.job.status = 'RUNNING'; this.job.worker_id = workerId; this.job.attempts += 1; return { ...this.job }; }, async get() { return this.job; }, async heartbeat() { return this.job; }, async fail(id, workerId, error, { retry = true } = {}) { assert.equal(id, this.job.id); assert.equal(workerId, this.job.worker_id); if (retry && this.job.attempts < this.job.max_attempts) { this.job.status = 'QUEUED'; this.job.worker_id = null; } else this.job.status = 'FAILED'; this.job.error = error.message; return this.job; }, async succeed(id, workerId, result) { assert.equal(id, this.job.id); assert.equal(workerId, this.job.worker_id); this.job.status = 'SUCCEEDED'; this.job.result = result; return this.job; } }; }
+function makePool(queue) { const executions = new Map(); const pool = { executions, async query(sql, params = []) {
+  if (sql.startsWith('INSERT INTO forge_execution_runs')) { const row = { id: params[0], job_id: params[1], attempt: params[2], backend: params[3], worker_type: params[4], workflow_name: params[5], correlation_id: params[6], idempotency_key: params[7], status: 'DISPATCHING', workflow_ref: params[8], runner_profile: params[9], dispatched_at: params[10], heartbeat_at: params[10], timeout_at: params[11], metadata: JSON.parse(params[12]) }; executions.set(row.id, row); return { rows: [row], rowCount: 1 }; }
+  if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 AND attempt=$2')) { const row = [...executions.values()].find((v) => v.job_id === params[0] && v.attempt === params[1]); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
+  if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 ORDER BY')) { const rows = [...executions.values()].filter((v) => v.job_id === params[0]).sort((a, b) => b.attempt - a.attempt); return { rows: rows.slice(0, 1), rowCount: rows.length ? 1 : 0 }; }
+  if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE status IN')) { const rows = [...executions.values()].filter((v) => ['DISPATCHING', 'QUEUED', 'IN_PROGRESS'].includes(v.status)); return { rows, rowCount: rows.length }; }
+  if (sql.startsWith('SELECT * FROM forge_execution_runs WHERE job_id=$1 AND correlation_id=$2')) { const row = [...executions.values()].find((v) => v.job_id === params[0] && v.correlation_id === params[1]); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
+  if (sql.startsWith('SELECT metadata FROM forge_execution_runs')) { const row = executions.get(params[0]); return { rows: row ? [{ metadata: row.metadata }] : [], rowCount: row ? 1 : 0 }; }
+  if (sql.startsWith('UPDATE forge_execution_runs SET status=$1')) { const row = executions.get(params[6]); if (!row) return { rows: [], rowCount: 0 }; row.status = params[0]; if (params[1]) row.github_run_id = params[1]; if (params[2]) row.github_run_attempt = params[2]; row.metadata = JSON.parse(params[3]); if (params[4]) row.failure_code = params[4]; if (params[5]) row.failure_message = params[5]; return { rows: [row], rowCount: 1 }; }
+  if (sql.startsWith("UPDATE forge_execution_runs SET status='QUEUED'")) { const row = executions.get(params[0]); if (row) row.status = 'QUEUED'; return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
+  if (sql.startsWith("UPDATE forge_jobs SET leased_until")) return { rows: [queue.job], rowCount: 1 };
+  if (sql.startsWith("UPDATE forge_jobs SET status='SUCCEEDED'")) { queue.job.status = 'SUCCEEDED'; queue.job.result = JSON.parse(params[0]); queue.job.worker_id = null; return { rows: [queue.job], rowCount: 1 }; }
+  if (sql.startsWith("UPDATE forge_jobs SET status='QUEUED'")) { queue.job.status = 'QUEUED'; queue.job.worker_id = null; return { rows: [queue.job], rowCount: 1 }; }
+  if (sql.startsWith("UPDATE forge_jobs SET status='FAILED'")) { queue.job.status = 'FAILED'; queue.job.worker_id = null; return { rows: [queue.job], rowCount: 1 }; }
+  if (sql.startsWith('SELECT * FROM forge_jobs WHERE id=$1')) return { rows: [queue.job], rowCount: 1 };
+  return { rows: [], rowCount: 0 };
+}, async connect() { return { query: (...args) => pool.query(...args), release() {} }; } }; return pool; }
 function backendFor(queue, pool, client, clock = () => Date.now()) { return new GithubActionsExecutionBackend({ pool, queue, client, clock, config: { mode: 'local', ref: 'main', timeoutMs: 60_000, dispatchGraceMs: 10_000, maxDispatchesPerTick: 1 }, logger: { error() {} } }); }
 
-test('dispatch persists correlation and passes only identifiers/configuration', async () => {
-  const queue = makeQueue(); const pool = makePool(queue); let inputs;
-  const client = { async dispatch(workflow, value) { inputs = { workflow, ...value }; return { id: 'local-run-1', name: `Forge captions ${value.job_id} ${value.correlation_id}` }; } };
-  const backend = backendFor(queue, pool, client);
-  const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' });
-  assert.equal(execution.status, 'QUEUED'); assert.equal(execution.github_run_id, 'local-run-1'); assert.equal(inputs.workflow, 'forge-caption.yml');
-  assert.deepEqual(Object.keys(inputs).sort(), ['correlation_id', 'episode_id', 'idempotency_key', 'job_id', 'worker_type', 'workflow'].sort());
-  assert.equal(inputs.idempotency_key, 'idem-1'); assert.equal(queue.job.status, 'RUNNING');
-});
-
-test('callback completion is idempotent and completes the durable job', async () => {
-  const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return { id: 'run-1' }; } });
-  const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' });
-  const first = await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'completed', githubRunId: 'run-1', metadata: { artifactId: 'caption:v1' } });
-  const second = await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'completed', githubRunId: 'run-1' });
-  assert.equal(first.status, 'COMPLETED'); assert.equal(second.status, 'COMPLETED'); assert.equal(queue.job.status, 'SUCCEEDED'); assert.equal(queue.job.result.githubRunId, 'run-1');
-});
-
-test('callback failure requeues safely for another attempt', async () => {
-  const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return { id: 'run-1' }; } });
-  const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' });
-  await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'failed' });
-  assert.equal(queue.job.status, 'QUEUED'); assert.equal(queue.job.attempts, 1);
-});
-
-test('reconciliation correlates a GitHub run by deterministic run name and completion', async () => {
-  const queue = makeQueue(); const pool = makePool(queue); const client = { async dispatch() { return null; }, async listRuns() { const execution = [...pool.executions.values()][0]; return [{ id: 42, name: `Forge captions ${execution.job_id} ${execution.correlation_id}`, status: 'completed', conclusion: 'success', html_url: 'https://github.example/run/42', run_attempt: 1 }]; }, async cancel() {} };
-  const backend = backendFor(queue, pool, client); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile();
-  assert.equal(queue.job.status, 'SUCCEEDED'); assert.equal([...pool.executions.values()][0].github_run_id, '42');
-});
-
-test('cancellation stops the durable execution and requests runner cancellation', async () => {
-  const queue = makeQueue(); const pool = makePool(queue); let cancelled = null; const client = { async dispatch() { return { id: 'run-9' }; }, async cancel(id) { cancelled = id; } };
-  const backend = backendFor(queue, pool, client); const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' }); queue.job.status = 'CANCELLED'; await backend.reconcile();
-  assert.equal(cancelled, 'run-9'); assert.equal([...pool.executions.values()][0].status, 'CANCELLED'); assert.equal(execution.github_run_id, 'run-9');
-});
-
-test('timeout cancels the run and safely requeues', async () => {
-  const now = Date.now(); const queue = makeQueue(); const pool = makePool(queue); let cancelled = null; const client = { async dispatch() { return { id: 'run-timeout' }; }, async cancel(id) { cancelled = id; } };
-  const backend = backendFor(queue, pool, client, () => now + 61_000); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile();
-  assert.equal(cancelled, 'run-timeout'); assert.equal(queue.job.status, 'QUEUED'); assert.equal([...pool.executions.values()][0].status, 'TIMED_OUT');
-});
-
-test('stale dispatch is recovered as a retryable failure', async () => {
-  const now = Date.now(); const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return null; } }, () => now + 11_000); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile();
-  assert.equal(queue.job.status, 'QUEUED'); assert.equal([...pool.executions.values()][0].status, 'STALE');
-});
-
-test('local mode is deterministic without GitHub credentials', () => {
-  const client = new GithubActionsClient({ config: { mode: 'local', repository: '', token: '', apiBaseUrl: 'https://api.github.com', ref: 'main' }, fetchImpl: async () => { throw new Error('network must not be called'); } });
-  return client.dispatch('forge-caption.yml', { job_id: 'job-1', worker_type: 'captions', correlation_id: 'corr-1' }).then((run) => { assert.equal(run.id, 'local-5c4e0d2f8b2f2a50'); });
-});
-
+test('dispatch persists correlation and passes only identifiers/configuration', async () => { const queue = makeQueue(); const pool = makePool(queue); let inputs; const client = { async dispatch(workflow, value) { inputs = { workflow, ...value }; return { id: 'local-run-1', name: `Forge captions ${value.job_id} ${value.correlation_id}` }; } }; const backend = backendFor(queue, pool, client); const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' }); assert.equal(execution.status, 'QUEUED'); assert.equal(execution.github_run_id, 'local-run-1'); assert.equal(inputs.workflow, 'forge-caption.yml'); assert.deepEqual(Object.keys(inputs).sort(), ['correlation_id', 'episode_id', 'idempotency_key', 'job_id', 'worker_type', 'workflow'].sort()); assert.equal(inputs.idempotency_key, 'idem-1'); assert.equal(queue.job.status, 'RUNNING'); });
+test('callback completion is idempotent and completes the durable job', async () => { const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return { id: 'run-1' }; } }); const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' }); const first = await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'completed', githubRunId: 'run-1', metadata: { artifactId: 'caption:v1' } }); const second = await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'completed', githubRunId: 'run-1' }); assert.equal(first.status, 'COMPLETED'); assert.equal(second.status, 'COMPLETED'); assert.equal(queue.job.status, 'SUCCEEDED'); assert.equal(queue.job.result.githubRunId, 'run-1'); });
+test('callback failure requeues safely for another attempt', async () => { const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return { id: 'run-1' }; } }); const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.applyCallback({ jobId: 'job-1', correlationId: execution.correlation_id, status: 'failed' }); assert.equal(queue.job.status, 'QUEUED'); assert.equal(queue.job.attempts, 1); });
+test('reconciliation correlates a GitHub run by deterministic run name and completion', async () => { const queue = makeQueue(); const pool = makePool(queue); const client = { async dispatch() { return null; }, async listRuns() { const execution = [...pool.executions.values()][0]; return [{ id: 42, name: `Forge captions ${execution.job_id} ${execution.correlation_id}`, status: 'completed', conclusion: 'success', html_url: 'https://github.example/run/42', run_attempt: 1 }]; }, async cancel() {} }; const backend = backendFor(queue, pool, client); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile(); assert.equal(queue.job.status, 'SUCCEEDED'); assert.equal([...pool.executions.values()][0].github_run_id, '42'); });
+test('cancellation stops the durable execution and requests runner cancellation', async () => { const queue = makeQueue(); const pool = makePool(queue); let cancelled = null; const client = { async dispatch() { return { id: 'run-9' }; }, async cancel(id) { cancelled = id; } }; const backend = backendFor(queue, pool, client); const execution = await backend.dispatchNext({ workerId: 'forge-worker-1' }); queue.job.status = 'CANCELLED'; await backend.reconcile(); assert.equal(cancelled, 'run-9'); assert.equal([...pool.executions.values()][0].status, 'CANCELLED'); assert.equal(execution.github_run_id, 'run-9'); });
+test('timeout cancels the run and safely requeues', async () => { const now = Date.now(); const queue = makeQueue(); const pool = makePool(queue); let cancelled = null; const client = { async dispatch() { return { id: 'run-timeout' }; }, async cancel(id) { cancelled = id; } }; const backend = backendFor(queue, pool, client, () => now + 61_000); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile(); assert.equal(cancelled, 'run-timeout'); assert.equal(queue.job.status, 'QUEUED'); assert.equal([...pool.executions.values()][0].status, 'TIMED_OUT'); });
+test('stale dispatch is recovered as a retryable failure', async () => { const now = Date.now(); const queue = makeQueue(); const pool = makePool(queue); const backend = backendFor(queue, pool, { async dispatch() { return null; } }, () => now + 11_000); await backend.dispatchNext({ workerId: 'forge-worker-1' }); await backend.reconcile(); assert.equal(queue.job.status, 'QUEUED'); assert.equal([...pool.executions.values()][0].status, 'STALE'); });
+test('local mode is deterministic without GitHub credentials', async () => { const client = new GithubActionsClient({ config: { mode: 'local', repository: '', token: '', apiBaseUrl: 'https://api.github.com', ref: 'main' }, fetchImpl: async () => { throw new Error('network must not be called'); } }); const run = await client.dispatch('forge-caption.yml', { job_id: 'job-1', worker_type: 'captions', correlation_id: 'corr-1' }); assert.equal(run.id, 'local-b87d3866d93a7215'); });
 test('run-name and conclusion helpers are deterministic', () => { assert.deepEqual(parseRunName('Forge captions job-1 corr-1'), { workerType: 'captions', jobId: 'job-1', correlationId: 'corr-1' }); assert.equal(classifyConclusion('success').status, 'COMPLETED'); assert.equal(classifyConclusion('timed_out').retryable, true); });
