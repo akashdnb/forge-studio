@@ -21,6 +21,10 @@ services:
     name: forge-studio-worker
     runtime: docker
     plan: starter
+    disk:
+      name: forge-render-disk
+      mountPath: /var/lib/forge
+      sizeGB: 10
     envVars:
       - key: NODE_ENV
         value: production
