@@ -8,9 +8,10 @@ function cloneJson(value) {
 }
 
 function deepFreeze(value) {
-  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  if (!value || typeof value !== 'object') return value;
   for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
+  if (!Object.isFrozen(value)) Object.freeze(value);
+  return value;
 }
 
 function immutableRecord(value) {
