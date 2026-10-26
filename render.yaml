@@ -50,6 +50,10 @@ services:
         sync: false
       - key: FORGE_WORKER_HANDLERS
         sync: false
+      - key: FORGE_ARTIFACT_HOSTS
+        sync: false
+      - key: FORGE_LOCAL_ARTIFACT_ROOT
+        sync: false
       - key: YOUTUBE_ACCESS_TOKEN
         sync: false
       - key: YOUTUBE_REFRESH_TOKEN
