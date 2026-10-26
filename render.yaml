@@ -21,6 +21,11 @@ services:
     name: forge-studio-worker
     runtime: docker
     plan: starter
+    dockerCommand: node src/worker.js
+    disk:
+      name: forge-render-disk
+      mountPath: /var/lib/forge
+      sizeGB: 10
     envVars:
       - key: NODE_ENV
         value: production
@@ -30,6 +35,12 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_RENDER_WORKDIR
+        value: "/var/lib/forge"
+      - key: FORGE_RENDER_OUTPUT_DIR
+        value: "/var/lib/forge/renders"
+      - key: FORGE_RENDER_TIMEOUT_MS
+        value: "900000"
       - key: FORGE_STAGE_RESEARCH_ENDPOINT
         sync: false
       - key: FORGE_STAGE_SCRIPT_ENDPOINT
@@ -41,8 +52,6 @@ services:
       - key: FORGE_STAGE_ASSETS_ENDPOINT
         sync: false
       - key: FORGE_STAGE_TIMELINE_ENDPOINT
-        sync: false
-      - key: FORGE_STAGE_RENDER_ENDPOINT
         sync: false
       - key: FORGE_STAGE_QA_ENDPOINT
         sync: false
