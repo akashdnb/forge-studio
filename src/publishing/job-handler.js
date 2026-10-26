@@ -12,11 +12,11 @@ function createPublishingHandlers({ pool, publisher = new YouTubePublisher(), lo
       let run;
       try {
         await client.query('BEGIN');
-        const current = await client.query(
+        const result = await client.query(
           `SELECT p.*, a.storage_uri, a.content_hash AS artifact_hash
            FROM publish_runs p JOIN artifacts a ON a.id=p.render_artifact_id
            WHERE p.id=$1 FOR UPDATE OF p`, [runId]);
-        run = current.rows[0];
+        run = result.rows[0];
         if (!run) throw Object.assign(new Error('Unknown publish run ' + runId), { retryable: false });
         if (run.status === 'PUBLISHED') {
           await client.query('COMMIT');
@@ -26,16 +26,10 @@ function createPublishingHandlers({ pool, publisher = new YouTubePublisher(), lo
         if (run.status === 'UPLOADING' && run.lease_until && new Date(run.lease_until).getTime() > Date.now() && run.lease_owner !== workerId) {
           throw Object.assign(new Error('Publish run is leased by another worker'), { retryable: true });
         }
-        const metadata = run.metadata || {};
         const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
-          render: run.render_artifact_id,
-          renderHash: run.artifact_hash,
-          destination: run.destination,
-          metadata,
+          render: run.render_artifact_id, renderHash: run.artifact_hash, destination: run.destination, metadata: run.metadata || {},
         })).digest('hex');
-        if (run.request_fingerprint && run.request_fingerprint !== fingerprint) {
-          throw Object.assign(new Error('Publish request fingerprint changed after upload started'), { retryable: false });
-        }
+        if (run.request_fingerprint && run.request_fingerprint !== fingerprint) throw Object.assign(new Error('Publish request fingerprint changed after upload started'), { retryable: false });
         await client.query(
           `UPDATE publish_runs SET status='UPLOADING', lease_owner=$1,
              lease_until=now()+($2::text || ' seconds')::interval,
@@ -49,28 +43,37 @@ function createPublishingHandlers({ pool, publisher = new YouTubePublisher(), lo
       } catch (error) {
         try { await client.query('ROLLBACK'); } catch {}
         throw error;
-      } finally {
-        client.release();
-      }
+      } finally { client.release(); }
+
+      const persistSession = async (sessionUri) => {
+        const saved = await pool.query(
+          `UPDATE publish_runs SET upload_session_uri=$1
+           WHERE id=$2 AND request_fingerprint=$3 AND lease_owner=$4 AND status='UPLOADING'
+           RETURNING id`,
+          [sessionUri, runId, run.request_fingerprint, workerId],
+        );
+        if (!saved.rows[0]) throw Object.assign(new Error('Publish lease was lost before the upload session could be saved'), { retryable: true });
+      };
 
       try {
-        // Resume from persisted YouTube session URL when available. Do not guess a
-        // new upload after a partial upload; persist the session if the provider
-        // returns an incomplete resumable response so the retry can continue.
         const result = await publisher.createSession({
           sourceUri: run.storage_uri,
           metadata: run.metadata || {},
           requestFingerprint: run.request_fingerprint,
           existingSessionUri: run.upload_session_uri || null,
+          onSession: persistSession,
         });
-        await pool.query(
+        const saved = await pool.query(
           `UPDATE publish_runs SET status='PUBLISHED', external_id=$1, external_url=$2,
              finished_at=now(), upload_session_uri=NULL, lease_owner=NULL, lease_until=NULL,
-             error=NULL WHERE id=$3 AND request_fingerprint=$4 AND lease_owner=$5`,
-          [result.id, result.url, runId, run.request_fingerprint, workerId]);
+             error=NULL WHERE id=$3 AND request_fingerprint=$4 AND lease_owner=$5 AND status='UPLOADING'
+           RETURNING id`,
+          [result.id, result.url, runId, run.request_fingerprint, workerId],
+        );
+        if (!saved.rows[0]) throw Object.assign(new Error('Publish lease was lost after upload completion; reconcile the existing session before retrying'), { retryable: true, uploadSessionUri: run.upload_session_uri || null });
         await pool.query(
-          `UPDATE episodes SET state='PUBLISHED', published_record_id=$1,
-             revision=revision+1, updated_at=now() WHERE id=$2 AND state='PUBLISHING'`,
+          `UPDATE episodes SET state='PUBLISHED', published_record_id=$1, revision=revision+1, updated_at=now()
+           WHERE id=$2 AND state='PUBLISHING'`,
           [runId, run.episode_id]);
         return { publishRunId: runId, externalId: result.id, externalUrl: result.url, reconciled: Boolean(result.reconciled) };
       } catch (error) {
@@ -86,5 +89,4 @@ function createPublishingHandlers({ pool, publisher = new YouTubePublisher(), lo
     },
   };
 }
-
 module.exports = { createPublishingHandlers };
