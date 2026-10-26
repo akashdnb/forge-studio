@@ -51,7 +51,6 @@ test('worker never writes a late result after lease loss', async () => {
   let failCalls = 0;
   let leaseReady;
   const ready = new Promise((resolve) => { leaseReady = resolve; });
-  let runOnceDone;
   const queue = {
     async claim() { return { id: 'job-lease', episode_id: 'ep', stage: 'RENDER', attempts: 1 }; },
     async heartbeat() { leaseReady(); throw Object.assign(new Error('lease lost'), { code: 'LEASE_LOST' }); },
@@ -61,11 +60,10 @@ test('worker never writes a late result after lease loss', async () => {
   const worker = new DurableWorker({
     queue,
     leaseHeartbeatMs: 10,
-    executeJob: async () => new Promise((resolve) => { runOnceDone = resolve; }),
+    executeJob: async () => { await ready; return { late: true }; },
   });
   const resultPromise = worker.runOnce();
   await ready;
-  runOnceDone({ late: true });
   const result = await resultPromise;
   assert.equal(result.status, 'lease-lost');
   assert.equal(completeCalls, 0);
