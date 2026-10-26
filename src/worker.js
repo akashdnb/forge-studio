@@ -13,6 +13,13 @@ const { EpisodeWorkflowIntegration } = require('./pipeline/episode-workflow-inte
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool });
   const integration = pool ? new EpisodeWorkflowIntegration({ pool, queue }) : null;
+  if (integration) {
+    const dispatchAwareSuccess = integration.handleJobSuccess.bind(integration);
+    integration.handleJobSuccess = async (job, result) => {
+      try { return await dispatchAwareSuccess(job, result); }
+      catch (error) { if (['APPROVAL_BLOCKED', 'QA_BLOCKED'].includes(error?.code)) return { accepted: true, blocked: true, reason: error.message }; throw error; }
+    };
+  }
   let stopping = false; let timer = null;
   async function tick() {
     if (stopping) return;
