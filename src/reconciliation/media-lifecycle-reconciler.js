@@ -10,23 +10,22 @@ function json(value) { return JSON.stringify(value ?? {}); }
 function isSuperseded(job) { return job?.payload?.lifecycleState === 'SUPERSEDED' || job?.payload?.superseded === true; }
 function isCancelled(job) { return job?.status === 'CANCELLED' || job?.payload?.lifecycleState === 'CANCELLED' || job?.payload?.cancelled === true; }
 function terminalIntent(job) { const requested = job?.result?.terminalStatus || job?.payload?.terminalStatus; return TERMINAL.has(requested) ? requested : null; }
-
-async function consume(stream, signal) {
-  if (!stream) return;
-  for await (const chunk of stream) { if (signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' }); void chunk; }
-}
+async function consume(stream, signal) { if (!stream) return; for await (const chunk of stream) { if (signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' }); void chunk; } }
 
 class MediaLifecycleReconciler {
   constructor({ pool, storage, workerId = `forge-reconciler:${randomUUID()}`, scanLimit = 50, recentWindowMinutes = 60, partialMaxAgeMinutes = 60, signal, logger = console } = {}) {
-    if (!pool?.query || !pool?.connect) throw new TypeError('pg-compatible pool is required');
-    if (!storage) throw new TypeError('storage is required');
-    if (!Number.isInteger(scanLimit) || scanLimit < 1 || scanLimit > 500) throw new TypeError('scanLimit must be 1..500');
-    if (!Number.isInteger(recentWindowMinutes) || recentWindowMinutes < 1) throw new TypeError('recentWindowMinutes must be positive');
+    if (!pool?.query || !pool?.connect) throw new TypeError('pg-compatible pool is required'); if (!storage) throw new TypeError('storage is required');
+    if (!Number.isInteger(scanLimit) || scanLimit < 1 || scanLimit > 500) throw new TypeError('scanLimit must be 1..500'); if (!Number.isInteger(recentWindowMinutes) || recentWindowMinutes < 1) throw new TypeError('recentWindowMinutes must be positive');
     this.pool = pool; this.storage = storage; this.workerId = workerId; this.scanLimit = scanLimit; this.recentWindowMinutes = recentWindowMinutes; this.partialMaxAgeMinutes = partialMaxAgeMinutes; this.signal = signal; this.logger = logger;
   }
   async verifyArtifact(artifact) {
     if (!artifact?.id || !artifact.storage_key || !artifact.content_hash) return { healthy: false, code: 'ARTIFACT_NOT_FOUND', reason: 'trusted storage metadata missing' };
     if (artifact.version_episode_id !== artifact.episode_id) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact/version episode mismatch' };
+    const inputVersionIds = Array.isArray(artifact.input_version_ids) ? artifact.input_version_ids : [];
+    if (inputVersionIds.length) {
+      const result = await this.pool.query('SELECT COUNT(*)::int AS count FROM version_records WHERE episode_id=$1 AND id=ANY($2::text[])', [artifact.episode_id, inputVersionIds]);
+      if (Number(result.rows[0]?.count || 0) !== inputVersionIds.length) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact references a missing or cross-episode input version' };
+    }
     if (artifact.stored_hash && artifact.stored_hash !== artifact.content_hash) return { healthy: false, code: 'CHECKSUM_MISMATCH', reason: 'database storage checksum differs from artifact checksum' };
     try { const resolved = await this.storage.download({ key: artifact.storage_key, expectedSha256: artifact.content_hash }); await consume(resolved.stream, this.signal); return { healthy: true, code: 'HEALTHY' }; }
     catch (error) { return { healthy: false, code: error.code === 'ARTIFACT_NOT_FOUND' ? 'ARTIFACT_NOT_FOUND' : error.code === 'CHECKSUM_MISMATCH' ? 'CHECKSUM_MISMATCH' : 'ARTIFACT_CORRUPT', reason: error.message }; }
@@ -37,8 +36,7 @@ class MediaLifecycleReconciler {
     return Boolean(result.rows[0]);
   }
   async reconcileJob(client, runId, job) {
-    if (this.signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' });
-    let repaired = 0;
+    if (this.signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' }); let repaired = 0;
     if (job.status === 'RUNNING' && job.leased_until && new Date(job.leased_until) < new Date() && !isCancelled(job) && !isSuperseded(job)) {
       const updated = await client.query(`UPDATE forge_jobs SET status='QUEUED',worker_id=NULL,leased_until=NULL,available_at=now(),error=$1::jsonb,updated_at=now() WHERE id=$2 AND status='RUNNING' AND leased_until < now() RETURNING status`, [json({ code: 'STALE_LEASE_RECOVERED', message: 'Worker lease expired; job returned to the durable queue' }), job.id]);
       if (updated.rows[0] && await this.recordRepair(client, runId, { jobId: job.id, episodeId: job.episode_id, action: 'RECOVER_STALE_LEASE', fromState: 'RUNNING', toState: 'QUEUED', severity: 'RECOVERABLE', diagnostic: { workerId: job.worker_id } })) repaired++;
@@ -61,8 +59,7 @@ class MediaLifecycleReconciler {
     if (job.episode_id) {
       const refs = await client.query(`SELECT a.*,e.project_id,v.episode_id AS version_episode_id,s.storage_key,s.status,s.content_hash AS stored_hash FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN version_records v ON v.id=a.version_id LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE a.episode_id=$1 AND (a.id=ANY($2::text[]) OR a.kind IN ('render','audio','caption','package')) ORDER BY a.created_at DESC LIMIT $3`, [job.episode_id, [...artifactIds], Math.min(this.scanLimit, 100)]);
       for (const artifact of refs.rows) {
-        if (this.signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' });
-        const check = await this.verifyArtifact(artifact);
+        if (this.signal?.aborted) throw Object.assign(new Error('Reconciliation cancelled'), { code: 'CANCELLED' }); const check = await this.verifyArtifact(artifact);
         if (!check.healthy) {
           const status = check.code === 'ARTIFACT_NOT_FOUND' ? 'MISSING' : 'CORRUPT'; await client.query('UPDATE storage_objects SET status=$1,checksum_verified=false WHERE artifact_id=$2', [status, artifact.id]);
           if (job.status === 'SUCCEEDED' && !isCancelled(job) && !isSuperseded(job)) {
@@ -80,8 +77,7 @@ class MediaLifecycleReconciler {
     return repaired;
   }
   async run({ reason = 'scheduled' } = {}) {
-    const runId = randomUUID(); await this.pool.query('INSERT INTO forge_reconciliation_runs(id,worker_id,status,diagnostics) VALUES($1,$2,\'RUNNING\',$3::jsonb)', [runId, this.workerId, json({ reason, scanLimit: this.scanLimit })]);
-    const client = await this.pool.connect(); let scanned = 0; let repaired = 0;
+    const runId = randomUUID(); await this.pool.query('INSERT INTO forge_reconciliation_runs(id,worker_id,status,diagnostics) VALUES($1,$2,\'RUNNING\',$3::jsonb)', [runId, this.workerId, json({ reason, scanLimit: this.scanLimit })]); const client = await this.pool.connect(); let scanned = 0; let repaired = 0;
     try {
       await client.query('BEGIN'); const lock = await client.query("SELECT pg_try_advisory_xact_lock(hashtext('forge-media-reconciliation')) AS locked");
       if (!lock.rows[0]?.locked) { await client.query('ROLLBACK'); await this.pool.query('UPDATE forge_reconciliation_runs SET status=\'CANCELLED\',finished_at=now(),diagnostics=$1::jsonb WHERE id=$2', [json({ reason: 'concurrent-run' }), runId]); return { status: 'SKIPPED_CONCURRENT', scanned: 0, repaired: 0 }; }
