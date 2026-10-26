@@ -1,5 +1,15 @@
 const crypto = require('node:crypto');
-const { immutableRecord, requiredString } = require('./records');
+const { requiredString } = require('./records');
+
+// Return immutable-by-ownership JSON snapshots without Object.freeze side effects.
+function snapshot(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function digest(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
 
 class ArtifactRegistry {
   #artifacts = new Map();
@@ -16,33 +26,31 @@ class ArtifactRegistry {
     versionId = requiredString(versionId, 'versionId');
     if (this.#artifacts.has(id)) throw new Error(`Artifact already exists: ${id}`);
     if (!storageUri && content === null) throw new TypeError('storageUri or content is required');
-    // Clone before hashing and freezing: caller-owned objects must never be frozen or retained.
-    const contentSnapshot = content === null ? null : JSON.parse(JSON.stringify(content));
-    const serializedContent = contentSnapshot === null ? null : JSON.stringify(contentSnapshot);
-    const digest = contentHash || (serializedContent !== null
-      ? crypto.createHash('sha256').update(serializedContent).digest('hex') : null);
-    const now = new Date().toISOString();
-    const artifact = immutableRecord({
+    const contentSnapshot = content === null ? null : snapshot(content);
+    const contentDigest = contentSnapshot === null ? null : digest(contentSnapshot);
+    if (contentHash && contentDigest && contentHash !== contentDigest) throw new Error('Provided contentHash does not match content');
+    const artifact = snapshot({
       id, episodeId, kind, versionId, storageUri, content: contentSnapshot,
-      contentHash: digest, mediaType, providerRunId, source, license,
-      inputVersionIds: [...new Set(inputVersionIds)], metadata, createdBy, createdAt: now,
+      contentHash: contentHash || contentDigest, mediaType, providerRunId, source, license,
+      inputVersionIds: [...new Set(inputVersionIds)], metadata: snapshot(metadata), createdBy,
+      createdAt: new Date().toISOString(),
     });
     this.#artifacts.set(id, artifact);
     if (!this.#byEpisode.has(episodeId)) this.#byEpisode.set(episodeId, []);
     this.#byEpisode.get(episodeId).push(id);
-    return artifact;
+    return snapshot(artifact);
   }
 
-  get(id) { return this.#artifacts.get(id); }
+  get(id) { const value = this.#artifacts.get(id); return value ? snapshot(value) : undefined; }
   listByEpisode(episodeId) {
-    return (this.#byEpisode.get(episodeId) || []).map((id) => this.#artifacts.get(id));
+    return (this.#byEpisode.get(episodeId) || []).map((id) => snapshot(this.#artifacts.get(id)));
   }
   verifyContent(id, content) {
     const artifact = this.#artifacts.get(id);
     if (!artifact) throw new Error(`Unknown artifact: ${id}`);
     if (!artifact.contentHash) return null;
-    const digest = crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
-    return { valid: digest === artifact.contentHash, expected: artifact.contentHash, actual: digest };
+    const actual = digest(content);
+    return { valid: actual === artifact.contentHash, expected: artifact.contentHash, actual };
   }
 }
 module.exports = { ArtifactRegistry };
