@@ -31,12 +31,19 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FORGE_RENDER_TIMEOUT_MS: 900000
           FORGE_RENDER_LEASE_SECONDS: 1800
-          FORGE_RENDER_STORAGE_URI_PREFIX: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FORGE_STORAGE_DRIVER: ${{ vars.FORGE_STORAGE_DRIVER || 'local' }}
+          FORGE_STORAGE_S3_BUCKET: ${{ secrets.FORGE_STORAGE_S3_BUCKET }}
+          FORGE_STORAGE_S3_REGION: ${{ secrets.FORGE_STORAGE_S3_REGION }}
+          FORGE_STORAGE_S3_ENDPOINT: ${{ secrets.FORGE_STORAGE_S3_ENDPOINT }}
+          FORGE_STORAGE_S3_FORCE_PATH_STYLE: ${{ vars.FORGE_STORAGE_S3_FORCE_PATH_STYLE || 'false' }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: node scripts/run-render-job.js "${{ inputs.job_id }}"
       - name: Verify render artifact metadata and checksum
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORGE_RENDER_OUTPUT_DIR: .forge-render-output
         run: node scripts/verify-render-job.js "${{ inputs.job_id }}"
       - name: Upload real MP4 and metadata
         uses: actions/upload-artifact@v4
