@@ -265,6 +265,9 @@ function openApiDocument() {
       '/v1/episodes/{episodeId}/approvals': { post: { summary: 'Record approval', responses: { 201: { description: 'Approval recorded' }, 409: { description: 'Approval blocked' } } } },
       '/v1/episodes/{episodeId}/render': { put: { summary: 'Select current render', responses: { 200: { description: 'Render selected' } } } },
       '/v1/versions/{versionId}/invalidation-plan': { post: { summary: 'Plan downstream invalidation', responses: { 200: { description: 'Invalidation plan' } } } },
+      '/v1/episodes/{episodeId}/jobs': { get: { summary: 'List workflow jobs', responses: { 200: { description: 'Job collection' } } }, post: { summary: 'Enqueue workflow stage', responses: { 202: { description: 'Job queued' } } } },
+      '/v1/jobs/{jobId}': { get: { summary: 'Get workflow job', responses: { 200: { description: 'Job status' }, 404: { description: 'Job not found' } } } },
+      '/v1/jobs/{jobId}/cancel': { post: { summary: 'Cancel workflow job', responses: { 200: { description: 'Job cancelled' }, 409: { description: 'Job already terminal' } } } },
     },
   };
 }
