@@ -50,6 +50,7 @@ async function publishRun({ pool, storage, publisher, logger, now, payload, job 
     const terminal = cancelled || error.terminalState === 'FAILED' || error.terminalState === 'CANCELLED' || error.terminalState === 'RECONCILIATION_REQUIRED' || (error.retryable !== true && ![408, 429, 500, 502, 503, 504].includes(error.status));
     const terminalState = cancelled ? 'CANCELLED' : (error.terminalState || (terminal ? 'FAILED' : null));
     const maxed = Number(job.attempts || 1) >= Number(job.max_attempts || 3);
+    await pool.query(`UPDATE publish_runs SET last_provider_status=$1, last_provider_reason=$2 WHERE id=$3`, [error.status || null, error.providerReason || error.code || null, runId]);
     if (terminalState === 'RECONCILIATION_REQUIRED') await pool.query(`UPDATE publish_runs SET status='RECONCILIATION_REQUIRED', error=$1::jsonb, finished_at=$2 WHERE id=$3`, [safeError(error), now(), runId]);
     else if (terminalState === 'CANCELLED') await pool.query(`UPDATE publish_runs SET status='CANCELLED', error=$1::jsonb, finished_at=$2 WHERE id=$3`, [safeError(error), now(), runId]);
     else if (terminal || maxed) await pool.query(`UPDATE publish_runs SET status='FAILED', error=$1::jsonb, finished_at=$2 WHERE id=$3`, [safeError(error), now(), runId]);
@@ -74,14 +75,9 @@ function assertReleaseGate(run) {
 
 async function materializeTrustedArtifact({ storage, run }) {
   const temp = path.join(os.tmpdir(), `forge-youtube-${run.id}-${Math.random().toString(16).slice(2)}.mp4`);
-  try {
-    const resolved = await storage.download({ key: run.storage_key, expectedSha256: run.content_hash });
-    await pipeline(resolved.stream, fs.createWriteStream(temp, { flags: 'wx', mode: 0o600 }));
-    const stat = await fsp.stat(temp); if (!stat.size) throw Object.assign(new Error('Approved render is empty'), { retryable: false, code: 'INVALID_ARTIFACT' });
-    return { path: temp, size: stat.size };
-  } catch (error) { await fsp.rm(temp, { force: true }).catch(() => {}); throw Object.assign(error, { retryable: false }); }
+  try { const resolved = await storage.download({ key: run.storage_key, expectedSha256: run.content_hash }); await pipeline(resolved.stream, fs.createWriteStream(temp, { flags: 'wx', mode: 0o600 })); const stat = await fsp.stat(temp); if (!stat.size) throw Object.assign(new Error('Approved render is empty'), { retryable: false, code: 'INVALID_ARTIFACT' }); return { path: temp, size: stat.size }; }
+  catch (error) { await fsp.rm(temp, { force: true }).catch(() => {}); throw Object.assign(error, { retryable: false }); }
 }
-
 async function jobIsCancelled(pool, jobId) { if (!jobId) return false; const result = await pool.query('SELECT status FROM forge_jobs WHERE id=$1', [jobId]); return result.rows[0]?.status === 'CANCELLED'; }
 function watchCancellation(pool, jobId, controller, intervalMs) { if (!jobId) return null; const timer = setInterval(() => { pool.query('SELECT status FROM forge_jobs WHERE id=$1', [jobId]).then((result) => { if (result.rows[0]?.status === 'CANCELLED') controller.abort(); }).catch(() => {}); }, intervalMs); timer.unref?.(); return timer; }
 function safeError(error) { return JSON.stringify({ code: error.code || 'PUBLISH_FAILED', message: error.message || String(error), status: error.status || null, providerReason: error.providerReason || null, retryable: error.retryable === true, terminalState: error.terminalState || null }); }
