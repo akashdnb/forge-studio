@@ -8,6 +8,7 @@ const { createTranscriptionHandlers } = require('./transcription/whisper-worker'
 const { createNarrationHandlers, createProviderRegistry } = require('./narration/tts-worker');
 const { createStorageFromEnv } = require('./storage');
 const { createFfmpegRenderHandler } = require('./pipeline/ffmpeg-render-handler');
+const { createAssetIngestionHandler } = require('./assets/asset-ingestion-worker');
 function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000, logger = console } = {}) {
   const queue = new JobQueue({ pool }); let stopping = false; let timer = null;
   async function tick() {
@@ -25,7 +26,7 @@ function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUU
 function loadHandlers({ pool } = {}) {
   const storage = pool ? createStorageFromEnv() : null; let providerRegistry = null; let providerConfigError = null;
   if (pool) { try { providerRegistry = createProviderRegistry(); } catch (error) { providerConfigError = error; providerRegistry = { get: () => ({ name: 'unconfigured-tts', execute: async () => { throw providerConfigError; } }) }; } }
-  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool, storage }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), 'workflow:assets': createAssetIngestionHandler({ pool, storage }), ...createPublishingHandlers({ pool, storage }), 'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }), 'workflow:render': createFfmpegRenderHandler({ pool, storage }) } : {};
   const modulePath = process.env.FORGE_WORKER_HANDLERS;
   if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
   return handlers;
