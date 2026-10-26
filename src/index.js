@@ -9,6 +9,7 @@ module.exports = {
   ...require('./pipeline/provider-pipeline'),
   ...require('./pipeline/pipeline-service'),
   ...require('./pipeline/mock-providers'),
+  ...require('./derivatives/shorts-handoff'),
   ...require('./persistence/postgres-repository'),
   ...require('./persistence/production-repository'),
 };
