@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
-const SUPPORTED_KINDS = new Set(['render','audio','image','caption','package']);
+const SUPPORTED_KINDS = new Set(['render','render-manifest','audio','image','caption','package']);
 class ArtifactStorageService {
   constructor({ storage, repository }) { if (!storage || typeof storage.upload !== 'function' || typeof storage.download !== 'function') throw new TypeError('storage backend is required'); if (!repository?.db) throw new TypeError('persistent repository is required'); this.storage = storage; this.repository = repository; }
   async putArtifact({ episodeId, projectId, versionId, kind, stream, content, contentType = 'application/octet-stream', expectedSha256, metadata = {}, artifactId = randomUUID(), createdBy = 'worker', inputVersionIds = [], providerRunId = null, source = 'forge', license = null }) {
