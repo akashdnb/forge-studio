@@ -1,8 +1,7 @@
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const { test } = require('node:test');
 const {
-  createDeterministicProvider, createProviderRegistry, deterministicWav, extractScriptText,
+  createCommandProvider, createDeterministicProvider, createProviderRegistry, deterministicWav, extractScriptText,
   executeNarration, validateAudio, wavInfo, sha256,
 } = require('../src/narration/tts-worker');
 
@@ -15,28 +14,22 @@ function fixturePool({ existing = null, scriptText = 'A deterministic long-form 
       if (sql.includes('FROM approvals')) return { rows: [{ target_version_id: 'script-v1' }] };
       if (sql.includes('FROM version_records')) return { rows: [script] };
       if (sql.includes("FROM artifacts")) return { rows: existing ? [existing] : [] };
+      if (sql.includes('INSERT INTO version_records')) return { rows: [] };
       throw new Error(`Unexpected query: ${sql}`);
     },
   };
 }
 
-function fakeStorage() {
-  return { async upload({ stream, expectedSha256, contentType }) {
-    const chunks = []; for await (const chunk of stream) chunks.push(Buffer.from(chunk));
-    const content = Buffer.concat(chunks); const digest = crypto.createHash('sha256').update(content).digest('hex');
-    assert.equal(digest, expectedSha256); return { uri: `memory://audio/${digest}`, key: `audio/${digest}`, sha256: digest, sizeBytes: content.length, contentType };
-  } };
-}
-
 function fakeArtifactStorage() {
   return { async putArtifact({ artifactId, episodeId, versionId, content, expectedSha256, contentType, metadata }) {
-    assert.equal(episodeId, 'ep-1'); assert.equal(sha256(content), expectedSha256); assert.equal(metadata.sha256, expectedSha256); return { id: artifactId, episode_id: episodeId, version_id: versionId, content_hash: expectedSha256, media_type: contentType };
+    assert.equal(episodeId, 'ep-1'); assert.match(versionId, /^narration:/); assert.equal(sha256(content), expectedSha256); assert.equal(metadata.sha256, expectedSha256); assert.equal(metadata.sourceScriptVersionId, 'script-v1');
+    return { id: artifactId, episode_id: episodeId, version_id: versionId, content_hash: expectedSha256, media_type: contentType };
   } };
 }
 
 test('deterministic local provider produces valid bounded PCM WAV and stable checksum', () => {
-  const first = deterministicWav('hello world'); const second = deterministicWav('hello world');
-  assert.deepEqual(first, second); const info = wavInfo(first); assert.equal(info.container, 'wav'); assert.equal(info.codec, 'pcm'); assert.equal(info.channels, 1); assert.equal(info.sampleRate, 22050); assert.ok(info.durationSeconds > 0); assert.equal(validateAudio(first, 'audio/wav', info).sha256, sha256(first));
+  const first = deterministicWav('hello world'); const second = deterministicWav('hello world'); const info = wavInfo(first);
+  assert.deepEqual(first, second); assert.equal(info.container, 'wav'); assert.equal(info.codec, 'pcm'); assert.equal(info.channels, 1); assert.equal(info.sampleRate, 22050); assert.ok(info.durationSeconds > 0); assert.equal(validateAudio(first, 'audio/wav', info).sha256, sha256(first));
 });
 
 test('extracts only supported narration text fields', () => { assert.equal(extractScriptText({ text: 'hello' }), 'hello'); assert.equal(extractScriptText({ scenes: [{ narration: 'one' }, { voiceover: 'two' }] }), 'one\n\ntwo'); assert.throws(() => extractScriptText({ title: 'missing' }), /narration text/); });
@@ -47,9 +40,9 @@ test('rejects malformed, empty, unsupported and silent provider output', () => {
   assert.throws(() => validateAudio(deterministicWav('bad'), 'video/mp4', wavInfo(deterministicWav('bad'))), /Unsupported/);
 });
 
-test('provider registry selects deterministic mode without production credentials', () => {
-  const registry = createProviderRegistry({ provider: createDeterministicProvider() }); assert.equal(registry.get('tts').name, 'deterministic-local');
-});
+test('missing production provider configuration fails closed', () => { assert.throws(() => createCommandProvider({ command: undefined }), (error) => error.code === 'PROVIDER_NOT_CONFIGURED'); });
+
+test('provider registry selects deterministic mode without production credentials', () => { const registry = createProviderRegistry({ provider: createDeterministicProvider() }); assert.equal(registry.get('tts').name, 'deterministic-local'); });
 
 test('narration success persists immutable audio metadata with provenance and checksum', async () => {
   const pool = fixturePool(); const providerRegistry = createProviderRegistry({ provider: createDeterministicProvider() });
@@ -60,7 +53,6 @@ test('narration success persists immutable audio metadata with provenance and ch
 test('same approved input and configuration is idempotent', async () => {
   const pool = fixturePool(); const providerRegistry = createProviderRegistry({ provider: createDeterministicProvider() }); const first = await executeNarration({ pool, storage: fakeArtifactStorage(), providerRegistry, payload: { episodeId: 'ep-1' }, job: { id: 'job-1' } });
   const secondPool = fixturePool({ existing: { id: first.artifactId, version_id: first.versionId, content_hash: first.contentHash, metadata: { inputFingerprint: first.versionId.slice('narration:'.length) } } });
-  // Reuse the same exact identity; the stored metadata fingerprint is checked by the worker.
   const second = await executeNarration({ pool: secondPool, storage: fakeArtifactStorage(), providerRegistry, payload: { episodeId: 'ep-1' }, job: { id: 'job-2' } });
   assert.equal(second.idempotent, true); assert.equal(second.artifactId, first.artifactId);
 });
@@ -72,9 +64,13 @@ test('timeout and provider failures remain retryable while malformed output is t
   await assert.rejects(() => executeNarration({ pool, storage: fakeArtifactStorage(), providerRegistry: createProviderRegistry({ provider: badProvider }), payload: { episodeId: 'ep-1' } }), (error) => error.code === 'INVALID_OUTPUT' && error.retryable === false);
 });
 
+test('failed attempt can recover without creating a conflicting artifact', async () => {
+  const pool = fixturePool(); let attempts = 0; const provider = { name: 'recovering', execute: async () => { attempts += 1; if (attempts === 1) { const error = new Error('rate limited'); error.code = 'PROVIDER_RATE_LIMITED'; error.retryable = true; throw error; } return { audio: deterministicWav('recovered'), contentType: 'audio/wav' }; } };
+  const registry = createProviderRegistry({ provider }); await assert.rejects(() => executeNarration({ pool, storage: fakeArtifactStorage(), providerRegistry: registry, payload: { episodeId: 'ep-1' } }), (error) => error.retryable === true);
+  const result = await executeNarration({ pool, storage: fakeArtifactStorage(), providerRegistry: registry, payload: { episodeId: 'ep-1' } }); assert.equal(result.idempotent, false); assert.equal(attempts, 2);
+});
+
 test('cancellation prevents provider execution and artifact publication', async () => {
-  const controller = new AbortController(); controller.abort(); let called = false;
-  const provider = { name: 'must-not-run', execute: async () => { called = true; return { audio: deterministicWav('x'), contentType: 'audio/wav' }; } };
-  await assert.rejects(() => executeNarration({ pool: fixturePool(), storage: fakeArtifactStorage(), providerRegistry: createProviderRegistry({ provider }), payload: { episodeId: 'ep-1' }, signal: controller.signal }), (error) => error.code === 'CANCELLED');
-  assert.equal(called, false);
+  const controller = new AbortController(); controller.abort(); let called = false; const provider = { name: 'must-not-run', execute: async () => { called = true; return { audio: deterministicWav('x'), contentType: 'audio/wav' }; } };
+  await assert.rejects(() => executeNarration({ pool: fixturePool(), storage: fakeArtifactStorage(), providerRegistry: createProviderRegistry({ provider }), payload: { episodeId: 'ep-1' }, signal: controller.signal }), (error) => error.code === 'CANCELLED'); assert.equal(called, false);
 });
