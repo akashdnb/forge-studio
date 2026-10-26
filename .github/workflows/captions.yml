@@ -1,0 +1,58 @@
+name: Forge Captions
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Immutable commit SHA to validate'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  captions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate immutable ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if ! printf '%s' "$INPUT_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo 'ref must be a full 40-character commit SHA' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - name: Caption tests
+        id: caption_tests
+        continue-on-error: true
+        run: node --test test/captions/caption-worker.test.js
+      - name: Explicit failure report
+        if: steps.caption_tests.outcome != 'success'
+        run: |
+          {
+            echo '## Caption workflow failure'
+            echo
+            echo 'Deterministic caption tests failed for immutable commit:'
+            echo '${{ inputs.ref }}'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Success summary
+        run: |
+          {
+            echo '## Caption workflow passed'
+            echo
+            echo 'Validated immutable commit: ${{ inputs.ref }}'
+            echo 'No mutable transcript source or external Shorts dependency was used.'
+          } >> "$GITHUB_STEP_SUMMARY"
