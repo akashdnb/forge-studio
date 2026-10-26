@@ -15,6 +15,8 @@ services:
         sync: false
       - key: CORS_ORIGIN
         sync: false
+      - key: FORGE_RUNNER_CALLBACK_TOKEN
+        sync: false
       - key: RUN_MIGRATIONS_ON_START
         value: "false"
   - type: worker
@@ -35,6 +37,22 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_GITHUB_ACTIONS_ENABLED
+        value: "true"
+      - key: FORGE_GITHUB_ACTIONS_MODE
+        value: github
+      - key: FORGE_GITHUB_REPOSITORY
+        value: akashdnb/forge-studio
+      - key: FORGE_GITHUB_TOKEN
+        sync: false
+      - key: FORGE_GITHUB_REF
+        sync: false
+      - key: FORGE_GITHUB_EXECUTION_TIMEOUT_MS
+        value: "1800000"
+      - key: FORGE_GITHUB_DISPATCH_GRACE_MS
+        value: "60000"
+      - key: FORGE_GITHUB_MAX_DISPATCHES_PER_TICK
+        value: "2"
       - key: FORGE_STORAGE_DRIVER
         value: s3
       - key: FORGE_STORAGE_MAX_BYTES
