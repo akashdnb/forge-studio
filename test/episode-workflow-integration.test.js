@@ -1,10 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EpisodeWorkflowIntegration, WORKFLOW_STAGES, WORKFLOW_DEPENDENCIES, validateStages, workflowIdempotencyKey } = require('../src/pipeline/episode-workflow-integration');
-
 function createFakeDb() {
   const workflows = new Map(); const stages = new Map(); const jobs = new Map();
-  const episodes = new Map([['ep-1', { id: 'ep-1', project_id: 'p-1', state: 'DRAFT' }]);
+  const episodes = new Map([['ep-1', { id: 'ep-1', project_id: 'p-1', state: 'DRAFT' }]]);
   const versions = new Set(); const artifacts = new Set(); const approvals = new Set(); const audits = [];
   let seq = 0;
   const client = { query: (...args) => pool.query(...args), release() {} };
@@ -35,68 +34,12 @@ function createFakeDb() {
   };
   return pool;
 }
-
-function createQueue(pool) {
-  return { async enqueue(input) { const id = pool._state.next(); pool._state.jobs.set(id, input); return { id, ...input, status: 'QUEUED' }; }, async recoverExpiredLeases() {}, async recoverBlockedDependencies() {} };
-}
-
-for (const stage of WORKFLOW_STAGES) test(`dependency contract is deterministic for ${stage}`, () => {
-  const deps = WORKFLOW_DEPENDENCIES[stage];
-  for (const dependency of deps) assert.ok(WORKFLOW_STAGES.indexOf(dependency) < WORKFLOW_STAGES.indexOf(stage) || stage === 'NARRATION' || stage === 'ASSETS');
-});
-
-test('rejects dependency omission and unknown stages', () => {
-  assert.throws(() => validateStages(['SCRIPT']), /requires RESEARCH/);
-  assert.throws(() => validateStages(['NOT_A_STAGE']), /Unknown workflow stage/);
-});
-
-test('idempotency key is deterministic', () => {
-  assert.equal(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'));
-  assert.notEqual(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'other'));
-});
-
-test('full workflow fans out narration/assets and fans in at timeline', async () => {
-  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
-  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH', 'SCRIPT', 'SCENE_PLAN'], actor: 'test' });
-  assert.equal(workflow.stages.find((s) => s.stage === 'RESEARCH').status, 'QUEUED');
-  const researchJob = { id: workflow.stages.find((s) => s.stage === 'RESEARCH').job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } };
-  pool._state.versions.add('research-v1'); await integration.handleJobSuccess(researchJob, { artifacts: [{ id: 'research-a1', versionId: 'research-v1' }] });
-  const refreshed = await integration.getWorkflow(workflow.id); assert.equal(refreshed.stages.find((s) => s.stage === 'SCRIPT').status, 'QUEUED');
-});
-
-test('duplicate callback is a no-op after durable stage success', async () => {
-  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
-  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
-  const stage = workflow.stages[0]; const job = { id: stage.job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } };
-  pool._state.versions.add('v1'); pool._state.artifacts.add('a1'); await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] });
-  assert.deepEqual(await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] }), { duplicate: true });
-});
-
-test('missing output and provenance mismatch fail closed', async () => {
-  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
-  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
-  const job = { id: workflow.stages[0].job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH' } };
-  const result = await integration.handleJobSuccess(job, {}); assert.equal(result.accepted, true); assert.equal((await integration.getWorkflow(workflow.id)).status, 'FAILED');
-});
-
-test('cancellation is terminal and idempotent', async () => {
-  const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue });
-  const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' });
-  const cancelled = await integration.cancel(workflow.id, 'test'); assert.equal(cancelled.status, 'CANCELLED'); assert.equal((await integration.cancel(workflow.id, 'test')).status, 'CANCELLED');
-});
-
-// The remaining cases are deliberately table-driven against the same durable graph contract.
-for (const [name, stages] of [
-  ['stage failure and retry boundary', ['RESEARCH', 'SCRIPT']],
-  ['dependency blocking', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']],
-  ['stale worker recovery hook', ['RESEARCH']],
-  ['process restart resume boundary', ['RESEARCH', 'SCRIPT']],
-  ['approval invalidation boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']],
-  ['QA failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA']],
-  ['packaging failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PACKAGING']],
-  ['publish failure and retry boundary', WORKFLOW_STAGES],
-  ['terminal reconciliation boundary', WORKFLOW_STAGES],
-]) test(name, () => {
-  assert.doesNotThrow(() => validateStages(stages));
-  for (const stage of stages) for (const dep of WORKFLOW_DEPENDENCIES[stage]) assert.ok(stages.includes(dep));
-});
+function createQueue(pool) { return { async enqueue(input) { const id = pool._state.next(); pool._state.jobs.set(id, input); return { id, ...input, status: 'QUEUED' }; }, async recoverExpiredLeases() {}, async recoverBlockedDependencies() {} }; }
+for (const stage of WORKFLOW_STAGES) test(`dependency contract is deterministic for ${stage}`, () => { const deps = WORKFLOW_DEPENDENCIES[stage]; for (const dependency of deps) assert.ok(WORKFLOW_STAGES.indexOf(dependency) < WORKFLOW_STAGES.indexOf(stage) || stage === 'NARRATION' || stage === 'ASSETS'); });
+test('rejects dependency omission and unknown stages', () => { assert.throws(() => validateStages(['SCRIPT']), /requires RESEARCH/); assert.throws(() => validateStages(['NOT_A_STAGE']), /Unknown workflow stage/); });
+test('idempotency key is deterministic', () => { assert.equal(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief')); assert.notEqual(workflowIdempotencyKey('ep-1', ['RESEARCH'], 'brief'), workflowIdempotencyKey('ep-1', ['RESEARCH'], 'other')); });
+test('full workflow fans out narration/assets and fans in at timeline', async () => { const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue }); const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH', 'SCRIPT', 'SCENE_PLAN'], actor: 'test' }); assert.equal(workflow.stages.find((s) => s.stage === 'RESEARCH').status, 'QUEUED'); const researchJob = { id: workflow.stages.find((s) => s.stage === 'RESEARCH').job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } }; pool._state.versions.add('research-v1'); await integration.handleJobSuccess(researchJob, { artifacts: [{ id: 'research-a1', versionId: 'research-v1' }] }); const refreshed = await integration.getWorkflow(workflow.id); assert.equal(refreshed.stages.find((s) => s.stage === 'SCRIPT').status, 'QUEUED'); });
+test('duplicate callback is a no-op after durable stage success', async () => { const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue }); const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' }); const stage = workflow.stages[0]; const job = { id: stage.job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH', actor: 'test' } }; pool._state.versions.add('v1'); pool._state.artifacts.add('a1'); await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] }); assert.deepEqual(await integration.handleJobSuccess(job, { artifacts: [{ id: 'a1', versionId: 'v1' }] }), { duplicate: true }); });
+test('missing output and provenance mismatch fail closed', async () => { const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue }); const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' }); const job = { id: workflow.stages[0].job_id, payload: { workflowId: workflow.id, episodeId: 'ep-1', projectId: 'p-1', stage: 'RESEARCH' } }; const result = await integration.handleJobSuccess(job, {}); assert.equal(result.accepted, true); assert.equal((await integration.getWorkflow(workflow.id)).status, 'FAILED'); });
+test('cancellation is terminal and idempotent', async () => { const pool = createFakeDb(); const queue = createQueue(pool); const integration = new EpisodeWorkflowIntegration({ pool, queue }); const workflow = await integration.start({ episodeId: 'ep-1', brief: 'episode', stages: ['RESEARCH'], actor: 'test' }); const cancelled = await integration.cancel(workflow.id, 'test'); assert.equal(cancelled.status, 'CANCELLED'); assert.equal((await integration.cancel(workflow.id, 'test')).status, 'CANCELLED'); });
+for (const [name, stages] of [['stage failure and retry boundary', ['RESEARCH', 'SCRIPT']], ['dependency blocking', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']], ['stale worker recovery hook', ['RESEARCH']], ['process restart resume boundary', ['RESEARCH', 'SCRIPT']], ['approval invalidation boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN']], ['QA failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA']], ['packaging failure boundary', ['RESEARCH', 'SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDER', 'QA', 'PACKAGING']], ['publish failure and retry boundary', WORKFLOW_STAGES], ['terminal reconciliation boundary', WORKFLOW_STAGES]]) test(name, () => { assert.doesNotThrow(() => validateStages(stages)); for (const stage of stages) for (const dep of WORKFLOW_DEPENDENCIES[stage]) assert.ok(stages.includes(dep)); });
