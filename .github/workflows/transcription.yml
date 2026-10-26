@@ -1,0 +1,65 @@
+name: Forge Transcription Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Durable Forge transcription job id
+        required: true
+        type: string
+  repository_dispatch:
+    types: [forge-transcription]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-transcription-${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.client_payload.job_id != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.FORGE_DATABASE_URL }}
+      FORGE_TRANSCRIPTION_JOB_ID: ${{ github.event.inputs.job_id || github.event.client_payload.job_id }}
+      FORGE_WHISPER_COMMAND: ${{ secrets.FORGE_WHISPER_COMMAND }}
+      FORGE_WHISPER_ARGS: ${{ secrets.FORGE_WHISPER_ARGS }}
+      FORGE_WHISPER_MODEL: ${{ secrets.FORGE_WHISPER_MODEL }}
+      FORGE_WHISPER_INSTALL: ${{ vars.FORGE_WHISPER_INSTALL }}
+      FORGE_TRANSCRIPTION_OUTPUT_URL: ${{ secrets.FORGE_TRANSCRIPTION_OUTPUT_URL }}
+      FORGE_TRANSCRIPTION_TIMEOUT_MS: '840000'
+      FORGE_TRANSCRIPTION_MAX_INPUT_BYTES: '2147483648'
+      FORGE_TRANSCRIPTION_MAX_OUTPUT_BYTES: '67108864'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install production dependencies
+        run: npm install --omit=dev
+      - name: Install OpenAI Whisper
+        if: ${{ env.FORGE_WHISPER_INSTALL == 'true' }}
+        run: python3 -m pip install --user --upgrade openai-whisper
+      - name: Validate worker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DATABASE_URL"
+          test -n "$FORGE_TRANSCRIPTION_JOB_ID"
+          test -n "$FORGE_WHISPER_COMMAND"
+          test -n "$FORGE_WHISPER_MODEL"
+      - name: Run bounded transcription and reconcile
+        run: node scripts/run-transcription-job.js "$FORGE_TRANSCRIPTION_JOB_ID"
+      - name: Upload runner diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-transcription-run-${{ github.run_id }}
+          path: /tmp/forge-transcription-*
+          if-no-files-found: ignore
+          retention-days: 1
