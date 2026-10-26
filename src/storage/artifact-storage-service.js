@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
-const SUPPORTED_KINDS = new Set(['render','audio','image','caption','package']);
+const SUPPORTED_KINDS = new Set(['render','audio','image','video','caption','package']);
 class ArtifactStorageService {
   constructor({ storage, repository }) { if (!storage || typeof storage.upload !== 'function' || typeof storage.download !== 'function') throw new TypeError('storage backend is required'); if (!repository?.db) throw new TypeError('persistent repository is required'); this.storage = storage; this.repository = repository; }
   async putArtifact({ episodeId, projectId, versionId, kind, stream, content, contentType = 'application/octet-stream', expectedSha256, metadata = {}, artifactId = randomUUID(), createdBy = 'worker', inputVersionIds = [], providerRunId = null, source = 'forge', license = null }) {
@@ -8,7 +8,8 @@ class ArtifactStorageService {
     if (!episodeId || !projectId || !versionId) throw new TypeError('episodeId, projectId and versionId are required');
     if (!stream) { if (content == null) throw new TypeError('stream or content is required'); stream = Buffer.isBuffer(content) ? Readable.from(content) : Readable.from([Buffer.from(content)]); }
     const episode = await this.repository.db.getEpisode(episodeId);
-    if (!episode || episode.project_id !== projectId) throw Object.assign(new Error('Artifact project/episode mismatch'), { code: 'INVALID_PROVENANCE' });
+    const episodeProjectId = episode?.project_id || episode?.projectId;
+    if (!episode || episodeProjectId !== projectId) throw Object.assign(new Error('Artifact project/episode mismatch'), { code: 'INVALID_PROVENANCE' });
     const stored = await this.storage.upload({ stream, tenantId: 'forge', projectId, kind, contentType, expectedSha256, metadata });
     try {
       const existing = await this.repository.db.pool.query('SELECT * FROM artifacts WHERE id=$1 AND episode_id=$2', [artifactId, episodeId]);
