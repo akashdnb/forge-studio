@@ -92,7 +92,7 @@ test('HTTP stage fails permanently if durable upstream artifacts are missing', a
 
 test('QA provider persists a structured result and does not silently accept failure', async () => {
   const { executeStage } = require('../src/pipeline/http-workflow-handlers');
-  const { repository, calls } = repositoryFixture();
+  const { repository, calls } = repositoryFixture({ upstreamRows: [{ kind: 'workflow:render', result: { stage: 'RENDER', versionId: 'render-v1', artifactId: 'render-a1' } }] });
   const old = process.env.FORGE_STAGE_QA_ENDPOINT;
   process.env.FORGE_STAGE_QA_ENDPOINT = 'https://provider.example/qa';
   try {
