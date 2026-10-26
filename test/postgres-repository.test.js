@@ -24,6 +24,7 @@ function fakePool() {
           if (sql.includes('UPDATE episodes SET state')) return { rows: [{ id: params[1], state: params[0], revision: 2 }] };
           if (sql.includes('SELECT id FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0] }] };
           if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
+          if (sql.includes('INSERT INTO provider_runs')) return { rows: [{ id: params[0], episode_id: params[1], idempotency_key: params[6] }] };
           if (sql.includes('SELECT episode_id FROM provider_runs WHERE id=$1 FOR SHARE') || sql.includes('SELECT episode_id FROM provider_runs WHERE id = $1 FOR SHARE')) return { rows: [{ episode_id: 'ep-1' }] };
           if (sql.includes('SELECT episode_id FROM version_records WHERE id = $1 FOR SHARE')) return { rows: [{ episode_id: 'ep-1' }] };
           if (sql.includes('INSERT INTO cost_records')) return { rows: [{ id: params[0], episode_id: params[2] }] };
