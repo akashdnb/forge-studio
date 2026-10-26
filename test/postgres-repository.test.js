@@ -9,8 +9,10 @@ function fakePool() {
     async query(sql, params = []) {
       calls.push({ scope: 'pool', sql, params });
       if (sql.includes('SELECT * FROM episodes WHERE id = $1')) return { rows: [{ id: params[0], revision: 1 }] };
+      if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
       if (sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0], revision: 1, state: 'DRAFT', project_id: 'p' }] };
       if (sql.includes('UPDATE episodes SET state')) return { rows: [{ id: params[1], state: params[0], revision: 2 }] };
+      if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
       if (sql.includes('INSERT INTO provider_runs')) return { rows: [{ id: params[0], episode_id: params[1], idempotency_key: params[6] }] };
       return { rows: [] };
     },
@@ -21,7 +23,9 @@ function fakePool() {
           if (sql.includes('SELECT * FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0], revision: 1, state: 'DRAFT', project_id: 'p' }] };
           if (sql.includes('UPDATE episodes SET state')) return { rows: [{ id: params[1], state: params[0], revision: 2 }] };
           if (sql.includes('SELECT id FROM episodes WHERE id = $1 FOR UPDATE')) return { rows: [{ id: params[0] }] };
-          if (sql.includes('SELECT episode_id FROM provider_runs WHERE id = $1 FOR SHARE')) return { rows: [{ episode_id: 'ep-1' }] };
+          if (sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')) return { rows: [] };
+          if (sql.includes('INSERT INTO provider_runs')) return { rows: [{ id: params[0], episode_id: params[1], idempotency_key: params[6] }] };
+          if (sql.includes('SELECT episode_id FROM provider_runs WHERE id=$1 FOR SHARE') || sql.includes('SELECT episode_id FROM provider_runs WHERE id = $1 FOR SHARE')) return { rows: [{ episode_id: 'ep-1' }] };
           if (sql.includes('SELECT episode_id FROM version_records WHERE id = $1 FOR SHARE')) return { rows: [{ episode_id: 'ep-1' }] };
           if (sql.includes('INSERT INTO cost_records')) return { rows: [{ id: params[0], episode_id: params[2] }] };
           return { rows: [] };
@@ -74,7 +78,8 @@ test('provider run insert uses unique idempotency key with conflict-safe lookup'
     id: 'run-1', episodeId: 'ep-1', capability: 'tts', provider: 'fake', idempotencyKey: 'tts:ep-1:v1',
   });
   assert.equal(result.idempotency_key, 'tts:ep-1:v1');
-  assert.ok(pool.calls.at(-1).sql.includes('ON CONFLICT (idempotency_key)'));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('INSERT INTO provider_runs')));
+  assert.ok(pool.calls.some((call) => call.scope === 'client' && call.sql.includes('SELECT * FROM provider_runs WHERE idempotency_key = $1 FOR UPDATE')));
 });
 
 test('cost record ownership is checked before insert inside transaction', async () => {

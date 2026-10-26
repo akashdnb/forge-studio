@@ -1,33 +1,16 @@
 /**
  * Forge's product-owned version graph.
- *
- * Versions are immutable records. Dependencies point from a derived version
- * to the versions it consumed. Invalidation walks the reverse dependency
- * graph so only affected descendants need regeneration.
+ * Edges point from a derived version to the versions it consumed.
  */
+const { immutableRecord, requiredString } = require('./records');
 
 const VERSION_KINDS = Object.freeze([
-  'episode',
-  'script',
-  'scene-plan',
-  'scene',
-  'asset',
-  'narration',
-  'render',
-  'qa',
+  'episode', 'research', 'script', 'scene-plan', 'scene', 'asset', 'narration',
+  'timeline', 'render', 'qa', 'caption', 'thumbnail', 'publish-record',
 ]);
 
 function assertKind(kind) {
-  if (!VERSION_KINDS.includes(kind)) {
-    throw new Error(`Unsupported version kind: ${kind}`);
-  }
-}
-
-function freeze(value) {
-  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
-    Object.freeze(value);
-  }
-  return value;
+  if (!VERSION_KINDS.includes(kind)) throw new Error(`Unsupported version kind: ${kind}`);
 }
 
 class VersionGraph {
@@ -36,49 +19,31 @@ class VersionGraph {
   #current = new Map();
 
   addVersion({ id, episodeId, kind, payload = {}, dependencies = [], parentId = null }) {
-    if (!id || !episodeId) throw new Error('id and episodeId are required');
+    id = requiredString(id, 'id');
+    episodeId = requiredString(episodeId, 'episodeId');
     assertKind(kind);
     if (this.#versions.has(id)) throw new Error(`Version already exists: ${id}`);
-    if (parentId && !this.#versions.has(parentId)) {
-      throw new Error(`Parent version does not exist: ${parentId}`);
-    }
-
     const uniqueDependencies = [...new Set(dependencies)];
-    for (const dependencyId of uniqueDependencies) {
+    const dependencyIds = new Set(uniqueDependencies);
+    if (parentId) dependencyIds.add(parentId);
+    for (const dependencyId of dependencyIds) {
       const dependency = this.#versions.get(dependencyId);
       if (!dependency) throw new Error(`Dependency version does not exist: ${dependencyId}`);
-      if (dependency.episodeId !== episodeId) {
-        throw new Error(`Cross-episode dependency: ${dependencyId}`);
-      }
+      if (dependency.episodeId !== episodeId) throw new Error(`Cross-episode dependency: ${dependencyId}`);
     }
-
-    const version = freeze({
-      id,
-      episodeId,
-      kind,
-      payload: freeze({ ...payload }),
-      dependencies: freeze(uniqueDependencies),
-      parentId,
-    });
-
+    if (uniqueDependencies.includes(id) || parentId === id) throw new Error('Version cannot depend on itself');
+    const version = immutableRecord({ id, episodeId, kind, payload, dependencies: uniqueDependencies, parentId });
     this.#versions.set(id, version);
     this.#children.set(id, new Set());
-    for (const dependencyId of uniqueDependencies) {
-      this.#children.get(dependencyId).add(id);
-    }
-    if (parentId) this.#children.get(parentId).add(id);
+    for (const dependencyId of dependencyIds) this.#children.get(dependencyId).add(id);
     return version;
   }
 
-  get(id) {
-    return this.#versions.get(id);
-  }
+  get(id) { return this.#versions.get(id); }
 
   setCurrent(episodeId, versionId) {
     const version = this.#versions.get(versionId);
-    if (!version || version.episodeId !== episodeId) {
-      throw new Error(`Version ${versionId} does not belong to episode ${episodeId}`);
-    }
+    if (!version || version.episodeId !== episodeId) throw new Error(`Version ${versionId} does not belong to episode ${episodeId}`);
     this.#current.set(episodeId, versionId);
   }
 
@@ -90,12 +55,12 @@ class VersionGraph {
   descendantsOf(versionId) {
     if (!this.#versions.has(versionId)) throw new Error(`Unknown version: ${versionId}`);
     const result = new Set();
-    const queue = [...this.#children.get(versionId)];
-    while (queue.length) {
-      const id = queue.shift();
+    const queue = [...(this.#children.get(versionId) || [])];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const id = queue[cursor];
       if (result.has(id)) continue;
       result.add(id);
-      queue.push(...this.#children.get(id));
+      queue.push(...(this.#children.get(id) || []));
     }
     return [...result];
   }
@@ -108,6 +73,8 @@ class VersionGraph {
     }
     return [...affected].map((id) => this.#versions.get(id));
   }
+
+  listByEpisode(episodeId) { return [...this.#versions.values()].filter((v) => v.episodeId === episodeId); }
 }
 
 module.exports = { VERSION_KINDS, VersionGraph };
