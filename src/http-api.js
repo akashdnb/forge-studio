@@ -151,6 +151,18 @@ function createApiServer({
           const body = await readJson(request);
           return send(response, 200, { items: service.graph.invalidationPlan(body.changedVersionIds || []) });
         }
+        if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'jobs' && request.method === 'POST') {
+          return send(response, 501, { error: { code: 'NOT_CONFIGURED', message: 'Durable jobs require PostgreSQL mode' }, requestId });
+        }
+        if (path[0] === 'v1' && path[1] === 'episodes' && path[2] && path[3] === 'jobs' && request.method === 'GET') {
+          return send(response, 200, { items: [] });
+        }
+        if (path[0] === 'v1' && path[1] === 'jobs' && path[2] && request.method === 'GET') {
+          return send(response, 404, { error: { code: 'NOT_FOUND', message: 'Durable jobs require PostgreSQL mode' }, requestId });
+        }
+        if (path[0] === 'v1' && path[1] === 'jobs' && path[2] && path[3] === 'cancel' && request.method === 'POST') {
+          return send(response, 501, { error: { code: 'NOT_CONFIGURED', message: 'Durable jobs require PostgreSQL mode' }, requestId });
+        }
       }
       return send(response, 404, { error: { code: 'NOT_FOUND', message: 'Route not found' }, requestId });
     } catch (error) {
