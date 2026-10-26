@@ -2,7 +2,7 @@ const { createApiServer: createBaseApiServer } = require('./http-api');
 const { AsyncEpisodeOrchestrator } = require('./pipeline/async-orchestrator');
 const { validateResearchPackage, validateTimeline, validatePublishRequest, buildHandoffEnvelope } = require('./pipeline/production-contracts');
 const { createShortsHandoff } = require('./derivatives/shorts-handoff');
-const { randomUUID, timingSafeEqual } = require('node:crypto');
+const { randomUUID, timingSafeEqual, createHash } = require('node:crypto');
 const { URL } = require('node:url');
 
 function send(res, status, body) {
@@ -40,6 +40,9 @@ function mapError(error) {
   const status = error.statusCode || (error.code === 'NOT_FOUND' ? 404 : error.code === 'FORBIDDEN' ? 403 : ['CONFLICT','REVISION_CONFLICT','STATE_CONFLICT','QA_BLOCKED'].includes(error.code) ? 409 : error instanceof TypeError ? 400 : 422);
   return { status, body: { error: { code: error.code || 'INVALID_REQUEST', message: error.message } } };
 }
+function idempotencyHash(value) {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
 
 function createExtendedApiServer({
   repository = null,
@@ -75,6 +78,32 @@ function createExtendedApiServer({
     return role;
   }
 
+  async function storeIdempotentResponse(client, key, actor, requestHash, status, body) {
+    if (!key) return;
+    await client.query(
+      'UPDATE forge_idempotency_keys SET response_status=$1,response_body=$2::jsonb WHERE key=$3 AND actor=$4 AND request_hash=$5',
+      [status, JSON.stringify(body), key, actor, requestHash],
+    );
+  }
+
+  async function reserveIdempotency(client, { key, actor, requestHash }) {
+    if (!key) return null;
+    await client.query('DELETE FROM forge_idempotency_keys WHERE expires_at < now()');
+    const existing = await client.query('SELECT * FROM forge_idempotency_keys WHERE key=$1 FOR UPDATE', [key]);
+    if (existing.rows[0]) {
+      if (existing.rows[0].actor !== actor || existing.rows[0].request_hash !== requestHash) {
+        throw Object.assign(new Error('Idempotency-Key was already used with a different actor or request'), { code: 'CONFLICT' });
+      }
+      if (existing.rows[0].response_status == null) throw Object.assign(new Error('An identical request is already in progress'), { code: 'CONFLICT' });
+      return { status: existing.rows[0].response_status, body: existing.rows[0].response_body, replay: true };
+    }
+    await client.query(
+      'INSERT INTO forge_idempotency_keys(key,actor,request_hash,expires_at) VALUES($1,$2,$3,now()+interval \'24 hours\')',
+      [key, actor, requestHash],
+    );
+    return { replay: false };
+  }
+
   async function handler(req, res) {
     const requestId = req.headers['x-request-id'] || randomUUID();
     res.setHeader('x-request-id', requestId);
@@ -97,13 +126,17 @@ function createExtendedApiServer({
 
       if (req.method === 'POST' && url.pathname === '/v1/projects') {
         const body = await readJson(req);
+        if (!String(body.name || '').trim()) throw new TypeError('Project name is required');
         const id = body.id || randomUUID();
-        const project = await repository.db.withTransaction(async (client) => {
-          const created = await repository.db.createProject({ id, name: body.name, createdBy: actor, metadata: body.metadata || {} });
-          await client.query("INSERT INTO project_members(project_id,actor_id,role) VALUES($1,$2,'OWNER') ON CONFLICT DO NOTHING", [id, actor]);
-          return created;
+        const result = await repository.db.withTransaction(async (client) => {
+          const created = await client.query(
+            'INSERT INTO projects(id,name,created_by,metadata) VALUES($1,$2,$3,$4::jsonb) RETURNING *',
+            [id, String(body.name).trim(), actor, JSON.stringify(body.metadata || {})],
+          );
+          await client.query("INSERT INTO project_members(project_id,actor_id,role) VALUES($1,$2,'OWNER')", [id, actor]);
+          return created.rows[0];
         });
-        return send(res, 201, { item: project });
+        return send(res, 201, { item: result });
       }
 
       if (req.method === 'GET' && url.pathname === '/v1/episodes') {
@@ -123,7 +156,8 @@ function createExtendedApiServer({
       if (req.method === 'POST' && url.pathname === '/v1/episodes') {
         const body = await readJson(req);
         await assertProjectAccess(body.projectId, actor, 'POST');
-        return send(res, 201, { item: await repository.createEpisode({ ...body, createdBy: actor }) });
+        const created = await repository.db.createEpisode({ ...body, createdBy: actor });
+        return send(res, 201, { item: created });
       }
 
       if (path[0] === 'v1' && path[1] === 'jobs' && req.method === 'GET') {
@@ -156,10 +190,7 @@ function createExtendedApiServer({
 
       if (path[0] === 'v1' && path[1] === 'versions' && path[2] && path[3] === 'invalidation-plan' && req.method === 'POST') {
         const versionId = decodeURIComponent(path[2]);
-        const vr = await repository.db.pool.query(
-          'SELECT e.* FROM version_records v JOIN episodes e ON e.id=v.episode_id WHERE v.id=$1',
-          [versionId],
-        );
+        const vr = await repository.db.pool.query('SELECT e.* FROM version_records v JOIN episodes e ON e.id=v.episode_id WHERE v.id=$1', [versionId]);
         if (!vr.rows[0]) return send(res, 404, { error: { code: 'NOT_FOUND', message: 'Version not found' }, requestId });
         await assertEpisodeAccess(vr.rows[0], actor, 'POST');
         const body = await readJson(req);
@@ -174,12 +205,12 @@ function createExtendedApiServer({
         const episodeResult = await repository.db.pool.query('SELECT * FROM episodes WHERE id=$1', [episodeId]);
         if (!episodeResult.rows[0]) return send(res, 404, { error: { code: 'NOT_FOUND', message: 'Episode not found' }, requestId });
         const episode = episodeResult.rows[0];
-        const role = await assertEpisodeAccess(episode, actor, req.method);
+        await assertEpisodeAccess(episode, actor, req.method);
 
         if (path[3] === 'workflow' && req.method === 'POST') {
           const body = await readJson(req);
+          if (body.stages !== undefined && !Array.isArray(body.stages)) throw new TypeError('stages must be an array');
           const stages = body.stages;
-          if (stages !== undefined && !Array.isArray(stages)) throw new TypeError('stages must be an array');
           const result = await orchestrator.enqueue({ episodeId, projectId: episode.project_id, brief: body.brief || episode.description, stages, actor });
           return send(res, 202, result);
         }
@@ -191,23 +222,20 @@ function createExtendedApiServer({
           const packageId = raw.packageId || randomUUID();
           const packageStatus = raw.status || body.status;
           const notes = raw.notes == null ? body.notes : String(raw.notes);
-          const idempotencyKey = req.headers['idempotency-key'] || null;
+          const key = req.headers['idempotency-key'] || null;
+          const requestHash = idempotencyHash({ episodeId, body, packageStatus, notes });
           const result = await repository.db.withTransaction(async (client) => {
-            if (idempotencyKey) {
-              const existing = await client.query('SELECT id,version_id,status,notes FROM research_packages WHERE id=$1 FOR UPDATE', [idempotencyKey]);
-              if (existing.rows[0]) return existing.rows[0];
-            }
+            const reserved = await reserveIdempotency(client, { key, actor, requestHash });
+            if (reserved?.replay) return { status: reserved.status, body: reserved.body, replay: true };
             await client.query("INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,'research',$3::jsonb,$4,$5)", [versionId, episodeId, JSON.stringify(body), body.hash, actor]);
             await client.query('INSERT INTO research_packages(id,episode_id,version_id,status,notes,created_by) VALUES($1,$2,$3,$4,$5,$6)', [packageId, episodeId, versionId, packageStatus, notes, actor]);
-            for (const source of body.sources) {
-              await client.query('INSERT INTO research_sources(id,package_id,url,title,publisher,published_at,content_hash,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [source.id, packageId, source.url, source.title, source.publisher, source.publishedAt, source.contentHash, JSON.stringify(source.metadata)]);
-            }
-            for (const claim of body.claims) {
-              await client.query('INSERT INTO research_claims(id,package_id,claim,status,source_ids,metadata) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)', [claim.id, packageId, claim.claim, claim.status, JSON.stringify(claim.sourceIds), JSON.stringify(claim.metadata)]);
-            }
-            return { id: packageId, episode_id: episodeId, version_id: versionId, status: packageStatus, notes, hash: body.hash };
+            for (const source of body.sources) await client.query('INSERT INTO research_sources(id,package_id,url,title,publisher,published_at,content_hash,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [source.id, packageId, source.url, source.title, source.publisher, source.publishedAt, source.contentHash, JSON.stringify(source.metadata)]);
+            for (const claim of body.claims) await client.query('INSERT INTO research_claims(id,package_id,claim,status,source_ids,metadata) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)', [claim.id, packageId, claim.claim, claim.status, JSON.stringify(claim.sourceIds), JSON.stringify(claim.metadata)]);
+            const responseBody = { item: { id: packageId, episode_id: episodeId, version_id: versionId, status: packageStatus, notes, hash: body.hash } };
+            await storeIdempotentResponse(client, key, actor, requestHash, 201, responseBody);
+            return { status: 201, body: responseBody, replay: false };
           });
-          return send(res, 201, { item: result });
+          return send(res, result.status, result.body);
         }
 
         if (path[3] === 'research' && req.method === 'GET') {
@@ -236,15 +264,10 @@ function createExtendedApiServer({
         if (path[3] === 'publish' && req.method === 'POST') {
           const body = await readJson(req);
           const renderId = body.renderArtifactId || episode.approved_render_id;
-          const renderResult = await repository.db.pool.query(
-            "SELECT * FROM artifacts WHERE id=$1 AND episode_id=$2 AND kind='render'", [renderId, episodeId],
-          );
+          const renderResult = await repository.db.pool.query("SELECT * FROM artifacts WHERE id=$1 AND episode_id=$2 AND kind='render'", [renderId, episodeId]);
           if (!renderResult.rows[0]) throw Object.assign(new Error('Approved render artifact not found'), { code: 'NOT_FOUND' });
           const render = renderResult.rows[0];
-          const qa = await repository.db.pool.query(
-            "SELECT status FROM qa_results WHERE artifact_id=$1 AND version_id=$2 ORDER BY created_at DESC LIMIT 1",
-            [renderId, render.version_id],
-          );
+          const qa = await repository.db.pool.query("SELECT status FROM qa_results WHERE artifact_id=$1 AND version_id=$2 ORDER BY created_at DESC LIMIT 1", [renderId, render.version_id]);
           const validated = validatePublishRequest({ episode: { state: episode.state, approvedRenderId: episode.approved_render_id }, renderArtifact: { id: renderId }, qaStatus: qa.rows[0]?.status, metadata: body.metadata || {} });
           const idempotencyKey = String(body.idempotencyKey || req.headers['idempotency-key'] || `publish:${episodeId}:${renderId}:${validated.destination}`);
           const runId = randomUUID();
@@ -279,8 +302,6 @@ function createExtendedApiServer({
           return send(res, 200, { item: buildHandoffEnvelope(manifest) });
         }
 
-        // For legacy routes, the authorization check above has already enforced
-        // episode membership and viewer-only routes are read-only.
         return baseHandler(req, res);
       }
 
