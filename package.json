@@ -1,7 +1,7 @@
 {
   "name": "forge-studio-core",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Forge Studio production control plane, workflow orchestration, publishing and Shorts handoff",
   "type": "commonjs",
   "scripts": {
