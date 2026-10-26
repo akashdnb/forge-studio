@@ -1,6 +1,6 @@
 # Deterministic Timeline Manifest Worker
 
-The timeline-manifest worker is the single compiler boundary between approved editorial state and FFmpeg rendering.
+The timeline-manifest worker is the single compiler boundary between approved editorial state and FFmpeg rendering. The compiler never mutates the persisted timeline object; render-source enrichment happens on a detached copy.
 
 ## Contract
 
