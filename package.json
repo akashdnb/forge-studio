@@ -1,13 +1,14 @@
 {
   "name": "forge-studio-core",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Forge Studio production domain and HTTP API",
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/http-api.js && node --test"
+    "check": "node --check src/server.js && node --check src/http-api.js && node --check src/pipeline/provider-pipeline.js && node --check src/persistence/production-repository.js && node --test",
+    "migrate": "node src/migrate.js"
   },
   "engines": {
     "node": ">=20"
