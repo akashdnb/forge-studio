@@ -10,8 +10,12 @@ module.exports = {
   ...require('./pipeline/pipeline-service'),
   ...require('./pipeline/scene-plan'),
   ...require('./pipeline/workflow'),
+  ...require('./pipeline/durable-worker'),
   ...require('./pipeline/mock-providers'),
   ...require('./derivatives/shorts-handoff'),
   ...require('./persistence/postgres-repository'),
   ...require('./persistence/production-repository'),
+  ...require('./persistence/durable-job-queue'),
+  ...require('./providers/ffmpeg-renderer'),
+  ...require('./providers/piper-tts-provider'),
 };
