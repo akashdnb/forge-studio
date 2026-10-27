@@ -46,6 +46,20 @@ CREATE TABLE IF NOT EXISTS workflow_sla_runs (
 );
 CREATE INDEX IF NOT EXISTS workflow_sla_runs_deadline_idx ON workflow_sla_runs(state,run_deadline_at);
 CREATE INDEX IF NOT EXISTS workflow_sla_runs_project_idx ON workflow_sla_runs(project_id,state,run_deadline_at);
+CREATE TABLE IF NOT EXISTS workflow_sla_deadline_history (
+  id text PRIMARY KEY,
+  job_id text NOT NULL REFERENCES forge_jobs(id) ON DELETE RESTRICT,
+  run_id text NOT NULL REFERENCES workflow_sla_runs(id) ON DELETE RESTRICT,
+  version integer NOT NULL,
+  deadline_at timestamptz NOT NULL,
+  stage_deadline_at timestamptz NOT NULL,
+  warning_at timestamptz NOT NULL,
+  reason text NOT NULL,
+  actor text,
+  recorded_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(job_id,version)
+);
+CREATE INDEX IF NOT EXISTS workflow_sla_deadline_history_job_idx ON workflow_sla_deadline_history(job_id,version DESC);
 CREATE TABLE IF NOT EXISTS workflow_sla_events (
   id text PRIMARY KEY,
   job_id text NOT NULL REFERENCES forge_jobs(id) ON DELETE RESTRICT,
@@ -58,12 +72,19 @@ CREATE TABLE IF NOT EXISTS workflow_sla_events (
 CREATE INDEX IF NOT EXISTS workflow_sla_events_job_idx ON workflow_sla_events(job_id,observed_at DESC);
 CREATE OR REPLACE FUNCTION forge_sla_immutable_history() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_OP='UPDATE' AND (NEW.job_id,NEW.run_id,NEW.event_type,NEW.observed_at,NEW.details) IS DISTINCT FROM (OLD.job_id,OLD.run_id,OLD.event_type,OLD.observed_at,OLD.details) THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
+  IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS workflow_sla_events_immutable ON workflow_sla_events;
 CREATE TRIGGER workflow_sla_events_immutable BEFORE UPDATE OR DELETE ON workflow_sla_events FOR EACH ROW EXECUTE FUNCTION forge_sla_immutable_history();
+CREATE OR REPLACE FUNCTION forge_sla_deadline_history_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'workflow_sla_deadline_history is append-only'; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS workflow_sla_deadline_history_immutable ON workflow_sla_deadline_history;
+CREATE TRIGGER workflow_sla_deadline_history_immutable BEFORE UPDATE OR DELETE ON workflow_sla_deadline_history FOR EACH ROW EXECUTE FUNCTION forge_sla_deadline_history_immutable();
 CREATE OR REPLACE FUNCTION forge_sla_deadline_open(job_id_in text) RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT NOT EXISTS(SELECT 1 FROM workflow_sla_runs r WHERE r.job_id=job_id_in AND r.state='EXPIRED' AND r.completed_at IS NULL)
 $$;
