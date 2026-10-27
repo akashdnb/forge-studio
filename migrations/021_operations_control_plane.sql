@@ -79,4 +79,17 @@ CREATE TRIGGER worker_control_fence
 AFTER INSERT OR UPDATE OF enabled,reason ON ops_controls
 FOR EACH ROW EXECUTE FUNCTION forge_apply_worker_control();
 
+CREATE OR REPLACE FUNCTION forge_confirmation_token_single_use() RETURNS trigger AS $$
+BEGIN
+  IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS NOT NULL THEN
+    RAISE EXCEPTION 'confirmation token already consumed' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS confirmation_token_single_use ON ops_confirmation_tokens;
+CREATE TRIGGER confirmation_token_single_use
+BEFORE UPDATE OF consumed_at ON ops_confirmation_tokens
+FOR EACH ROW EXECUTE FUNCTION forge_confirmation_token_single_use();
+
 COMMIT;
