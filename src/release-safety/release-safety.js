@@ -1,0 +1,155 @@
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const SECRET_KEY = /(token|secret|password|credential|private.?key|access.?key|authorization)/i;
+const DESTRUCTIVE = /\b(drop\s+(table|column|index|constraint)|truncate\s+table|alter\s+table\s+[^;]+\s+drop\s+|delete\s+from)\b/i;
+const TX_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK)(?:\s+TRANSACTION)?\s*;?/gim;
+const INDEX_RE = /create\s+(?:unique\s+)?index\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_]+)/ig;
+const CONSTRAINT_RE = /add\s+constraint\s+([a-zA-Z0-9_]+)/ig;
+
+function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function semverParts(v) { const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)/); return m ? m.slice(1).map(Number) : null; }
+function compareVersions(a, b) { const x = semverParts(a), y = semverParts(b); if (!x || !y) return String(a).localeCompare(String(b)); return x[0]-y[0] || x[1]-y[1] || x[2]-y[2]; }
+function parseMigrationName(name) { const m = /^(\d+)_([a-z0-9_-]+)\.sql$/i.exec(name); return m ? { number: Number(m[1]), name, suffix: m[2] } : null; }
+function normalizeSql(sql) { return sql.replace(TX_CONTROL, '\n').trim(); }
+
+function analyzeMigration(name, sql) {
+  const normalized = normalizeSql(sql);
+  const allow = /--\s*forge:allow-destructive\b/i.test(sql);
+  const destructive = DESTRUCTIVE.test(normalized);
+  const indexes = [...normalized.matchAll(INDEX_RE)].map((m) => m[1]);
+  const constraints = [...normalized.matchAll(CONSTRAINT_RE)].map((m) => m[1]);
+  return { name, checksum: sha256(sql), destructive, allowedDestructive: allow, unsafe: destructive && !allow, hasTransactionControl: TX_CONTROL.test(sql), indexes, constraints };
+}
+
+async function inspectMigrations(migrationsDir) {
+  const names = (await fs.readdir(migrationsDir)).filter((n) => /^\d+_[a-z0-9_-]+\.sql$/i.test(n)).sort();
+  const items = [];
+  for (const name of names) items.push(analyzeMigration(name, await fs.readFile(path.join(migrationsDir, name), 'utf8')));
+  const byNumber = new Map();
+  for (const item of items) { const list = byNumber.get(Number(item.name.match(/^\d+/)[0])) || []; list.push(item.name); byNumber.set(Number(item.name.match(/^\d+/)[0]), list); }
+  const duplicateNumbers = [...byNumber.entries()].filter(([, list]) => list.length > 1).map(([number, names]) => ({ number, names }));
+  const invalidOrder = items.some((item, i) => i && parseMigrationName(item.name).number < parseMigrationName(items[i-1].name).number);
+  return { items, duplicateNumbers, invalidOrder, current: items.at(-1)?.name || null };
+}
+
+async function readApplied(pool) {
+  try { const r = await pool.query('SELECT version,checksum,applied_at FROM forge_schema_migrations ORDER BY applied_at,version'); return r.rows; }
+  catch (error) { if (error.code === '42P01') return []; throw error; }
+}
+
+async function migrationPreflight({ pool, migrationsDir }) {
+  const audit = await inspectMigrations(migrationsDir);
+  const applied = await readApplied(pool);
+  const appliedMap = new Map(applied.map((r) => [r.version, r]));
+  const checksumMismatches = audit.items.filter((m) => appliedMap.has(m.name) && appliedMap.get(m.name).checksum !== m.checksum).map((m) => m.name);
+  const pending = audit.items.filter((m) => !appliedMap.has(m.name));
+  const unsafePending = pending.filter((m) => m.unsafe).map((m) => m.name);
+  const txControlPending = pending.filter((m) => m.hasTransactionControl).map((m) => m.name);
+  const duplicatePendingNumbers = audit.duplicateNumbers.filter((d) => d.names.some((n) => pending.some((p) => p.name === n)));
+  const ok = checksumMismatches.length === 0 && unsafePending.length === 0 && !audit.invalidOrder && duplicatePendingNumbers.length === 0;
+  return { ok, audit, applied, pending, checksumMismatches, unsafePending, txControlPending, duplicatePendingNumbers };
+}
+
+async function schemaSnapshot(pool) {
+  const [tables, columns, indexes, constraints] = await Promise.all([
+    pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"),
+    pool.query("SELECT table_name,column_name,data_type,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' ORDER BY table_name,ordinal_position"),
+    pool.query("SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY tablename,indexname"),
+    pool.query("SELECT conrelid::regclass::text AS table_name,conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE connamespace='public'::regnamespace ORDER BY table_name,conname")
+  ]);
+  const snapshot = { tables: tables.rows, columns: columns.rows, indexes: indexes.rows, constraints: constraints.rows };
+  return { snapshot, hash: sha256(JSON.stringify(snapshot)) };
+}
+
+function sanitize(value, key = '') {
+  if (SECRET_KEY.test(key)) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map((v) => sanitize(v, key));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitize(v, k)]));
+  if (typeof value === 'string' && (value.length > 2048 || /^(bearer\s+|AKIA|gh[pousr]_)/i.test(value))) return '[REDACTED]';
+  return value;
+}
+
+function canonicalManifest(input) {
+  const manifest = sanitize({
+    releaseId: input.releaseId, commitSha: input.commitSha, appVersion: input.appVersion,
+    schemaVersion: input.schemaVersion, minSchemaVersion: input.minSchemaVersion || input.schemaVersion,
+    maxSchemaVersion: input.maxSchemaVersion || input.schemaVersion,
+    compatibilityWindow: input.compatibilityWindow || {}, requiredConfig: input.requiredConfig || {},
+    requiredIndexes: input.requiredIndexes || [], featureFlags: input.featureFlags || {},
+    workerContracts: input.workerContracts || {}, dependencyRequirements: input.dependencyRequirements || {},
+    rollbackPolicy: input.rollbackPolicy || { mode: 'CLASSIFY', immutableArtifacts: true }
+  });
+  return { ...manifest, manifestHash: sha256(JSON.stringify(manifest)) };
+}
+
+function classifyRollback({ migrationPreflightResult, manifest, schemaChanged = false, artifacts = true, provenance = true, usageAccounting = true, approvals = true, auditHistory = true }) {
+  const destructiveApplied = (migrationPreflightResult?.applied || []).some((m) => migrationPreflightResult.audit?.items?.find((x) => x.name === m.version)?.destructive);
+  const irreversible = destructiveApplied || !artifacts || !provenance || !usageAccounting || !approvals || !auditHistory;
+  if (irreversible) return { classification: 'ROLL_FORWARD_REQUIRED', reason: 'Rollback could violate durable production history or immutable artifact/provenance/accounting invariants' };
+  if (schemaChanged && manifest?.rollbackPolicy?.requiresForwardSchema) return { classification: 'ROLL_FORWARD_REQUIRED', reason: 'Schema compatibility requires roll-forward' };
+  return { classification: 'SAFE_ROLLBACK', reason: 'No irreversible production invariant was identified' };
+}
+
+class ReleaseSafetyService {
+  constructor({ pool, migrationsDir = path.join(__dirname, '..', '..', 'migrations'), logger = console } = {}) {
+    if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') throw new TypeError('A pg-compatible pool is required');
+    this.pool = pool; this.migrationsDir = migrationsDir; this.logger = logger;
+  }
+  async ensureStorage() { await this.pool.query('SELECT 1 FROM forge_release_state LIMIT 1'); }
+  async preflight(input) {
+    const manifest = canonicalManifest(input);
+    const migration = await migrationPreflight({ pool: this.pool, migrationsDir: this.migrationsDir });
+    const schema = await schemaSnapshot(this.pool);
+    const missingIndexes = [];
+    for (const required of manifest.requiredIndexes || []) {
+      const name = typeof required === 'string' ? required : required.name;
+      const found = schema.snapshot.indexes.some((i) => i.indexname === name);
+      if (!found) missingIndexes.push(name);
+    }
+    const config = Object.entries(manifest.requiredConfig || {}).filter(([key, value]) => value === true && !process.env[key]).map(([key]) => key);
+    const dependencies = Object.entries(manifest.dependencyRequirements || {}).filter(([key, value]) => value === true && !process.env[key]).map(([key]) => key);
+    const issues = [];
+    if (!migration.ok) issues.push('MIGRATION_PREFLIGHT_FAILED');
+    if (missingIndexes.length) issues.push('REQUIRED_INDEX_MISSING');
+    if (config.length) issues.push('REQUIRED_CONFIG_MISSING');
+    if (dependencies.length) issues.push('DEPENDENCY_CONFIG_MISSING');
+    if (compareVersions(manifest.minSchemaVersion, manifest.maxSchemaVersion) > 0) issues.push('INVALID_SCHEMA_COMPATIBILITY_WINDOW');
+    return { ok: issues.length === 0, manifest, migration, schema, missingIndexes, missingConfig: config, missingDependencies: dependencies, issues };
+  }
+  async saveManifest(manifest, actor = 'system') {
+    const m = canonicalManifest(manifest);
+    await this.pool.query(`INSERT INTO forge_release_manifests(id,release_id,commit_sha,manifest_hash,app_version,schema_version,min_schema_version,max_schema_version,compatibility_window,required_config,required_indexes,feature_flags,worker_contracts,dependency_requirements,rollback_policy,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16) ON CONFLICT(release_id) DO UPDATE SET manifest_hash=EXCLUDED.manifest_hash,updated_at=now() RETURNING *`, [m.releaseId,m.releaseId,m.commitSha,m.manifestHash,m.appVersion,m.schemaVersion,m.minSchemaVersion,m.maxSchemaVersion,JSON.stringify(m.compatibilityWindow),JSON.stringify(m.requiredConfig),JSON.stringify(m.requiredIndexes),JSON.stringify(m.featureFlags),JSON.stringify(m.workerContracts),JSON.stringify(m.dependencyRequirements),JSON.stringify(m.rollbackPolicy),actor]);
+    return m;
+  }
+  async checkpoint(releaseId, phase, status, evidence = {}) { const clean = sanitize(evidence); const r = await this.pool.query('INSERT INTO forge_release_checkpoints(release_id,phase,status,evidence) VALUES($1,$2,$3,$4::jsonb) RETURNING *',[releaseId,phase,status,JSON.stringify(clean)]); return r.rows[0]; }
+  async activate(releaseId, actor = 'system') { return this.pool.query(`SELECT pg_advisory_xact_lock(hashtext('forge-release-deploy')); UPDATE forge_release_manifests SET status='DEPLOYING',updated_at=now() WHERE release_id=$1; UPDATE forge_release_state SET previous_release_id=active_release_id,active_release_id=$1,state='DEPLOYING',epoch=epoch+1,updated_at=now() WHERE id=true; INSERT INTO forge_release_checkpoints(release_id,phase,status,evidence) VALUES($1,'DEPLOY','STARTED',$2::jsonb)`,[releaseId,JSON.stringify({actor})]); }
+  async workerAdmission({ workerId, releaseId, appVersion, schemaVersion, metadata = {} }) {
+    const state = (await this.pool.query('SELECT * FROM forge_release_state WHERE id=true')).rows[0];
+    if (!state?.active_release_id) return { allowed: true, reason: 'NO_ACTIVE_RELEASE_GATE' };
+    const manifest = (await this.pool.query('SELECT * FROM forge_release_manifests WHERE release_id=$1',[state.active_release_id])).rows[0];
+    const sameRelease = releaseId === state.active_release_id;
+    const compatible = manifest && compareVersions(schemaVersion, manifest.min_schema_version) >= 0 && compareVersions(schemaVersion, manifest.max_schema_version) <= 0;
+    if (!sameRelease || !compatible || state.state === 'ROLL_FORWARD_REQUIRED') {
+      await this.pool.query("INSERT INTO forge_worker_fences(worker_id,release_id,app_version,schema_version,status,metadata) VALUES($1,$2,$3,$4,'FENCED',$5::jsonb) ON CONFLICT(worker_id) DO UPDATE SET status='FENCED',last_seen_at=now(),lease_epoch=forge_worker_fences.lease_epoch+1,metadata=EXCLUDED.metadata",[workerId,releaseId,appVersion,schemaVersion,JSON.stringify(sanitize(metadata))]);
+      return { allowed: false, reason: 'RELEASE_FENCE', activeReleaseId: state.active_release_id };
+    }
+    await this.pool.query("INSERT INTO forge_worker_fences(worker_id,release_id,app_version,schema_version,status,last_seen_at,metadata) VALUES($1,$2,$3,$4,'ACTIVE',now(),$5::jsonb) ON CONFLICT(worker_id) DO UPDATE SET release_id=EXCLUDED.release_id,app_version=EXCLUDED.app_version,schema_version=EXCLUDED.schema_version,status='ACTIVE',last_seen_at=now(),metadata=EXCLUDED.metadata",[workerId,releaseId,appVersion,schemaVersion,JSON.stringify(sanitize(metadata))]);
+    return { allowed: true, activeReleaseId: state.active_release_id };
+  }
+  async setFlag(flag, patch, actor) {
+    if (!flag || SECRET_KEY.test(flag)) throw new TypeError('Invalid feature flag name');
+    if (patch.enabled && patch.safeForRollback === false && patch.rolloutPercent !== 100) throw Object.assign(new Error('Unsafe rollback-sensitive flags must roll out to 100% or remain disabled'),{code:'UNSAFE_FLAG_ROLLOUT'});
+    const r = await this.pool.query(`INSERT INTO forge_feature_flag_rollouts(flag,enabled,rollout_percent,min_release_id,max_release_id,safe_for_rollback,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(flag) DO UPDATE SET enabled=EXCLUDED.enabled,rollout_percent=EXCLUDED.rollout_percent,min_release_id=EXCLUDED.min_release_id,max_release_id=EXCLUDED.max_release_id,safe_for_rollback=EXCLUDED.safe_for_rollback,updated_by=EXCLUDED.updated_by,updated_at=now() RETURNING *`,[flag,Boolean(patch.enabled),Number(patch.rolloutPercent||0),patch.minReleaseId||null,patch.maxReleaseId||null,patch.safeForRollback!==false,actor||'system']); return r.rows[0];
+  }
+  async postDeploy(releaseId, expectedSchemaHash) {
+    const schema = await schemaSnapshot(this.pool); const row = (await this.pool.query('SELECT active_release_id,state FROM forge_release_state WHERE id=true')).rows[0];
+    const ok = row?.active_release_id === releaseId && row.state !== 'ROLL_FORWARD_REQUIRED' && (!expectedSchemaHash || expectedSchemaHash === schema.hash);
+    await this.pool.query('UPDATE forge_release_manifests SET status=$2,updated_at=now() WHERE release_id=$1',[releaseId,ok?'DEPLOYED':'BLOCKED']);
+    await this.checkpoint(releaseId,'POST_DEPLOY',ok?'PASSED':'FAILED',{schemaHash:schema.hash,expectedSchemaHash:expectedSchemaHash||null,state:row?.state||null});
+    return { ok, schemaHash:schema.hash, state:row?.state||null };
+  }
+}
+
+module.exports = { ReleaseSafetyService, analyzeMigration, inspectMigrations, migrationPreflight, schemaSnapshot, canonicalManifest, classifyRollback, normalizeSql, compareVersions, sanitize, sha256 };
