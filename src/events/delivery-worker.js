@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { Pool } = require('pg');
-const { OutboundWebhookReliability } = require('./outbound-webhook-reliability');
+const { FencedOutboundWebhookReliability } = require('./fenced-outbound-webhook-reliability');
 
 function createEventDeliveryWorker({
   pool,
@@ -9,7 +9,7 @@ function createEventDeliveryWorker({
   logger = console,
   deliveryConfig = {},
 } = {}) {
-  const delivery = new OutboundWebhookReliability({ pool, logger, config: deliveryConfig });
+  const delivery = new FencedOutboundWebhookReliability({ pool, logger, config: deliveryConfig });
   let stopped = false;
   let timer = null;
   let recoveryTick = 0;
