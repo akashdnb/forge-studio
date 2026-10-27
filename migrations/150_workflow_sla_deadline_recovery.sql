@@ -56,10 +56,9 @@ CREATE TABLE IF NOT EXISTS workflow_sla_deadline_history (
   warning_at timestamptz NOT NULL,
   reason text NOT NULL,
   actor text,
-  recorded_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE(job_id,version)
+  recorded_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS workflow_sla_deadline_history_job_idx ON workflow_sla_deadline_history(job_id,version DESC);
+CREATE INDEX IF NOT EXISTS workflow_sla_deadline_history_job_idx ON workflow_sla_deadline_history(job_id,recorded_at DESC);
 CREATE TABLE IF NOT EXISTS workflow_sla_events (
   id text PRIMARY KEY,
   job_id text NOT NULL REFERENCES forge_jobs(id) ON DELETE RESTRICT,
@@ -72,8 +71,7 @@ CREATE TABLE IF NOT EXISTS workflow_sla_events (
 CREATE INDEX IF NOT EXISTS workflow_sla_events_job_idx ON workflow_sla_events(job_id,observed_at DESC);
 CREATE OR REPLACE FUNCTION forge_sla_immutable_history() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
+  IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'workflow_sla_events is append-only'; END IF;
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS workflow_sla_events_immutable ON workflow_sla_events;
@@ -85,6 +83,14 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS workflow_sla_deadline_history_immutable ON workflow_sla_deadline_history;
 CREATE TRIGGER workflow_sla_deadline_history_immutable BEFORE UPDATE OR DELETE ON workflow_sla_deadline_history FOR EACH ROW EXECUTE FUNCTION forge_sla_deadline_history_immutable();
+CREATE OR REPLACE FUNCTION forge_sla_record_deadline_history() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO workflow_sla_deadline_history(id,job_id,run_id,version,deadline_at,stage_deadline_at,warning_at,reason,actor)
+  VALUES(gen_random_uuid()::text,NEW.job_id,NEW.id,NEW.version*1000000+NEW.extension_count,NEW.run_deadline_at,NEW.stage_deadline_at,NEW.warning_at,CASE WHEN TG_OP='INSERT' THEN 'INITIAL' ELSE 'UPDATE' END,NEW.created_by);
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS workflow_sla_deadline_history_capture ON workflow_sla_runs;
+CREATE TRIGGER workflow_sla_deadline_history_capture AFTER INSERT OR UPDATE OF run_deadline_at,stage_deadline_at,warning_at,extension_count ON workflow_sla_runs FOR EACH ROW EXECUTE FUNCTION forge_sla_record_deadline_history();
 CREATE OR REPLACE FUNCTION forge_sla_deadline_open(job_id_in text) RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT NOT EXISTS(SELECT 1 FROM workflow_sla_runs r WHERE r.job_id=job_id_in AND r.state='EXPIRED' AND r.completed_at IS NULL)
 $$;
