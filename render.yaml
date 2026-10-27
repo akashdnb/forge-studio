@@ -37,6 +37,16 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_COST_ENFORCEMENT_ENABLED
+        value: "true"
+      - key: FORGE_USAGE_RESERVATION_TTL_MS
+        value: "900000"
+      - key: FORGE_USAGE_RECOVERY_INTERVAL_MS
+        value: "60000"
+      - key: FORGE_USAGE_PRICING_JSON
+        sync: false
+      - key: FORGE_USAGE_BUDGETS_JSON
+        sync: false
       - key: FORGE_GITHUB_ACTIONS_ENABLED
         value: "true"
       - key: FORGE_GITHUB_ACTIONS_MODE
@@ -79,18 +89,6 @@ services:
         value: "60"
       - key: FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES
         value: "60"
-      - key: FORGE_ARTIFACT_LIFECYCLE_INTERVAL_MS
-        value: "900000"
-      - key: FORGE_ARTIFACT_LIFECYCLE_SCAN_LIMIT
-        value: "50"
-      - key: FORGE_ARTIFACT_LIFECYCLE_QUARANTINE_MINUTES
-        value: "1440"
-      - key: FORGE_ARTIFACT_LIFECYCLE_RECOVERY_MINUTES
-        value: "1440"
-      - key: FORGE_ARTIFACT_LIFECYCLE_DELETE_TIMEOUT_MS
-        value: "120000"
-      - key: FORGE_ARTIFACT_RETENTION_DAYS_JSON
-        value: '{"render":90,"package":365,"audio":90,"image":90,"video":90,"caption":90,"render-manifest":90,"default":30}'
       - key: FORGE_STAGE_RESEARCH_ENDPOINT
         sync: false
       - key: FORGE_STAGE_SCRIPT_ENDPOINT
