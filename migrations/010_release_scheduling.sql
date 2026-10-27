@@ -7,12 +7,11 @@ CREATE TABLE IF NOT EXISTS forge_release_calendar_controls (
   emergency_hold boolean NOT NULL DEFAULT false,
   release_epoch bigint NOT NULL DEFAULT 1 CHECK (release_epoch > 0),
   updated_by text NOT NULL DEFAULT 'system',
-  updated_at timestamptz NOT NULL DEFAULT now()
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, project_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS forge_release_calendar_controls_scope_idx
+CREATE INDEX IF NOT EXISTS forge_release_calendar_controls_scope_idx
   ON forge_release_calendar_controls(tenant_id, COALESCE(project_id, ''));
-CREATE INDEX IF NOT EXISTS forge_release_calendar_controls_tenant_idx
-  ON forge_release_calendar_controls(tenant_id, project_id);
 
 CREATE TABLE IF NOT EXISTS forge_release_schedules (
   id text PRIMARY KEY,
@@ -29,10 +28,8 @@ CREATE TABLE IF NOT EXISTS forge_release_schedules (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS forge_release_schedules_due_idx
-  ON forge_release_schedules(status, next_run_at, priority, id);
-CREATE INDEX IF NOT EXISTS forge_release_schedules_scope_idx
-  ON forge_release_schedules(tenant_id, project_id, episode_id, status);
+CREATE INDEX IF NOT EXISTS forge_release_schedules_due_idx ON forge_release_schedules(status, next_run_at, priority, id);
+CREATE INDEX IF NOT EXISTS forge_release_schedules_scope_idx ON forge_release_schedules(tenant_id, project_id, episode_id, status);
 
 CREATE TABLE IF NOT EXISTS forge_release_schedule_versions (
   schedule_id text NOT NULL REFERENCES forge_release_schedules(id) ON DELETE RESTRICT,
@@ -55,8 +52,7 @@ CREATE TABLE IF NOT EXISTS forge_release_schedule_versions (
   CHECK ((schedule_kind <> 'ONCE' AND local_date IS NULL) OR (schedule_kind = 'ONCE' AND local_date IS NOT NULL)),
   CHECK (jsonb_typeof(destinations) = 'array')
 );
-CREATE INDEX IF NOT EXISTS forge_release_schedule_versions_hash_idx
-  ON forge_release_schedule_versions(snapshot_hash);
+CREATE INDEX IF NOT EXISTS forge_release_schedule_versions_hash_idx ON forge_release_schedule_versions(snapshot_hash);
 
 CREATE TABLE IF NOT EXISTS forge_release_calendar_blackouts (
   id text PRIMARY KEY,
@@ -71,9 +67,7 @@ CREATE TABLE IF NOT EXISTS forge_release_calendar_blackouts (
   created_at timestamptz NOT NULL DEFAULT now(),
   CHECK (ends_at > starts_at)
 );
-CREATE INDEX IF NOT EXISTS forge_release_calendar_blackouts_window_idx
-  ON forge_release_calendar_blackouts(tenant_id, project_id, destination, starts_at, ends_at)
-  WHERE status='ACTIVE';
+CREATE INDEX IF NOT EXISTS forge_release_calendar_blackouts_window_idx ON forge_release_calendar_blackouts(tenant_id, project_id, destination, starts_at, ends_at) WHERE status='ACTIVE';
 
 CREATE TABLE IF NOT EXISTS forge_release_schedule_executions (
   id text PRIMARY KEY,
@@ -103,12 +97,9 @@ CREATE TABLE IF NOT EXISTS forge_release_schedule_executions (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(schedule_id, schedule_version, occurrence_key, destination)
 );
-CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_due_idx
-  ON forge_release_schedule_executions(status, planned_at);
-CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_scope_idx
-  ON forge_release_schedule_executions(tenant_id, project_id, episode_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_run_idx
-  ON forge_release_schedule_executions(publish_run_id);
+CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_due_idx ON forge_release_schedule_executions(status, planned_at);
+CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_scope_idx ON forge_release_schedule_executions(tenant_id, project_id, episode_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_run_idx ON forge_release_schedule_executions(publish_run_id);
 
 CREATE TABLE IF NOT EXISTS forge_release_schedule_audit (
   id bigserial PRIMARY KEY,
@@ -123,8 +114,7 @@ CREATE TABLE IF NOT EXISTS forge_release_schedule_audit (
   details jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS forge_release_schedule_audit_scope_idx
-  ON forge_release_schedule_audit(tenant_id, project_id, schedule_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_release_schedule_audit_scope_idx ON forge_release_schedule_audit(tenant_id, project_id, schedule_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS forge_release_state (
   id boolean PRIMARY KEY DEFAULT true CHECK (id),
