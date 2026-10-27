@@ -60,7 +60,3 @@ CREATE TABLE IF NOT EXISTS video_production_stage_runs (
   UNIQUE (attempt_id, stage)
 );
 CREATE INDEX IF NOT EXISTS idx_video_production_stage_runs_attempt ON video_production_stage_runs(attempt_id, stage);
-
-ALTER TABLE video_production_recipes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE video_production_attempts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE video_production_stage_runs ENABLE ROW LEVEL SECURITY;
