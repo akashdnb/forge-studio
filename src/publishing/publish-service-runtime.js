@@ -28,9 +28,12 @@ class RuntimePublishService extends PublishService {
     }
     const lease = await this.coordinator.acquire({ scopeKey: `publish:${runId}`, tenantId: run?.tenant_id || null, projectId: run?.project_id || null, purpose: 'publishing-finalization', leaseMs: 60_000, waitMs: 2_000, priority: 100, metadata: { runId } });
     if (!lease.acquired) throw Object.assign(new Error('Publish finalization is owned by another process'), { code: 'PUBLISH_COORDINATION_BUSY', retryable: true });
+    const renewalMs = 20_000;
+    const renewal = setInterval(() => this.coordinator.renew(lease, { leaseMs: 60_000 }).catch((error) => this.logger.warn?.({ event: 'publish.coordination_renewal_failed', runId, code: error.code })), renewalMs);
+    renewal.unref?.();
     this._publishFences.set(runId, lease);
     try { await this.coordinator.assertHeld(lease); return await super.publish({ runId, job, actor }); }
-    finally { this._publishFences.delete(runId); await this.coordinator.release(lease, { reason: 'publish-finalization-complete' }).catch(() => {}); }
+    finally { clearInterval(renewal); this._publishFences.delete(runId); await this.coordinator.release(lease, { reason: 'publish-finalization-complete' }).catch(() => {}); }
   }
   async recordSuccess(runId, request, attempt, result) {
     const lease = this._publishFences.get(runId);
