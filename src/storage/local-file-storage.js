@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
-function segment(value, name) { if (typeof value !== 'string' || !value || value === '.' || value === '..' || !/^[A-Za-z0-9._-]+$/.test(value)) throw new TypeError(`${name} must be a safe path segment`); return value; }
+function segment(value, name) { if (typeof value !== 'string' || !value || value === '.' || value === '..' || !/^[A-Za-z0-9._:-]+$/.test(value)) throw new TypeError(`${name} must be a safe path segment`); return value.replaceAll(':', '-'); }
 function normalizeSha(value) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new TypeError('sha256 must be a lowercase SHA-256 hex digest'); return value; }
 function extension(contentType) { const map = { 'video/mp4':'mp4','video/webm':'webm','video/quicktime':'mov','video/x-matroska':'mkv','audio/mpeg':'mp3','audio/mp4':'m4a','audio/wav':'wav','audio/x-wav':'wav','audio/aac':'aac','audio/ogg':'ogg','audio/flac':'flac','image/png':'png','image/jpeg':'jpg','image/webp':'webp','text/vtt':'vtt','application/zip':'zip','application/json':'json' }; return map[contentType] || 'bin'; }
 function artifactKey({ tenantId = 'default', projectId, kind, sha256, contentType }) { return `tenants/${segment(tenantId,'tenantId')}/projects/${segment(projectId,'projectId')}/artifacts/${segment(kind,'kind')}/${normalizeSha(sha256).slice(0,2)}/${normalizeSha(sha256)}.${extension(contentType)}`; }
