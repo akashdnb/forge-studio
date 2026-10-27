@@ -10,8 +10,7 @@ CREATE TABLE IF NOT EXISTS forge_release_calendar_controls (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, project_id)
 );
-CREATE INDEX IF NOT EXISTS forge_release_calendar_controls_scope_idx
-  ON forge_release_calendar_controls(tenant_id, COALESCE(project_id, ''));
+CREATE INDEX IF NOT EXISTS forge_release_calendar_controls_scope_idx ON forge_release_calendar_controls(tenant_id, COALESCE(project_id, ''));
 
 CREATE TABLE IF NOT EXISTS forge_release_schedules (
   id text PRIMARY KEY,
@@ -122,5 +121,26 @@ CREATE TABLE IF NOT EXISTS forge_release_state (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO forge_release_state(id) VALUES(true) ON CONFLICT(id) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION forge_fill_scheduled_publish_package() RETURNS trigger AS $$
+BEGIN
+  IF COALESCE((NEW.metadata->>'scheduledRelease')::boolean, false) AND NEW.package_artifact_id IS NULL THEN
+    SELECT ep.id, ep.version_id, ep.manifest_hash
+      INTO NEW.package_artifact_id, NEW.package_version_id, NEW.package_hash
+      FROM episode_packages ep
+     WHERE ep.episode_id = NEW.episode_id
+       AND ep.final_media_artifact_id = NEW.render_artifact_id
+       AND ep.final_media_version_id = NEW.render_version_id
+       AND ep.status = 'READY'
+     ORDER BY ep.created_at DESC
+     LIMIT 1;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_scheduled_publish_package ON publish_runs;
+CREATE TRIGGER forge_scheduled_publish_package
+BEFORE INSERT ON publish_runs
+FOR EACH ROW EXECUTE FUNCTION forge_fill_scheduled_publish_package();
 
 COMMIT;
