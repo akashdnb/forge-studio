@@ -1,5 +1,14 @@
 BEGIN;
 ALTER TABLE forge_execution_plan_stages ADD COLUMN IF NOT EXISTS runner_manifest jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE OR REPLACE FUNCTION forge_snapshot_stage_runner_manifest() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE v_manifest jsonb;
+BEGIN
+  SELECT COALESCE((SELECT s->'runnerManifest' FROM forge_execution_plans p, jsonb_array_elements(p.snapshot->'definition'->'stages') s WHERE p.id=NEW.plan_id AND s->>'id'=NEW.stage_id LIMIT 1),'{}'::jsonb) INTO v_manifest;
+  NEW.runner_manifest:=v_manifest;
+  RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS forge_snapshot_stage_runner_manifest ON forge_execution_plan_stages;
+CREATE TRIGGER forge_snapshot_stage_runner_manifest BEFORE INSERT ON forge_execution_plan_stages FOR EACH ROW EXECUTE FUNCTION forge_snapshot_stage_runner_manifest();
 CREATE TABLE IF NOT EXISTS approvals (
   id text PRIMARY KEY,
   tenant_id text NOT NULL,
