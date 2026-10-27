@@ -1,6 +1,7 @@
 const { requiredString } = require('../domain/records');
-const { PostgresRepository } = require('./postgres-repository');
+const { ConcurrencyPostgresRepository } = require('./concurrency-postgres-repository');
 const { EPISODE_STATES, TRANSITIONS } = require('../domain/episode-service');
+const { assertExpectedRevision, assertSameEpisode, revisionConflict, stateConflict, provenanceConflict } = require('./concurrency');
 
 function fromDb(row) {
   if (!row) return null;
@@ -14,7 +15,7 @@ function fromDb(row) {
 }
 
 class PersistentProductionRepository {
-  constructor({ pool }) { this.db = new PostgresRepository({ pool }); }
+  constructor({ pool }) { this.db = new ConcurrencyPostgresRepository({ pool }); }
   async migrate(options) { return this.db.migrate(options); }
   async createProject(input) { return this.db.createProject({ ...input, id: requiredString(input.id, 'id'), name: requiredString(input.name, 'name') }); }
 
@@ -38,15 +39,15 @@ class PersistentProductionRepository {
       const result = await client.query('SELECT * FROM episodes WHERE id=$1 FOR UPDATE', [id]);
       const current = result.rows[0];
       if (!current) throw Object.assign(new Error('Unknown episode'), { code: 'NOT_FOUND' });
+      assertExpectedRevision(current, expectedRevision, 'Episode');
       if (!EPISODE_STATES.includes(nextState) || !TRANSITIONS[current.state]?.includes(nextState)) {
-        throw Object.assign(new Error(`Illegal episode transition: ${current.state} -> ${nextState}`), { code: 'STATE_CONFLICT' });
+        throw stateConflict(`Illegal episode transition: ${current.state} -> ${nextState}`, { from: current.state, to: nextState });
       }
-      if (expectedRevision !== undefined && Number(current.revision) !== expectedRevision) throw Object.assign(new Error('Episode revision conflict'), { code: 'REVISION_CONFLICT' });
       const updated = await client.query(
         'UPDATE episodes SET state=$1,revision=revision+1,updated_at=now() WHERE id=$2 AND revision=$3 RETURNING *',
         [nextState, id, current.revision],
       );
-      if (!updated.rows[0]) throw Object.assign(new Error('Episode revision conflict'), { code: 'REVISION_CONFLICT' });
+      if (!updated.rows[0]) throw revisionConflict('Episode', expectedRevision, current.revision);
       await client.query(
         "INSERT INTO audit_events (project_id,episode_id,actor,action,target_type,target_id,details) VALUES ($1,$2,$3,'EPISODE_STATE_TRANSITION','episode',$2,$4::jsonb)",
         [current.project_id, id, actor, JSON.stringify({ from: current.state, to: nextState, reason })],
@@ -60,13 +61,14 @@ class PersistentProductionRepository {
       const currentResult = await client.query('SELECT * FROM episodes WHERE id=$1 FOR UPDATE', [id]);
       const current = currentResult.rows[0];
       if (!current) throw Object.assign(new Error('Unknown episode'), { code: 'NOT_FOUND' });
-      if (expectedRevision !== undefined && Number(current.revision) !== expectedRevision) throw Object.assign(new Error('Episode revision conflict'), { code: 'REVISION_CONFLICT' });
-      const artifact = await client.query("SELECT id FROM artifacts WHERE id=$1 AND episode_id=$2 AND kind='render'", [renderArtifactId, id]);
+      assertExpectedRevision(current, expectedRevision, 'Episode');
+      const artifact = await client.query("SELECT id,version_id FROM artifacts WHERE id=$1 AND episode_id=$2 AND kind='render'", [renderArtifactId, id]);
       if (!artifact.rows[0]) throw Object.assign(new Error('Render artifact not found for episode'), { code: 'NOT_FOUND' });
       const result = await client.query(
         'UPDATE episodes SET current_render_id=$1,approved_render_id=NULL,revision=revision+1,updated_at=now() WHERE id=$2 AND revision=$3 RETURNING *',
         [renderArtifactId, id, current.revision],
       );
+      if (!result.rows[0]) throw revisionConflict('Episode', expectedRevision, current.revision);
       return fromDb(result.rows[0]);
     });
   }
@@ -78,7 +80,7 @@ class PersistentProductionRepository {
     if (!episode) throw Object.assign(new Error('Episode does not exist'), { code: 'NOT_FOUND' });
     for (const versionId of input.inputVersionIds || []) {
       const version = await this.db.pool.query('SELECT id FROM version_records WHERE id=$1 AND episode_id=$2', [versionId, input.episodeId]);
-      if (!version.rows[0]) throw Object.assign(new Error(`Provider input version not found for episode: ${versionId}`), { code: 'INVALID_PROVENANCE' });
+      if (!version.rows[0]) throw provenanceConflict(`Provider input version not found for episode: ${versionId}`);
     }
     return this.db.createProviderRun(input);
   }
@@ -88,10 +90,10 @@ class PersistentProductionRepository {
   async episodeCost(episodeId) { return this.db.episodeCost(episodeId); }
 
   async recordQa(input) {
-    const artifact = await this.db.pool.query('SELECT id FROM artifacts WHERE id=$1 AND episode_id=$2 AND version_id=$3', [input.artifactId, input.episodeId, input.versionId]);
-    if (!artifact.rows[0]) throw Object.assign(new Error('QA artifact/version provenance mismatch'), { code: 'INVALID_PROVENANCE' });
-    const episode = await this.db.getEpisode(input.episodeId);
-    if (!episode) throw Object.assign(new Error('Episode does not exist'), { code: 'NOT_FOUND' });
+    const artifact = await this.db.pool.query('SELECT id,episode_id,version_id FROM artifacts WHERE id=$1', [input.artifactId]);
+    if (!artifact.rows[0]) throw Object.assign(new Error('Unknown artifact'), { code: 'NOT_FOUND' });
+    assertSameEpisode(artifact.rows[0].episode_id, input.episodeId, 'QA artifact/version provenance mismatch');
+    assertSameEpisode(artifact.rows[0].version_id, input.versionId, 'QA version does not match artifact');
     return this.db.recordQa(input);
   }
 
@@ -100,8 +102,26 @@ class PersistentProductionRepository {
       const result = await client.query('SELECT * FROM episodes WHERE id=$1 FOR UPDATE', [input.episodeId]);
       const episode = result.rows[0];
       if (!episode) throw Object.assign(new Error('Unknown episode'), { code: 'NOT_FOUND' });
+
+      const existing = await client.query('SELECT * FROM approvals WHERE id=$1', [input.id]);
+      if (existing.rows[0]) {
+        assertSameEpisode(existing.rows[0].episode_id, input.episodeId, 'Approval belongs to a different episode');
+        await client.query(
+          `INSERT INTO forge_concurrency_events(event_type,episode_id,actor,details)
+           VALUES('IDEMPOTENT_REPLAY',$1,$2,$3::jsonb)`,
+          [input.episodeId, input.actor, JSON.stringify({ operation: 'appendApproval', approvalId: input.id })],
+        );
+        return { episode: fromDb(episode), approval: existing.rows[0] };
+      }
+
+      assertExpectedRevision(episode, input.expectedRevision, 'Episode');
       if (!['SCRIPT','SCENE_PLAN','CREATIVE','FINAL_RENDER'].includes(input.stage)) throw new TypeError('Unknown approval stage');
       if (!['APPROVED','CHANGES_REQUESTED','REJECTED'].includes(input.decision)) throw new TypeError('Unknown approval decision');
+
+      const targetVersion = await client.query('SELECT episode_id FROM version_records WHERE id=$1', [input.targetVersionId]);
+      if (!targetVersion.rows[0]) throw provenanceConflict('Approval target version does not exist');
+      assertSameEpisode(targetVersion.rows[0].episode_id, input.episodeId, 'Approval target version belongs to a different episode');
+
       if (input.stage === 'FINAL_RENDER' && input.decision === 'APPROVED') {
         const qa = await client.query(
           `SELECT a.id FROM artifacts a JOIN qa_results q ON q.artifact_id=a.id AND q.version_id=a.version_id
@@ -110,22 +130,40 @@ class PersistentProductionRepository {
           [input.targetId, input.episodeId, input.targetVersionId],
         );
         if (!qa.rows[0]) throw Object.assign(new Error('Final render has no passing QA'), { code: 'QA_BLOCKED' });
-        if (episode.current_render_id !== input.targetId) throw Object.assign(new Error('Only the current selected render can be approved'), { code: 'STATE_CONFLICT' });
-        if (episode.state !== 'AWAITING_APPROVAL') throw Object.assign(new Error('Episode is not awaiting approval'), { code: 'STATE_CONFLICT' });
-        const approved = await client.query("UPDATE episodes SET state='APPROVED',approved_render_id=$1,revision=revision+1,updated_at=now() WHERE id=$2 RETURNING *", [input.targetId, input.episodeId]);
+        if (episode.current_render_id !== input.targetId) throw stateConflict('Only the current selected render can be approved');
+        if (episode.state !== 'AWAITING_APPROVAL') throw stateConflict('Episode is not awaiting approval');
+        const approved = await client.query(
+          "UPDATE episodes SET state='APPROVED',approved_render_id=$1,revision=revision+1,updated_at=now() WHERE id=$2 AND state='AWAITING_APPROVAL' AND current_render_id=$1 AND revision=$3 RETURNING *",
+          [input.targetId, input.episodeId, episode.revision],
+        );
+        if (!approved.rows[0]) throw revisionConflict('Episode', input.expectedRevision, episode.revision);
         const approval = await client.query(
-          'INSERT INTO approvals (id,episode_id,stage,target_id,target_version_id,decision,actor,comments,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *',
+          `INSERT INTO approvals(id,episode_id,stage,target_id,target_version_id,decision,actor,comments,evidence)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *`,
           [input.id, input.episodeId, input.stage, input.targetId, input.targetVersionId, input.decision, input.actor, input.comments || '', JSON.stringify(input.evidence || {})],
         );
-        await client.query("INSERT INTO audit_events (project_id,episode_id,actor,action,target_type,target_id,details) VALUES ($1,$2,$3,'FINAL_RENDER_APPROVED','artifact',$4,$5::jsonb)", [episode.project_id, input.episodeId, input.actor, input.targetId, JSON.stringify({ versionId: input.targetVersionId })]);
+        await client.query(
+          "INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,'FINAL_RENDER_APPROVED','artifact',$4,$5::jsonb)",
+          [episode.project_id, input.episodeId, input.actor, input.targetId, JSON.stringify({ versionId: input.targetVersionId, expectedRevision: input.expectedRevision })],
+        );
         return { episode: fromDb(approved.rows[0]), approval: approval.rows[0] };
       }
-      const approval = await this.db.appendApproval(input);
+
+      const approval = await client.query(
+        `INSERT INTO approvals(id,episode_id,stage,target_id,target_version_id,decision,actor,comments,evidence)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *`,
+        [input.id, input.episodeId, input.stage, input.targetId, input.targetVersionId, input.decision, input.actor, input.comments || '', JSON.stringify(input.evidence || {})],
+      );
       await client.query(
-        "INSERT INTO audit_events (project_id,episode_id,actor,action,target_type,target_id,details) VALUES ($1,$2,$3,'APPROVAL_DECIDED','approval',$4,$5::jsonb)",
+        "INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,'APPROVAL_DECIDED','approval',$4,$5::jsonb)",
         [episode.project_id, input.episodeId, input.actor, input.id, JSON.stringify({ stage: input.stage, targetId: input.targetId, targetVersionId: input.targetVersionId, decision: input.decision })],
       );
-      return approval;
+      return approval.rows[0];
+    }).catch(async (error) => {
+      if (error?.code === '23505' && error?.constraint === 'approvals_single_approved_idx') {
+        throw stateConflict('Approval target was already approved by another request');
+      }
+      throw error;
     });
   }
 
