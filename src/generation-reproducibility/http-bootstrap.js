@@ -1,4 +1,5 @@
 'use strict';
+require('./replay-bootstrap');
 const { GenerationRecipeService } = require('./service');
 const { randomUUID } = require('node:crypto');const { URL }=require('node:url');
 async function readJson(req){const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>1024*1024)throw Object.assign(new Error('Request body exceeds 1 MiB'),{statusCode:413});chunks.push(c);}if(!size)return{};const v=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!v||typeof v!=='object'||Array.isArray(v))throw new TypeError('JSON body must be an object');return v;}
