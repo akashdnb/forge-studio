@@ -139,8 +139,6 @@ services:
         value: "3600"
       - key: FORGE_GENERATION_RETRY_BASE_MS
         value: "1000"
-      - key: FORGE_GENERATION_RETRY_BASE_MS
-        value: "1000"
       - key: FORGE_IMAGE_GENERATION_COMMAND
         sync: false
       - key: FORGE_IMAGE_GENERATION_ARGS
