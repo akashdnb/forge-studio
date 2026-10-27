@@ -63,3 +63,5 @@ extended.createExtendedApiServer=function createExtendedApiServerWithSearchAndEv
 };
 installHttpVersioning();
 require('./server');
+// Loaded after server construction so the idempotency boundary wraps the final evidence-aware transaction implementation.
+require('./persistence/idempotency-bootstrap');
