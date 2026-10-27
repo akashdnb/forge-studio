@@ -18,6 +18,7 @@ async function reenterFromCheckpoint({pool,planId,tenantId,actor='workflow-contr
     await c.query('BEGIN');
     const lockedControl=(await c.query('SELECT * FROM forge_workflow_controls WHERE plan_id=$1 AND tenant_id=$2 FOR UPDATE',[planId,tenantId])).rows[0];
     if(!lockedControl||!['RUNNABLE','RESUMING'].includes(lockedControl.state))throw Object.assign(new Error('Workflow was fenced before re-entry'),{code:'WORKFLOW_FENCED',statusCode:409});
+    if(Number(lockedControl.execution_epoch)!==Number(admission.execution_epoch))throw Object.assign(new Error('Re-entry admission is stale'),{code:'STALE_WORKFLOW_EPOCH',statusCode:409});
     const stage=(await c.query('SELECT * FROM forge_execution_plan_stages WHERE plan_id=$1 AND stage_id=$2 FOR UPDATE',[planId,stageId])).rows[0];
     if(!stage){await c.query('ROLLBACK');return {dispatched:false,reason:'STAGE_MISSING'};}
     await c.query(`UPDATE forge_jobs SET status='CANCELLED',worker_id=NULL,leased_until=NULL,cancellation_requested_at=COALESCE(cancellation_requested_at,now()),updated_at=now() WHERE payload->>'executionPlanId'=$1 AND payload->>'planStageId'=$2 AND status IN ('QUEUED','RUNNING')`,[planId,stageId]);
