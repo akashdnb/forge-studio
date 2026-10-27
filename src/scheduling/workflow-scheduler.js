@@ -1,0 +1,95 @@
+const { randomUUID } = require('node:crypto');
+
+const DEFAULTS = Object.freeze({
+  globalConcurrency: Number.parseInt(process.env.FORGE_SCHEDULER_GLOBAL_CONCURRENCY || '8', 10),
+  projectConcurrency: Number.parseInt(process.env.FORGE_SCHEDULER_PROJECT_CONCURRENCY || '3', 10),
+  episodeConcurrency: Number.parseInt(process.env.FORGE_SCHEDULER_EPISODE_CONCURRENCY || '2', 10),
+  maxQueueDepth: Number.parseInt(process.env.FORGE_SCHEDULER_MAX_QUEUE_DEPTH || '500', 10),
+  maxDispatchesPerTick: Number.parseInt(process.env.FORGE_SCHEDULER_MAX_DISPATCHES_PER_TICK || '4', 10),
+  starvationSeconds: Number.parseInt(process.env.FORGE_SCHEDULER_STARVATION_SECONDS || '300', 10),
+  basePriorityBoost: Number.parseInt(process.env.FORGE_SCHEDULER_PRIORITY_BOOST || '10', 10),
+});
+function positive(name, value) { if (!Number.isInteger(value) || value < 1) throw new TypeError(`${name} must be >= 1`); return value; }
+class WorkflowScheduler {
+  constructor({ pool, queue, schedulerId = `forge-scheduler:${randomUUID()}`, config = {}, clock = () => new Date(), logger = console } = {}) {
+    if (!pool?.query || !pool?.connect) throw new TypeError('A pg-compatible pool is required');
+    if (!queue) throw new TypeError('queue is required');
+    this.pool = pool; this.queue = queue; this.schedulerId = schedulerId; this.clock = clock; this.logger = logger;
+    this.config = {
+      globalConcurrency: positive('globalConcurrency', config.globalConcurrency ?? DEFAULTS.globalConcurrency),
+      projectConcurrency: positive('projectConcurrency', config.projectConcurrency ?? DEFAULTS.projectConcurrency),
+      episodeConcurrency: positive('episodeConcurrency', config.episodeConcurrency ?? DEFAULTS.episodeConcurrency),
+      maxQueueDepth: positive('maxQueueDepth', config.maxQueueDepth ?? DEFAULTS.maxQueueDepth),
+      maxDispatchesPerTick: positive('maxDispatchesPerTick', config.maxDispatchesPerTick ?? DEFAULTS.maxDispatchesPerTick),
+      starvationSeconds: positive('starvationSeconds', config.starvationSeconds ?? DEFAULTS.starvationSeconds),
+      basePriorityBoost: positive('basePriorityBoost', config.basePriorityBoost ?? DEFAULTS.basePriorityBoost),
+    };
+  }
+  async recordEvent(client, jobId, eventType, details = {}) {
+    await client.query('INSERT INTO forge_scheduler_events(job_id,event_type,scheduler_id,details) VALUES($1,$2,$3,$4::jsonb)', [jobId || null, eventType, this.schedulerId, JSON.stringify(details)]);
+  }
+  async heartbeat() {
+    await this.pool.query(`INSERT INTO forge_scheduler_state(scheduler_key,scheduler_id,heartbeat_at,metadata) VALUES('primary',$1,now(),$2::jsonb) ON CONFLICT(scheduler_key) DO UPDATE SET scheduler_id=EXCLUDED.scheduler_id,heartbeat_at=EXCLUDED.heartbeat_at,metadata=EXCLUDED.metadata`, [this.schedulerId, JSON.stringify(this.config)]);
+  }
+  async recover({ limit = 100 } = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const expired = await client.query(`SELECT id FROM forge_jobs WHERE status='RUNNING' AND leased_until < now() AND cancellation_requested_at IS NULL ORDER BY leased_until ASC LIMIT $1 FOR UPDATE SKIP LOCKED`, [limit]);
+      for (const row of expired.rows) { await client.query(`UPDATE forge_jobs SET status='QUEUED',worker_id=NULL,leased_until=NULL,dispatch_token=NULL,available_at=now(),updated_at=now(),last_schedule_reason='lease_expired' WHERE id=$1 AND status='RUNNING'`, [row.id]); await this.recordEvent(client, row.id, 'LEASE_EXPIRED', {}); }
+      const cancelled = await client.query(`UPDATE forge_jobs SET status='CANCELLED',leased_until=NULL,worker_id=NULL,dispatch_token=NULL,finished_at=COALESCE(finished_at,now()),updated_at=now() WHERE status IN ('QUEUED','RUNNING') AND cancellation_requested_at IS NOT NULL RETURNING id`);
+      for (const row of cancelled.rows) await this.recordEvent(client, row.id, 'CANCELLED', { source: 'scheduler_recovery' });
+      const failedDeps = await client.query(`UPDATE forge_jobs j SET status='CANCELLED',blocked_reason='dependency_failed',finished_at=now(),updated_at=now() FROM forge_jobs d WHERE j.status='QUEUED' AND j.depends_on_job_id=d.id AND d.status IN ('FAILED','CANCELLED') RETURNING j.id`);
+      for (const row of failedDeps.rows) await this.recordEvent(client, row.id, 'DEPENDENCY_FAILED', {});
+      await client.query('COMMIT'); return { expired: expired.rowCount, cancelled: cancelled.rowCount, failedDependencies: failedDeps.rowCount };
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+  async wakeDependents(jobId) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const rows = await client.query(`UPDATE forge_jobs j SET available_at=LEAST(j.available_at,now()),blocked_reason=NULL,updated_at=now(),last_schedule_reason='dependency_satisfied' WHERE j.depends_on_job_id=$1 AND j.status='QUEUED' AND NOT EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status<>'SUCCEEDED') RETURNING j.id`, [jobId]);
+      for (const row of rows.rows) await this.recordEvent(client, row.id, 'DEPENDENCY_WAKE', { dependencyJobId: jobId });
+      await client.query('COMMIT'); return rows.rowCount;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+  async cancel(jobId, reason = 'cancelled') {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await client.query(`UPDATE forge_jobs SET cancellation_requested_at=COALESCE(cancellation_requested_at,now()),error=COALESCE(error,$2::jsonb),updated_at=now() WHERE id=$1 AND status IN ('QUEUED','RUNNING') RETURNING *`, [jobId, JSON.stringify({ message: reason, code: 'CANCEL_REQUESTED' })]);
+      if (r.rows[0]) await this.recordEvent(client, jobId, 'CANCELLED', { requested: true, reason });
+      await client.query('COMMIT'); return r.rows[0] || null;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+  async claimNext({ workerId, kinds = [], now = this.clock(), reason = 'poll' } = {}) {
+    if (!workerId) throw new TypeError('workerId is required');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const params = [now, this.config.globalConcurrency, this.config.projectConcurrency, this.config.episodeConcurrency, this.config.maxQueueDepth, this.config.starvationSeconds, this.config.basePriorityBoost];
+      let kindFilter = '';
+      if (kinds.length) { params.push(kinds); kindFilter = `AND j.kind = ANY($${params.length}::text[])`; }
+      const candidate = await client.query(`SELECT j.id FROM forge_jobs j WHERE j.status='QUEUED' AND j.available_at <= $1 AND (j.leased_until IS NULL OR j.leased_until < $1) AND j.cancellation_requested_at IS NULL AND (j.depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED')) AND (SELECT count(*) FROM forge_jobs WHERE status='RUNNING') < $2 ${kindFilter} AND (j.project_id IS NULL OR (SELECT count(*) FROM forge_jobs p WHERE p.project_id=j.project_id AND p.status='RUNNING') < $3) AND (j.episode_id IS NULL OR (SELECT count(*) FROM forge_jobs e WHERE e.episode_id=j.episode_id AND e.status='RUNNING') < $4) AND ((SELECT count(*) FROM forge_jobs WHERE status IN ('QUEUED','RUNNING')) <= $5 OR j.priority <= $7 OR EXTRACT(EPOCH FROM ($1-j.created_at)) >= $6) ORDER BY CASE WHEN EXTRACT(EPOCH FROM ($1-j.created_at)) >= $6 THEN 0 ELSE 1 END ASC, GREATEST(0,j.priority-CASE WHEN EXTRACT(EPOCH FROM ($1-j.created_at)) >= $6 THEN $7 ELSE 0 END) ASC, j.created_at ASC,j.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, params);
+      const row = candidate.rows[0]; if (!row) { await client.query('COMMIT'); return null; }
+      const token = randomUUID();
+      const result = await client.query(`UPDATE forge_jobs SET status='RUNNING',attempts=attempts+1,worker_id=$2,leased_until=$3+($4::text||' seconds')::interval,started_at=COALESCE(started_at,$3),updated_at=$3,dispatch_token=$5,dispatch_generation=dispatch_generation+1,scheduled_at=$3,last_schedule_reason=$6,blocked_reason=NULL WHERE id=$1 AND status='QUEUED' AND cancellation_requested_at IS NULL RETURNING *`, [row.id, workerId, now, this.queue.leaseSeconds, token, reason]);
+      const job = result.rows[0]; if (!job) { await client.query('COMMIT'); return null; }
+      const waitedMs = Math.max(0, new Date(now).getTime() - new Date(job.created_at).getTime());
+      await this.recordEvent(client, job.id, 'DISPATCH_CLAIMED', { workerId, token, reason, waitMs: waitedMs });
+      if (waitedMs >= this.config.starvationSeconds * 1000) await this.recordEvent(client, job.id, 'STARVATION_BOOST', { waitedMs });
+      await client.query('COMMIT'); return job;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+  async dispatchBatch({ workerId, kinds = [], dispatch, reason = 'scheduler' } = {}) {
+    const results = [];
+    for (let i = 0; i < this.config.maxDispatchesPerTick; i += 1) { const job = await this.claimNext({ workerId, kinds, reason }); if (!job) break; try { results.push(await dispatch(job)); } catch (error) { results.push({ job, error }); } }
+    return results;
+  }
+  async metrics() {
+    const r = await this.pool.query(`SELECT count(*) FILTER (WHERE status='QUEUED')::int AS queued,count(*) FILTER (WHERE status='RUNNING')::int AS running,count(*) FILTER (WHERE status='QUEUED' AND depends_on_job_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=forge_jobs.depends_on_job_id AND d.status='SUCCEEDED'))::int AS blocked,count(*) FILTER (WHERE status='QUEUED' AND available_at <= now() AND cancellation_requested_at IS NULL AND (depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=forge_jobs.depends_on_job_id AND d.status='SUCCEEDED')))::int AS runnable,count(*) FILTER (WHERE status='RUNNING' AND leased_until < now())::int AS lease_expired,count(*) FILTER (WHERE status='QUEUED' AND attempts > 0)::int AS retry_waiting,count(*) FILTER (WHERE status='QUEUED' AND now()-created_at > ($1::text||' seconds')::interval)::int AS starving FROM forge_jobs`, [this.config.starvationSeconds]);
+    const event = await this.pool.query(`SELECT count(*) FILTER (WHERE event_type='LEASE_EXPIRED')::int AS lease_expiry_events,count(*) FILTER (WHERE event_type='STARVATION_BOOST')::int AS starvation_events,count(*) FILTER (WHERE event_type='DISPATCH_REJECTED')::int AS backpressure_events FROM forge_scheduler_events`);
+    return { ...r.rows[0], ...event.rows[0], global_limit: this.config.globalConcurrency, project_limit: this.config.projectConcurrency, episode_limit: this.config.episodeConcurrency, saturation: Number(r.rows[0].running) / this.config.globalConcurrency };
+  }
+}
+module.exports = { WorkflowScheduler };
