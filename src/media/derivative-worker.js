@@ -9,6 +9,7 @@ const { promisify } = require('node:util');
 const { ArtifactAccessGateway } = require('../storage/artifact-access-gateway');
 const { ArtifactStorageService } = require('../storage/artifact-storage-service');
 const { derivativeIdentity, derivativeArtifactId, normalizeRecipe, stableJson } = require('./derivative-recipes');
+const { MediaValidationService } = require('./content-validation');
 
 const pipe = promisify(pipeline);
 const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.FORGE_DERIVATIVE_TIMEOUT_MS || '300000', 10);
@@ -92,6 +93,7 @@ function createMediaDerivativeHandler({ pool, storage, repository, accessGateway
   if (!pool?.connect || !repository || !storage) throw new TypeError('pool, repository and storage are required');
   const gateway = accessGateway || new ArtifactAccessGateway({ repository, storage, workerActors: process.env.FORGE_ARTIFACT_WORKER_ACTORS || '' });
   const artifactStore = new ArtifactStorageService({ storage, repository });
+  const validator = new MediaValidationService({ pool, workerId: process.env.FORGE_WORKER_ID || 'derivative-validator', logger, maxConcurrency: 2 });
   const maxInputBytes = limits.maxInputBytes || MAX_INPUT_BYTES;
   const maxOutputBytes = limits.maxOutputBytes || MAX_OUTPUT_BYTES;
   const timeoutMs = limits.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -118,7 +120,7 @@ function createMediaDerivativeHandler({ pool, storage, repository, accessGateway
     const artifactId = derivativeArtifactId({ sourceChecksum: sourceHash, recipe });
     return withIdentityLock(identity, async () => {
       const existing = await pool.query(`SELECT d.*,a.content_hash,a.media_type,s.status AS storage_status FROM media_derivatives d JOIN artifacts a ON a.id=d.artifact_id LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE d.identity=$1`, [identity]);
-      if (existing.rows[0]?.storage_status === 'READY' && existing.rows[0].content_hash) return { artifactId, identity, recipeHash, cacheHit: true, sourceArtifactId };
+      if (existing.rows[0]?.storage_status === 'READY' && existing.rows[0].content_hash && existing.rows[0].status === 'READY') return { artifactId, identity, recipeHash, cacheHit: true, sourceArtifactId };
       const sourceAccess = await gateway.resolve({ artifactId: sourceArtifactId, actor: job.worker_id || process.env.FORGE_WORKER_ID || 'worker', action: 'download', purpose: 'worker' });
       const sourceMeta = sourceAccess.artifact;
       if (sourceMeta.project_id !== job.project_id || sourceMeta.episode_id !== job.episode_id) throw Object.assign(new Error('Derivative source is outside the job tenant/project scope'), { code: 'FORBIDDEN', retryable: false });
@@ -141,9 +143,17 @@ function createMediaDerivativeHandler({ pool, storage, repository, accessGateway
         const outputMeta = await ffprobeJson(outputPath, { ffprobePath });
         if (!Array.isArray(outputMeta.streams) || !outputMeta.streams.length) throw Object.assign(new Error('Derivative output metadata is invalid'), { code: 'OUTPUT_INVALID', retryable: false });
         const artifact = await artifactStore.putArtifact({ episodeId: sourceMeta.episode_id, projectId: sourceMeta.project_id, versionId: sourceMeta.version_id, kind: `derivative:${recipe.type}`, stream: fs.createReadStream(outputPath), contentType: outputSpecInfo.mediaType, expectedSha256: outputHash, artifactId, createdBy: job.worker_id || 'worker', inputVersionIds: [sourceMeta.version_id], source: 'forge-derivative', metadata: { derivativeIdentity: identity, sourceArtifactId, sourceChecksum: sourceHash, recipe, recipeHash, outputChecksum: outputHash, sourceDurationSeconds: probed.durationSeconds, outputSizeBytes: outputStat.size, outputMetadata: outputMeta } });
+        const tenantRow = await pool.query('SELECT tenant_id FROM projects WHERE id=$1', [sourceMeta.project_id]);
+        const tenantId = tenantRow.rows[0]?.tenant_id;
+        if (!tenantId) throw Object.assign(new Error('Derivative project has no tenant scope'), { code: 'TENANT_SCOPE_MISSING', retryable: false });
+        const validation = await validator.validateArtifact({ tenantId, projectId: sourceMeta.project_id, episodeId: sourceMeta.episode_id, artifact: { id: artifact.id, versionId: artifact.versionId, contentHash: outputHash, storageUri: artifact.storageUri, mediaType: outputSpecInfo.mediaType, metadata: artifact.metadata || {} }, payload: { expectedMedia: payload.expectedMedia || {} }, timeoutMs });
+        if (!['PASSED','WARNINGS','OVERRIDDEN'].includes(validation.status)) {
+          await pool.query(`INSERT INTO media_derivatives(identity,source_artifact_id,artifact_id,project_id,episode_id,source_checksum,recipe_hash,recipe,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'QUARANTINED',$9) ON CONFLICT(identity) DO UPDATE SET artifact_id=EXCLUDED.artifact_id,status='QUARANTINED',updated_at=now()`, [identity, sourceArtifactId, artifact.id, sourceMeta.project_id, sourceMeta.episode_id, sourceHash, recipeHash, JSON.stringify(recipe), job.worker_id || 'worker']);
+          throw Object.assign(new Error(`Derivative media validation ${validation.status.toLowerCase()}`), { code: 'MEDIA_VALIDATION_BLOCKED', retryable: false, validationId: validation.id });
+        }
         await pool.query(`INSERT INTO media_derivatives(identity,source_artifact_id,artifact_id,project_id,episode_id,source_checksum,recipe_hash,recipe,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'READY',$9) ON CONFLICT(identity) DO UPDATE SET artifact_id=EXCLUDED.artifact_id,status='READY',updated_at=now()`, [identity, sourceArtifactId, artifact.id, sourceMeta.project_id, sourceMeta.episode_id, sourceHash, recipeHash, JSON.stringify(recipe), job.worker_id || 'worker']);
-        await pool.query(`INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,'MEDIA_DERIVATIVE_GENERATED','artifact',$4,$5::jsonb)`, [sourceMeta.project_id, sourceMeta.episode_id, job.worker_id || 'worker', artifact.id, JSON.stringify({ sourceArtifactId, identity, recipe, sourceChecksum: sourceHash, outputChecksum: outputHash })]);
-        return { artifactId: artifact.id, identity, recipeHash, sourceArtifactId, sourceChecksum: sourceHash, outputChecksum: outputHash, bytes: outputStat.size, mediaType: outputSpecInfo.mediaType, cacheHit: false };
+        await pool.query(`INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,'MEDIA_DERIVATIVE_GENERATED','artifact',$4,$5::jsonb)`, [sourceMeta.project_id, sourceMeta.episode_id, job.worker_id || 'worker', artifact.id, JSON.stringify({ sourceArtifactId, identity, recipe, sourceChecksum: sourceHash, outputChecksum: outputHash, validationId: validation.id, validationStatus: validation.status })]);
+        return { artifactId: artifact.id, identity, recipeHash, sourceArtifactId, sourceChecksum: sourceHash, outputChecksum: outputHash, bytes: outputStat.size, mediaType: outputSpecInfo.mediaType, cacheHit: false, validationId: validation.id, validationStatus: validation.status };
       } catch (error) {
         if (error.code === 'JOB_CANCELLED') throw error;
         logger.error?.({ event: 'media_derivative.failed', jobId: job.id, sourceArtifactId, recipe, error: { message: error.message, code: error.code } });
