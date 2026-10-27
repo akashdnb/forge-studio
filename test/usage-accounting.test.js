@@ -16,8 +16,11 @@ function poolFixture({ pricing={provider_type:'worker',provider:'provider-a',mod
     if(sql.includes('SELECT * FROM usage_reservations WHERE id=$1')) return {rows:state.reservations.filter((r)=>r.id===params[0])};
     if(sql.startsWith('INSERT INTO usage_reservations')) { const r={id:params[0],job_id:params[1],project_id:params[2],episode_id:params[3],provider_type:params[4],provider:params[5],model:params[6],operation:params[7],attempt:params[8],estimated_units:params[9],estimated_cost:params[10],currency:params[11],status:'HELD',expires_at:params[12]}; state.reservations.push(r); return {rows:[r]}; }
     if(sql.includes('SELECT * FROM usage_events WHERE id=$1 OR event_key=$2')) return {rows:state.events.filter((e)=>e.id===params[0]||e.event_key===params[1])};
-    if(sql.startsWith('INSERT INTO usage_events')) { const e={id:params[0],event_key:params[1],job_id:params[2],project_id:params[3],episode_id:params[4],usage_units:params[17]||0,normalized_cost_units:params[18]||0,estimated_cost:params[19]||0,actual_cost:params[20]||0,currency:params[21]||'USD',outcome:params[22]||'SUCCEEDED'}; state.events.push(e); return {rows:sql.includes('RETURNING *')?[e]:[]}; }
-    if(sql.startsWith('UPDATE usage_reservations SET status=')) { const r=state.reservations.find((x)=>x.id===params[2]); if(r){r.status=params[0];r.terminal_reason=params[1];} return {rows:r?[r]:[]}; }
+    if(sql.startsWith('INSERT INTO usage_events')) {
+      if(sql.includes("'REJECTED'")){const e={id:params[0],event_key:params[1],job_id:params[2],project_id:params[3],episode_id:params[4],outcome:'REJECTED'};state.events.push(e);return{rows:sql.includes('RETURNING *')?[e]:[]};}
+      const e={id:params[0],event_key:params[1],job_id:params[2],project_id:params[3],episode_id:params[4],usage_units:params[17]||0,normalized_cost_units:params[18]||0,estimated_cost:params[19]||0,actual_cost:params[20]||0,currency:params[21]||'USD',outcome:params[22]||'SUCCEEDED'};state.events.push(e);return{rows:sql.includes('RETURNING *')?[e]:[]};
+    }
+    if(sql.startsWith('UPDATE usage_reservations SET status=')) { const r=state.reservations.find((x)=>x.id===params[2]||x.id===params[0]); if(r){r.status=params[0].startsWith('EXPIRED')?'EXPIRED':params[0];r.terminal_reason=params[1]||'STALE_RECOVERY';} return {rows:r?[r]:[]}; }
     if(sql.startsWith('UPDATE usage_budgets SET state=')) return {rows:[]};
     if(sql.includes('SELECT * FROM usage_events WHERE id=$1')) return {rows:state.events.filter((e)=>e.id===params[0])};
     if(sql.includes('SELECT * FROM usage_reservations WHERE status=')&&sql.includes('expires_at')) return {rows:state.reservations.filter((r)=>r.status==='HELD'&&new Date(r.expires_at)<new Date())};
