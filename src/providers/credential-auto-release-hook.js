@@ -1,0 +1,18 @@
+'use strict';
+
+const crypto=require('node:crypto');
+const installed=Symbol.for('forge.provider.credential.auto-release');
+function install(){
+  const {CredentialAccessService}=require('./credential-access-service');
+  if(CredentialAccessService.prototype[installed])return;
+  const original=CredentialAccessService.prototype.execute;
+  CredentialAccessService.prototype.execute=async function autoReleaseExecute(args={}){
+    const token=String(args.grant||'');
+    const tokenHash=crypto.createHash('sha256').update(token).digest('hex');
+    const grant=(await this.pool.query('SELECT lease_id,tenant_id,fencing_token FROM forge_credential_access_grants WHERE token_hash=$1',[tokenHash])).rows[0];
+    try{return await original.call(this,args);}finally{if(grant)await this.release({tenantId:grant.tenant_id,leaseId:grant.lease_id,fencingToken:grant.fencing_token,reason:'provider execution completed'}).catch(()=>{});}
+  };
+  CredentialAccessService.prototype[installed]=true;
+}
+install();
+module.exports={install};
