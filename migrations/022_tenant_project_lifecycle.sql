@@ -45,8 +45,8 @@ CREATE INDEX IF NOT EXISTS lifecycle_holds_scope_idx ON lifecycle_holds(tenant_i
 
 CREATE TABLE IF NOT EXISTS deletion_requests (
   id text PRIMARY KEY,
-  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id text REFERENCES projects(id) ON DELETE RESTRICT,
+  tenant_id text REFERENCES tenants(id) ON DELETE SET NULL,
+  project_id text REFERENCES projects(id) ON DELETE SET NULL,
   actor text NOT NULL,
   reason text NOT NULL,
   confirmation_hash char(64) NOT NULL,
@@ -116,7 +116,6 @@ CREATE TABLE IF NOT EXISTS lifecycle_reconciliation (
   details jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
--- Preserve immutable evidence while allowing lifecycle roots to disappear. Historical audit rows are retained with a null resource pointer.
 DO $$ BEGIN
   ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_project_id_fkey;
   ALTER TABLE audit_events ADD CONSTRAINT audit_events_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
@@ -124,10 +123,6 @@ EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE security_audit_events DROP CONSTRAINT IF EXISTS security_audit_events_project_id_fkey;
   ALTER TABLE security_audit_events ADD CONSTRAINT security_audit_events_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
-EXCEPTION WHEN undefined_table THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE deletion_requests DROP CONSTRAINT IF EXISTS deletion_requests_project_id_fkey;
-  ALTER TABLE deletion_requests ADD CONSTRAINT deletion_requests_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
 EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE lifecycle_holds DROP CONSTRAINT IF EXISTS lifecycle_holds_project_id_fkey;
@@ -141,9 +136,7 @@ BEGIN
   SELECT lifecycle_state, tenant_id INTO s, ts FROM projects WHERE id=NEW.project_id FOR SHARE;
   IF s IS NULL THEN RAISE EXCEPTION 'project not found for job'; END IF;
   IF s <> 'ACTIVE' THEN RAISE EXCEPTION 'project lifecycle blocks new work: %', s; END IF;
-  IF EXISTS (SELECT 1 FROM lifecycle_holds h WHERE h.tenant_id=ts AND h.active AND h.kind IN ('LEGAL','SAFETY')) THEN
-    RAISE EXCEPTION 'tenant hold blocks new work';
-  END IF;
+  IF EXISTS (SELECT 1 FROM lifecycle_holds h WHERE h.tenant_id=ts AND h.active AND h.kind IN ('LEGAL','SAFETY')) THEN RAISE EXCEPTION 'tenant hold blocks new work'; END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -153,9 +146,7 @@ CREATE TRIGGER forge_lifecycle_job_guard BEFORE INSERT ON forge_jobs FOR EACH RO
 CREATE OR REPLACE FUNCTION forge_lifecycle_guard_project() RETURNS trigger AS $$
 BEGIN
   IF NEW.lifecycle_state IN ('DELETED','DELETION_IN_PROGRESS') AND OLD.lifecycle_state NOT IN ('DELETED','DELETION_IN_PROGRESS') THEN
-    IF EXISTS (SELECT 1 FROM forge_jobs j WHERE j.project_id=NEW.id AND j.status IN ('QUEUED','RUNNING')) THEN
-      RAISE EXCEPTION 'project has active jobs';
-    END IF;
+    IF EXISTS (SELECT 1 FROM forge_jobs j WHERE j.project_id=NEW.id AND j.status IN ('QUEUED','RUNNING')) THEN RAISE EXCEPTION 'project has active jobs'; END IF;
   END IF;
   RETURN NEW;
 END;
