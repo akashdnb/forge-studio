@@ -4,7 +4,7 @@
 
 Forge Studio is the trusted coordinator. `akashdnb/forge-runner` is an untrusted public execution boundary. The only cross-boundary object is a short-lived `forge-public-runner-v2` manifest containing immutable execution identity, release epoch, immutable runner commit SHA, allowlisted operation, content-addressed input references, bounded output handoff and explicit deny-by-default policy.
 
-The coordinator never sends private source, repository/ref selectors, database/provider credentials or long-lived cloud credentials. Public execution is dispatched only to `FORGE_PUBLIC_RUNNER_REF`, which must be a full 40-character commit SHA.
+The coordinator never sends private source, repository/ref selectors, database/provider credentials or long-lived cloud credentials. Public execution is dispatched only to `FORGE_PUBLIC_RUNNER_REF`, which must be a full 40-character commit SHA. The production repository is hard-allowlisted in code as `akashdnb/forge-runner`. The reviewed/squash-merged runner main commit for this release is `90a407026a6bc6cc481da918beb0e470e4eb3619`.
 
 ## Security controls
 
@@ -16,17 +16,17 @@ The coordinator never sends private source, repository/ref selectors, database/p
 - Input/output counts, byte sizes, callback size and wall-clock execution are bounded.
 - Artifact URLs are HTTPS-only and must match `FORGE_ARTIFACT_HOSTS`; uploads must match `FORGE_UPLOAD_HOSTS`.
 - Runner subprocesses inherit only a minimal environment and run inside an ephemeral private workspace. Paths cannot escape the workspace.
-- FFmpeg/Whisper arguments reject remote protocols, script/eval/plugin loading and path traversal.
+- FFmpeg/Whisper arguments reject remote protocols, filter-based file access, script/eval/plugin loading and path traversal.
 - Public workflow uses only a full-SHA-pinned `actions/checkout` dependency, `contents: read`, no private checkout, no `secrets: inherit`, no package installation and a 30-minute job timeout.
 - Release epoch changes, cancellation, manifest expiry and recovery fence public executions before any success transition.
-- Security events are persisted in `forge_runner_security_events` for tampering, replay, integrity, egress, resource and fencing failures.
+- Security events are persisted in `forge_runner_security_events` and counters in `forge_runner_security_counters` for tampering, replay, integrity, egress, resource and fencing failures.
 
 ## Deployment runbook
 
-1. Provision `akashdnb/forge-runner` as a public repository from the `feat/sandbox-supply-chain-security` line only after review; protect `main` and restrict workflow changes/dispatch to the Forge automation identity.
-2. Merge the runner branch and record the exact merged commit SHA. Configure Forge `FORGE_PUBLIC_RUNNER_REF` to that SHA. Never use `main`, a tag, or a branch as the production ref.
-3. Configure repository secret `FORGE_RUNNER_CALLBACK_URL` and the rotating callback credential. Configure repository variables for artifact/upload host allowlists.
-4. Configure Forge `FORGE_PUBLIC_RUNNER_SIGNING_SECRET`, `FORGE_PUBLIC_RUNNER_MANIFEST_BASE_URL`, `FORGE_RUNNER_CALLBACK_URL`, `FORGE_PUBLIC_RUNNER_REPOSITORY`, dispatch credential, capacity limits and public-runner enabled flag.
+1. Provision `akashdnb/forge-runner` as a public repository only after review; protect `main` and restrict workflow changes/dispatch to the Forge automation identity.
+2. Configure Forge `FORGE_PUBLIC_RUNNER_REPOSITORY=akashdnb/forge-runner` and `FORGE_PUBLIC_RUNNER_REF=90a407026a6bc6cc481da918beb0e470e4eb3619` for this release. Never use `main`, a tag, or a branch as the production ref.
+3. Configure repository secret `FORGE_RUNNER_CALLBACK_URL` and the rotating callback credential. Configure repository variables `FORGE_MANIFEST_HOSTS`, `FORGE_ARTIFACT_HOSTS` and `FORGE_UPLOAD_HOSTS`; empty allowlists fail closed.
+4. Configure Forge `FORGE_PUBLIC_RUNNER_SIGNING_SECRET`, `FORGE_PUBLIC_RUNNER_MANIFEST_BASE_URL`, `FORGE_RUNNER_CALLBACK_URL`, dispatch credential, capacity limits and public-runner enabled flag.
 5. Apply migrations through `npm run migrate`; migration 014 adds security evidence, release-epoch fencing and callback nonce state.
 6. Run `npm run release:preflight` and verify no worker is outside the active release compatibility window.
 7. Run RenderUtils CI for both repositories. If RenderUtils is unavailable, do not treat GitHub Actions green state as proof of the cross-boundary security contract; run the deterministic tests locally and record the CI outage as release evidence.
@@ -47,7 +47,7 @@ Security events should be treated as failures, not retried blindly: `MANIFEST_IN
 
 ## Metrics
 
-Emit/monitor at minimum:
+The coordinator persists minute-bucket security counters and should expose them through the existing observability layer as:
 
 - `forge_public_runner_dispatch_total{outcome}`
 - `forge_public_runner_callback_total{status,outcome}`
