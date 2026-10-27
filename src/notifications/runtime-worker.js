@@ -1,5 +1,6 @@
 'use strict';
 
+require('./guards');
 const { NotificationOrchestrator } = require('./notification-orchestrator');
 const { processEscalations } = require('./escalation-runtime');
 
