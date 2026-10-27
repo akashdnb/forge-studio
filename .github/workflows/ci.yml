@@ -30,7 +30,7 @@ jobs:
       DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
       FORGE_RUN_RECOVERY_INTEGRATION: "true"
       FORGE_CREDENTIAL_INTEGRATION: "true"
-      FORGE_SECRET_ENCRYPTION_KEY: "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm"
+      FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
