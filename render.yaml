@@ -120,6 +120,46 @@ services:
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
       - key: FORGE_WORKER_HANDLERS
+        value: src/generation/worker-handlers.js
+      - key: FORGE_GENERATION_TIMEOUT_MS
+        value: "600000"
+      - key: FORGE_GENERATION_MAX_ATTEMPTS
+        value: "3"
+      - key: FORGE_GENERATION_MAX_OUTPUT_BYTES
+        value: "536870912"
+      - key: FORGE_GENERATION_MAX_TEXT_CHARS
+        value: "2000000"
+      - key: FORGE_GENERATION_MAX_WIDTH
+        value: "16384"
+      - key: FORGE_GENERATION_MAX_HEIGHT
+        value: "16384"
+      - key: FORGE_GENERATION_MAX_DURATION_SECONDS
+        value: "3600"
+      - key: FORGE_GENERATION_RETRY_BASE_MS
+        value: "1000"
+      - key: FORGE_IMAGE_GENERATION_COMMAND
+        sync: false
+      - key: FORGE_IMAGE_GENERATION_ARGS
+        sync: false
+      - key: FORGE_IMAGE_GENERATION_PROVIDER
+        sync: false
+      - key: FORGE_IMAGE_GENERATION_MODEL
+        sync: false
+      - key: FORGE_VIDEO_GENERATION_COMMAND
+        sync: false
+      - key: FORGE_VIDEO_GENERATION_ARGS
+        sync: false
+      - key: FORGE_VIDEO_GENERATION_PROVIDER
+        sync: false
+      - key: FORGE_VIDEO_GENERATION_MODEL
+        sync: false
+      - key: FORGE_TEXT_GENERATION_COMMAND
+        sync: false
+      - key: FORGE_TEXT_GENERATION_ARGS
+        sync: false
+      - key: FORGE_TEXT_GENERATION_PROVIDER
+        sync: false
+      - key: FORGE_TEXT_GENERATION_MODEL
         sync: false
       - key: YOUTUBE_ACCESS_TOKEN
         sync: false
