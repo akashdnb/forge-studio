@@ -1,4 +1,5 @@
 BEGIN;
+ALTER TABLE forge_execution_plan_stages ADD COLUMN IF NOT EXISTS runner_manifest jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE TABLE IF NOT EXISTS approvals (
   id text PRIMARY KEY,
   tenant_id text NOT NULL,
