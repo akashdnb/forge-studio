@@ -24,7 +24,10 @@ test('synchronous persistence cipher round-trips and authenticates tenant/projec
     assert.equal(typeof encrypted.then, 'undefined');
     return encrypted;
   });
-  await assert.rejects(() => KeyManagementService.withContext({ tenantId: 'tenant-b', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record)), /CIPHERTEXT_INVALID/);
+  await assert.rejects(
+    () => KeyManagementService.withContext({ tenantId: 'tenant-b', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record)),
+    (error) => error.code === 'CIPHERTEXT_INVALID'
+  );
   const plaintext = await KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record));
   assert.equal(plaintext, 'credential-material');
 });
