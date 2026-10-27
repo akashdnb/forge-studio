@@ -6,14 +6,124 @@ const crypto = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { artifactKey, normalizeSha, hashAndCount } = require('./local-file-storage');
+
+const ENCRYPTION_MODES = new Set(['NONE', 'AES256', 'AWS_KMS']);
+
 class S3ObjectStorage {
-  constructor({ bucket, region = 'us-east-1', endpoint, forcePathStyle = false, maxBytes }) { if (!bucket) throw new TypeError('S3 bucket is required'); this.bucket = bucket; this.maxBytes = maxBytes; this.client = new S3Client({ region, endpoint, forcePathStyle }); }
+  constructor({ bucket, region = 'us-east-1', endpoint, forcePathStyle = false, maxBytes, encryptionMode = 'AES256', encryptionKeyId = null }) {
+    if (!bucket) throw new TypeError('S3 bucket is required');
+    if (!ENCRYPTION_MODES.has(encryptionMode)) throw new TypeError('Unsupported S3 encryption mode');
+    if (encryptionMode === 'AWS_KMS' && !encryptionKeyId) throw new TypeError('S3 KMS encryption requires encryptionKeyId');
+    this.bucket = bucket;
+    this.maxBytes = maxBytes;
+    this.encryptionMode = encryptionMode;
+    this.encryptionKeyId = encryptionKeyId || null;
+    this.client = new S3Client({ region, endpoint, forcePathStyle });
+  }
+
   keyFor(input) { return artifactKey(input); }
-  async upload({ stream, tenantId, projectId, kind, contentType = 'application/octet-stream', expectedSha256, metadata = {} }) { if (!stream || typeof stream.pipe !== 'function') throw new TypeError('stream is required'); if (expectedSha256) normalizeSha(expectedSha256); const tempDir = path.join(os.tmpdir(), 'forge-artifacts', crypto.randomUUID()); await mkdir(tempDir, { recursive: true, mode: '700' }); const temp = path.join(tempDir, 'artifact.part'); try { const verifier = hashAndCount(this.maxBytes, expectedSha256); await pipeline(stream, verifier, createWriteStream(temp, { flags: 'wx', mode: 0o600 })); const sha256 = verifier.checksum; const sizeBytes = verifier.sizeBytes; const key = artifactKey({ tenantId, projectId, kind, sha256, contentType }); const existing = await this.head(key); if (!existing) { try { await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: createReadStream(temp), ContentLength: sizeBytes, ContentType: contentType, Metadata: { sha256, ...safeMetadata(metadata) }, IfNoneMatch: '*' })); } catch (error) { if (!(error.$metadata?.httpStatusCode === 412 || error.$metadata?.httpStatusCode === 409)) throw error; } } const final = await this.head(key); if (!final || final.sizeBytes !== sizeBytes || (final.sha256 && final.sha256 !== sha256)) throw Object.assign(new Error('S3 object failed post-write verification'), { code: 'STORAGE_CORRUPT' }); return { key, uri: `s3://${this.bucket}/${key}`, sha256, sizeBytes, contentType, metadata }; } finally { await rm(tempDir, { recursive: true, force: true }); } }
-  async head(key) { try { const result = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key })); return { key, sizeBytes: Number(result.ContentLength || 0), sha256: result.Metadata?.sha256 || null, contentType: result.ContentType || null, uri: `s3://${this.bucket}/${key}` }; } catch (error) { if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) return null; throw error; } }
-  async download({ key, expectedSha256, maxBytes = this.maxBytes }) { const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key })); const sizeBytes = Number(result.ContentLength || 0); if (sizeBytes > maxBytes) throw Object.assign(new Error('Stored artifact exceeds configured download limit'), { code: 'ARTIFACT_TOO_LARGE' }); const verifier = hashAndCount(maxBytes, expectedSha256 || result.Metadata?.sha256 || undefined); return { stream: result.Body.pipe(verifier), sizeBytes, key, uri: `s3://${this.bucket}/${key}` }; }
-  async downloadRange({ key, start, end }) { if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) throw Object.assign(new Error('Invalid storage range'), { code: 'INVALID_RANGE' }); try { const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: `bytes=${start}-${end}` })); return { stream: result.Body, sizeBytes: Number(result.ContentLength || 0), key, uri: `s3://${this.bucket}/${key}` }; } catch (error) { if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) throw Object.assign(new Error('Artifact not found'), { code: 'ARTIFACT_NOT_FOUND' }); throw error; } }
-  async delete(key) { try { await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })); return { deleted: true, key }; } catch (error) { throw Object.assign(error, { code: error.code || error.name || 'STORAGE_DELETE_FAILED', retryable: true }); } }
+
+  _encryptionHeaders() {
+    if (this.encryptionMode === 'AES256') return { ServerSideEncryption: 'AES256' };
+    if (this.encryptionMode === 'AWS_KMS') return { ServerSideEncryption: 'aws:kms', SSEKMSKeyId: this.encryptionKeyId };
+    return {};
+  }
+
+  async upload({ stream, tenantId, projectId, kind, contentType = 'application/octet-stream', expectedSha256, metadata = {} }) {
+    if (!stream || typeof stream.pipe !== 'function') throw new TypeError('stream is required');
+    if (expectedSha256) normalizeSha(expectedSha256);
+    const tempDir = path.join(os.tmpdir(), 'forge-artifacts', crypto.randomUUID());
+    await mkdir(tempDir, { recursive: true, mode: '700' });
+    const temp = path.join(tempDir, 'artifact.part');
+    try {
+      const verifier = hashAndCount(this.maxBytes, expectedSha256);
+      await pipeline(stream, verifier, createWriteStream(temp, { flags: 'wx', mode: 0o600 }));
+      const sha256 = verifier.checksum;
+      const sizeBytes = verifier.sizeBytes;
+      const key = artifactKey({ tenantId, projectId, kind, sha256, contentType });
+      const existing = await this.head(key);
+      if (!existing) {
+        try {
+          await this.client.send(new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: createReadStream(temp),
+            ContentLength: sizeBytes,
+            ContentType: contentType,
+            ChecksumSHA256: Buffer.from(sha256, 'hex').toString('base64'),
+            ...this._encryptionHeaders(),
+            Metadata: { sha256, ...safeMetadata(metadata) },
+            IfNoneMatch: '*',
+          }));
+        } catch (error) {
+          if (!(error.$metadata?.httpStatusCode === 412 || error.$metadata?.httpStatusCode === 409)) throw error;
+        }
+      }
+      const final = await this.head(key);
+      if (!final || final.sizeBytes !== sizeBytes || (final.sha256 && final.sha256 !== sha256)) throw Object.assign(new Error('S3 object failed post-write verification'), { code: 'STORAGE_CORRUPT' });
+      if (this.encryptionMode !== 'NONE' && final.encryptionMode !== this.encryptionMode) throw Object.assign(new Error('S3 object is not encrypted with the configured server-side mode'), { code: 'STORAGE_ENCRYPTION_MISMATCH' });
+      return { key, uri: `s3://${this.bucket}/${key}`, sha256, sizeBytes, contentType, metadata, encryptionMode: this.encryptionMode, encryptionKeyId: this.encryptionKeyId };
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  async head(key) {
+    try {
+      const result = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return {
+        key,
+        sizeBytes: Number(result.ContentLength || 0),
+        sha256: result.Metadata?.sha256 || null,
+        contentType: result.ContentType || null,
+        encryptionMode: result.ServerSideEncryption === 'aws:kms' ? 'AWS_KMS' : result.ServerSideEncryption === 'AES256' ? 'AES256' : 'NONE',
+        encryptionKeyId: result.SSEKMSKeyId || null,
+        uri: `s3://${this.bucket}/${key}`,
+      };
+    } catch (error) {
+      if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) return null;
+      throw error;
+    }
+  }
+
+  async download({ key, expectedSha256, maxBytes = this.maxBytes }) {
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, ChecksumMode: 'ENABLED' }));
+    const sizeBytes = Number(result.ContentLength || 0);
+    if (sizeBytes > maxBytes) throw Object.assign(new Error('Stored artifact exceeds configured download limit'), { code: 'ARTIFACT_TOO_LARGE' });
+    const verifier = hashAndCount(maxBytes, expectedSha256 || result.Metadata?.sha256 || undefined);
+    return { stream: result.Body.pipe(verifier), sizeBytes, key, uri: `s3://${this.bucket}/${key}`, encryptionMode: result.ServerSideEncryption === 'aws:kms' ? 'AWS_KMS' : result.ServerSideEncryption === 'AES256' ? 'AES256' : 'NONE' };
+  }
+
+  async downloadRange({ key, start, end }) {
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) throw Object.assign(new Error('Invalid storage range'), { code: 'INVALID_RANGE' });
+    try {
+      const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: `bytes=${start}-${end}`, ChecksumMode: 'ENABLED' }));
+      return { stream: result.Body, sizeBytes: Number(result.ContentLength || 0), key, uri: `s3://${this.bucket}/${key}` };
+    } catch (error) {
+      if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) throw Object.assign(new Error('Artifact not found'), { code: 'ARTIFACT_NOT_FOUND' });
+      throw error;
+    }
+  }
+
+  async delete(key) {
+    try {
+      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+      return { deleted: true, key };
+    } catch (error) {
+      throw Object.assign(error, { code: error.code || error.name || 'STORAGE_DELETE_FAILED', retryable: true });
+    }
+  }
 }
-function safeMetadata(metadata) { const out = {}; for (const [key, value] of Object.entries(metadata || {})) { if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) throw new TypeError('Unsafe object metadata key'); const text = String(value); if (Buffer.byteLength(text) > 2048) throw new TypeError('Object metadata value too large'); out[key] = text; } return out; }
-module.exports = { S3ObjectStorage, safeMetadata };
+
+function safeMetadata(metadata) {
+  const out = {};
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) throw new TypeError('Unsafe object metadata key');
+    const text = String(value);
+    if (Buffer.byteLength(text) > 2048) throw new TypeError('Object metadata value too large');
+    out[key] = text;
+  }
+  return out;
+}
+
+module.exports = { S3ObjectStorage, safeMetadata, ENCRYPTION_MODES };
