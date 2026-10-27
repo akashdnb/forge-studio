@@ -25,8 +25,7 @@ CREATE TABLE IF NOT EXISTS forge_release_schedules (
   last_execution_id text,
   created_by text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (id, current_version)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS forge_release_schedules_due_idx
   ON forge_release_schedules(status, next_run_at, priority, id);
@@ -103,7 +102,7 @@ CREATE TABLE IF NOT EXISTS forge_release_schedule_executions (
   UNIQUE(schedule_id, schedule_version, occurrence_key, destination)
 );
 CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_due_idx
-  ON forge_release_schedule_executions(status, planned_at, priority NULLS LAST);
+  ON forge_release_schedule_executions(status, planned_at);
 CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_scope_idx
   ON forge_release_schedule_executions(tenant_id, project_id, episode_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_run_idx
@@ -124,16 +123,6 @@ CREATE TABLE IF NOT EXISTS forge_release_schedule_audit (
 );
 CREATE INDEX IF NOT EXISTS forge_release_schedule_audit_scope_idx
   ON forge_release_schedule_audit(tenant_id, project_id, schedule_id, created_at DESC);
-
-ALTER TABLE forge_release_schedules
-  ADD CONSTRAINT forge_release_schedule_tenant_project_fk
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT;
-
-ALTER TABLE forge_release_schedule_executions
-  ADD CONSTRAINT forge_release_execution_version_fk
-  FOREIGN KEY (schedule_id, schedule_version)
-  REFERENCES forge_release_schedule_versions(schedule_id, version)
-  ON DELETE RESTRICT;
 
 CREATE TABLE IF NOT EXISTS forge_release_state (
   id boolean PRIMARY KEY DEFAULT true CHECK (id),
