@@ -5,6 +5,8 @@ const { validateRuntimeConfig, SecretCipher, RuntimePolicyStore, fingerprint } =
 const { assertJobRuntimeSnapshot } = require('./job-runtime-snapshot');
 const { JobQueue } = require('../persistence/job-queue');
 const { IncidentManager } = require('../incidents/incident-manager');
+const { installIncidentConcurrencyBridge } = require('../incidents/concurrency-bridge');
+installIncidentConcurrencyBridge();
 const validation = validateRuntimeConfig(process.env, { requirePersistence: true });
 if (!validation.ok) throw Object.assign(new Error(`Runtime configuration invalid: ${JSON.stringify(validation.issues)}`), { code: 'INVALID_RUNTIME_CONFIG' });
 if (!process.env.FORGE_SECRET_ENCRYPTION_KEY) throw Object.assign(new Error('FORGE_SECRET_ENCRYPTION_KEY is required for the production worker'), { code: 'MISSING_SECRET_ENCRYPTION_KEY' });
