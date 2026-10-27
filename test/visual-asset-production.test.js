@@ -1,6 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
+const path=require('node:path');
 const {parseJsonBody,shotSpec,shotCapability,createProductionVisualProviderRegistry}=require('../src/generation/visual-asset-production');
 
 test('visual provider responses retain provider request ids and media payloads',()=>{
@@ -25,13 +26,31 @@ test('production visual registry exposes only configured real providers',()=>{
   const original={...process.env};
   try{
     process.env.FORGE_IMAGE_GENERATION_COMMAND='node';
-    process.env.FORGE_IMAGE_GENERATION_ARGS='-e console.log(\"provider\")';
+    process.env.FORGE_IMAGE_GENERATION_ARGS='-e console.log("provider")';
     delete process.env.FORGE_VIDEO_GENERATION_COMMAND;
     delete process.env.FORGE_VIDEO_GENERATION_ENDPOINT;
-    const pool={query:async()=>({rows:[]})};
-    const facade=createProductionVisualProviderRegistry({pool});
+    const facade=createProductionVisualProviderRegistry({pool:{query:async()=>({rows:[]})}});
     assert.ok(facade.get('image-generation'));
     assert.equal(facade.get('video-generation'),null);
+  }finally{
+    for(const key of Object.keys(process.env))if(!(key in original))delete process.env[key];
+    Object.assign(process.env,original);
+  }
+});
+
+test('configured command adapter executes a real ffmpeg video provider and returns request provenance',async()=>{
+  const original={...process.env};
+  try{
+    process.env.FORGE_VIDEO_GENERATION_COMMAND=process.execPath;
+    process.env.FORGE_VIDEO_GENERATION_ARGS=`${path.join(__dirname,'fixtures','real-video-provider.js')} --input ${'${input}'} --output ${'${output}'}`;
+    const facade=createProductionVisualProviderRegistry({pool:{query:async()=>({rows:[]})}});
+    const provider=facade.registry.get('video-generation');
+    const result=await provider.execute({prompt:'real acceptance media',parameters:{durationSeconds:1},contentType:'video/mp4',idempotencyKey:'acceptance-request-1'},{timeoutMs:30000});
+    assert.equal(result.artifacts[0].contentType,'video/mp4');
+    assert.ok(Buffer.isBuffer(result.artifacts[0].content));
+    assert.ok(result.artifacts[0].content.length>1000);
+    assert.equal(result.artifacts[0].requestId,'acceptance-request-1');
+    assert.equal(result.artifacts[0].content.subarray(4,8).toString('ascii'),'ftyp');
   }finally{
     for(const key of Object.keys(process.env))if(!(key in original))delete process.env[key];
     Object.assign(process.env,original);
