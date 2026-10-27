@@ -3,251 +3,39 @@
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-
 const execFileAsync = promisify(execFile);
+
 const SCHEMA_VERSION = 'forge-package-attestation-v1';
 const SAFE_REATTEST_REASONS = new Set(['TOOLCHAIN_MISMATCH', 'SIGNATURE_INVALID', 'ATTESTATION_EXPIRED']);
 const SECRET_KEY_PATTERN = /(secret|token|password|credential|api[_-]?key|private[_-]?key|authorization|cookie|session)/i;
 
-function canonicalize(value) {
-  if (value === undefined) return null;
-  if (value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(canonicalize);
-  return Object.keys(value).sort().reduce((out, key) => {
-    out[key] = canonicalize(value[key]);
-    return out;
-  }, {});
-}
+function canonicalize(value) { if (value === undefined) return null; if (value === null || typeof value !== 'object') return value; if (Array.isArray(value)) return value.map(canonicalize); return Object.keys(value).sort().reduce((out, key) => { out[key] = canonicalize(value[key]); return out; }, {}); }
+function canonicalJson(value) { return JSON.stringify(canonicalize(value)); }
+function sha256(value) { return crypto.createHash('sha256').update(Buffer.isBuffer(value) ? value : String(value)).digest('hex'); }
+function hmac256(value, secret) { return secret ? crypto.createHmac('sha256', secret).update(value).digest('hex') : null; }
+function redactSecrets(value) { if (Array.isArray(value)) return value.map(redactSecrets); if (!value || typeof value !== 'object') return value; return Object.keys(value).reduce((out, key) => { out[key] = SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : redactSecrets(value[key]); return out; }, {}); }
 
-function canonicalJson(value) {
-  return JSON.stringify(canonicalize(value));
-}
+function toolchainFingerprint(toolchain = {}) { const safe = redactSecrets({ node: toolchain.node || process.version, platform: toolchain.platform || process.platform, arch: toolchain.arch || process.arch, ffmpeg: toolchain.ffmpeg || null, ffprobe: toolchain.ffprobe || null, packageBuilder: toolchain.packageBuilder || 'forge-package-builder-v1', builderRevision: toolchain.builderRevision || process.env.FORGE_BUILD_REVISION || 'unknown' }); return { ...safe, fingerprint: sha256(canonicalJson(safe)) }; }
+async function commandVersion(command) { try { const r = await execFileAsync(command, ['-version'], { timeout: 5000, maxBuffer: 32768 }); return String(r.stdout || r.stderr || '').split(/\r?\n/)[0].trim() || null; } catch { return null; } }
+async function collectToolchain({ ffmpegCommand = process.env.FORGE_FFMPEG_COMMAND || 'ffmpeg', ffprobeCommand = process.env.FORGE_FFPROBE_COMMAND || 'ffprobe' } = {}) { const [ffmpeg, ffprobe] = await Promise.all([commandVersion(ffmpegCommand), commandVersion(ffprobeCommand)]); return toolchainFingerprint({ ffmpeg, ffprobe }); }
 
-function sha256(value) {
-  return crypto.createHash('sha256').update(Buffer.isBuffer(value) ? value : String(value)).digest('hex');
-}
+function dependencyInventory(rows = []) { const byVersion = new Map(); for (const row of rows) { if (!row?.id || !row.version_id || !row.content_hash) continue; const item = { artifactId: row.id, versionId: row.version_id, kind: row.kind, contentHash: row.content_hash, mediaType: row.media_type || null, inputVersionIds: Array.isArray(row.input_version_ids) ? [...row.input_version_ids].sort() : [] }; const current = byVersion.get(row.version_id); if (current && current.contentHash !== item.contentHash) current.conflict = true; else if (!current) byVersion.set(row.version_id, item); } return [...byVersion.values()].sort((a,b) => `${a.versionId}:${a.artifactId}`.localeCompare(`${b.versionId}:${b.artifactId}`)); }
 
-function hmac256(value, secret) {
-  if (!secret) return null;
-  return crypto.createHmac('sha256', secret).update(value).digest('hex');
-}
+function buildCanonicalInputs({ episode, packageRecord, finalMedia, qa, approval, metadata, dependencies, timeline, release, policyEpoch = null, toolchain }) { return canonicalize({ schemaVersion: SCHEMA_VERSION, tenantId: episode.tenant_id, projectId: episode.project_id, episodeId: episode.id, episodeRevision: Number(episode.revision || 0), episodeState: episode.state, sourceVersionIds: dependencies.map((d) => d.versionId), sourceArtifacts: dependencies, finalRender: { artifactId: finalMedia.id, versionId: finalMedia.version_id, contentHash: finalMedia.content_hash }, qa: { id: qa.id, status: qa.status, artifactId: qa.artifact_id, versionId: qa.version_id, checks: qa.checks || [] }, approval: { id: approval.id, decision: approval.decision, targetId: approval.target_id, targetVersionId: approval.target_version_id }, metadataHash: sha256(canonicalJson(metadata || {})), package: { artifactId: packageRecord.id, versionId: packageRecord.version_id, manifestHash: packageRecord.manifest_hash }, timelineHash: timeline ? sha256(canonicalJson(timeline)) : null, releaseEpoch: release?.epoch == null ? null : Number(release.epoch), policyEpoch: policyEpoch == null ? null : Number(policyEpoch), toolchain }); }
 
-function redactSecrets(value) {
-  if (Array.isArray(value)) return value.map(redactSecrets);
-  if (!value || typeof value !== 'object') return value;
-  return Object.keys(value).reduce((out, key) => {
-    out[key] = SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : redactSecrets(value[key]);
-    return out;
-  }, {});
-}
+function buildAttestation({ inputs, packageManifestHash, packageArtifactHash, generatedAt = null, operator = 'system', reason = 'package-build' }, signingSecret) { const payload = canonicalize({ schemaVersion: SCHEMA_VERSION, packageManifestHash, packageArtifactHash, buildFingerprint: sha256(canonicalJson(inputs)), inputs, generatedAt: generatedAt || null, operator, reason }); const payloadHash = sha256(canonicalJson(payload)); return { ...payload, payloadHash, signature: hmac256(payloadHash, signingSecret), signatureAlgorithm: 'HMAC-SHA256' }; }
+function verifyAttestationSignature(attestation, signingSecret) { if (!attestation?.payloadHash || !signingSecret || !attestation.signature) return false; const payload = { ...attestation }; delete payload.signature; delete payload.signatureAlgorithm; const expectedHash = sha256(canonicalJson(payload)); if (expectedHash !== attestation.payloadHash) return false; const expected = hmac256(expectedHash, signingSecret); return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(attestation.signature)); }
 
-function toolchainFingerprint(toolchain = {}) {
-  const safe = redactSecrets({
-    node: toolchain.node || process.version,
-    platform: toolchain.platform || process.platform,
-    arch: toolchain.arch || process.arch,
-    ffmpeg: toolchain.ffmpeg || null,
-    ffprobe: toolchain.ffprobe || null,
-    packageBuilder: toolchain.packageBuilder || 'forge-package-builder-v1',
-    builderRevision: toolchain.builderRevision || process.env.FORGE_BUILD_REVISION || 'unknown',
-  });
-  return { ...safe, fingerprint: sha256(canonicalJson(safe)) };
-}
+function diagnosticsForDrift({ attestation, currentInputs, packageHash, currentPackageHash, currentToolchain }) { const diagnostics = []; if (!attestation) diagnostics.push({ code: 'ATTESTATION_MISSING', severity: 'ERROR' }); else { const currentFingerprint = sha256(canonicalJson(currentInputs)); if (attestation.build_fingerprint !== currentFingerprint) diagnostics.push({ code: 'REPLAY_DIVERGENCE', severity: 'ERROR', expected: attestation.build_fingerprint, actual: currentFingerprint }); if (attestation.packageManifestHash !== packageHash) diagnostics.push({ code: 'MANIFEST_DRIFT', severity: 'ERROR' }); const storedToolchain = attestation.inputs?.toolchain?.fingerprint || attestation.toolchain?.fingerprint; if (storedToolchain && currentToolchain?.fingerprint && storedToolchain !== currentToolchain.fingerprint) diagnostics.push({ code: 'TOOLCHAIN_MISMATCH', severity: 'ERROR', expected: storedToolchain, actual: currentToolchain.fingerprint }); }
+  if (packageHash && currentPackageHash && packageHash !== currentPackageHash) diagnostics.push({ code: 'CHECKSUM_DRIFT', severity: 'ERROR', expected: packageHash, actual: currentPackageHash }); return diagnostics; }
+function assertSafeReattestation({ diagnostics, packagePublished, operatorApproved, reason }) { if (!operatorApproved) throw Object.assign(new Error('Operator approval is required for re-attestation'), { code: 'RE_ATTESTATION_APPROVAL_REQUIRED' }); if (packagePublished) throw Object.assign(new Error('Published packages cannot be re-attested'), { code: 'RE_ATTESTATION_UNSAFE' }); if (!SAFE_REATTEST_REASONS.has(reason)) throw Object.assign(new Error(`Re-attestation reason ${reason} is not safe`), { code: 'RE_ATTESTATION_UNSAFE' }); const blocking = (diagnostics || []).filter((item) => !SAFE_REATTEST_REASONS.has(item.code)); if (blocking.length) throw Object.assign(new Error('Re-attestation has unsafe integrity diagnostics'), { code: 'RE_ATTESTATION_UNSAFE', diagnostics: blocking }); }
 
-async function commandVersion(command, args = ['-version']) {
-  try {
-    const result = await execFileAsync(command, args, { timeout: 5000, maxBuffer: 32 * 1024 });
-    return String(result.stdout || result.stderr || '').split(/\r?\n/)[0].trim() || null;
-  } catch {
-    return null;
-  }
-}
+async function loadPackageContext(pool, packageArtifactId) { const result = await pool.query(`SELECT ep.*,e.id AS episode_id,e.project_id,p.tenant_id,e.state,e.revision,e.approved_render_id,e.current_render_id,e.metadata AS episode_metadata,a.version_id AS render_version_id,a.content_hash AS render_hash,rs.epoch AS release_epoch FROM episode_packages ep JOIN episodes e ON e.id=ep.episode_id JOIN projects p ON p.id=e.project_id JOIN artifacts a ON a.id=ep.final_media_artifact_id LEFT JOIN forge_release_state rs ON rs.id=true WHERE ep.id=$1`, [packageArtifactId]); const packageRow=result.rows[0]; if(!packageRow) throw Object.assign(new Error('Package not found'),{code:'PACKAGE_NOT_FOUND'}); const [qa,approval,deps,timeline,attestation]=await Promise.all([pool.query(`SELECT id,status,artifact_id,version_id,checks FROM qa_results WHERE episode_id=$1 AND artifact_id=$2 AND version_id=$3 ORDER BY created_at DESC LIMIT 1`,[packageRow.episode_id,packageRow.final_media_artifact_id,packageRow.final_media_version_id]),pool.query(`SELECT id,decision,target_id,target_version_id,decided_at FROM approvals WHERE episode_id=$1 AND stage='FINAL_RENDER' AND target_id=$2 AND target_version_id=$3 ORDER BY decided_at DESC LIMIT 1`,[packageRow.episode_id,packageRow.final_media_artifact_id,packageRow.final_media_version_id]),pool.query(`SELECT id,version_id,kind,content_hash,media_type,input_version_ids FROM artifacts WHERE episode_id=$1 AND content_hash IS NOT NULL ORDER BY version_id,id`,[packageRow.episode_id]),pool.query(`SELECT timeline FROM timeline_snapshots WHERE episode_id=$1 ORDER BY created_at DESC LIMIT 1`,[packageRow.episode_id]),pool.query(`SELECT * FROM package_attestations WHERE package_artifact_id=$1 ORDER BY attestation_version DESC LIMIT 1`,[packageArtifactId])]); return {packageRow,qa:qa.rows[0],approval:approval.rows[0],dependencies:dependencyInventory(deps.rows),timeline:timeline.rows[0]?.timeline||null,attestation:attestation.rows[0]||null}; }
 
-async function collectToolchain({ ffmpegCommand = process.env.FORGE_FFMPEG_COMMAND || 'ffmpeg', ffprobeCommand = process.env.FORGE_FFPROBE_COMMAND || 'ffprobe' } = {}) {
-  const [ffmpeg, ffprobe] = await Promise.all([commandVersion(ffmpegCommand), commandVersion(ffprobeCommand)]);
-  return toolchainFingerprint({ ffmpeg, ffprobe });
-}
+async function attestPackage({ pool, packageArtifactId, operator='system', reason='package-build', signingSecret=process.env.FORGE_ATTESTATION_SIGNING_SECRET, toolchain=null, policyEpoch=null, reattest=false, operatorApproved=false }={}) { if(!pool?.query) throw new TypeError('pool is required'); if(!signingSecret) throw Object.assign(new Error('FORGE_ATTESTATION_SIGNING_SECRET is required'),{code:'ATTESTATION_SIGNING_UNAVAILABLE'}); const c=await loadPackageContext(pool,packageArtifactId); const {packageRow,qa,approval,dependencies,timeline,attestation:previous}=c; if(!qa||!['PASSED','WARNINGS'].includes(qa.status)) throw Object.assign(new Error('Package dependencies do not have passing QA'),{code:'QA_BLOCKED'}); if(!approval||approval.decision!=='APPROVED') throw Object.assign(new Error('Package dependencies do not have final approval'),{code:'APPROVAL_BLOCKED'}); if(packageRow.approved_render_id!==packageRow.final_media_artifact_id||packageRow.current_render_id!==packageRow.final_media_artifact_id) throw Object.assign(new Error('Package render provenance is stale'),{code:'PROVENANCE_DRIFT'}); const tool=toolchain||await collectToolchain(); const inputs=buildCanonicalInputs({episode:packageRow,packageRecord:packageRow,finalMedia:{id:packageRow.final_media_artifact_id,version_id:packageRow.final_media_version_id,content_hash:packageRow.render_hash},qa,approval,metadata:packageRow.episode_metadata||{},dependencies,timeline,release:{epoch:packageRow.release_epoch},policyEpoch,toolchain:tool}); const currentFingerprint=sha256(canonicalJson(inputs)); if(reattest){const d=diagnosticsForDrift({attestation:previous,currentInputs:inputs,packageHash:packageRow.manifest_hash,currentPackageHash:packageRow.manifest_hash,currentToolchain:tool}); assertSafeReattestation({diagnostics:d,packagePublished:await isPackagePublished(pool,packageArtifactId),operatorApproved,reason});} else if(previous?.status==='VERIFIED'&&previous.build_fingerprint===currentFingerprint) return {attestationId:previous.id,attestationVersion:previous.attestation_version,buildFingerprint:currentFingerprint,idempotent:true,status:previous.status}; const payload=buildAttestation({inputs,packageManifestHash:packageRow.manifest_hash,packageArtifactHash:packageRow.final_media_artifact_id,operator,reason},signingSecret); const inserted=await pool.query(`INSERT INTO package_attestations(package_artifact_id,package_version_id,episode_id,tenant_id,project_id,attestation_version,build_fingerprint,payload_hash,signature,signature_algorithm,status,inputs,toolchain,diagnostics,created_by) VALUES($1,$2,$3,$4,$5,COALESCE((SELECT max(attestation_version)+1 FROM package_attestations WHERE package_artifact_id=$1),1),$6,$7,$8,$9,'VERIFIED',$10::jsonb,$11::jsonb,$12::jsonb,$13) ON CONFLICT(package_artifact_id,build_fingerprint) DO UPDATE SET status='VERIFIED',signature=EXCLUDED.signature,diagnostics=EXCLUDED.diagnostics,updated_at=now() RETURNING *`,[packageArtifactId,packageRow.version_id,packageRow.episode_id,packageRow.tenant_id,packageRow.project_id,currentFingerprint,payload.payloadHash,payload.signature,payload.signatureAlgorithm,JSON.stringify(inputs),JSON.stringify(tool),JSON.stringify([]),operator]); return {attestationId:inserted.rows[0].id,attestationVersion:inserted.rows[0].attestation_version,buildFingerprint:currentFingerprint,payloadHash:payload.payloadHash,status:inserted.rows[0].status,idempotent:false}; }
 
-function dependencyInventory(rows = []) {
-  const byVersion = new Map();
-  for (const row of rows) {
-    if (!row?.id || !row.version_id || !row.content_hash) continue;
-    const current = byVersion.get(row.version_id);
-    const item = {
-      artifactId: row.id,
-      versionId: row.version_id,
-      kind: row.kind,
-      contentHash: row.content_hash,
-      mediaType: row.media_type || null,
-      inputVersionIds: Array.isArray(row.input_version_ids) ? [...row.input_version_ids].sort() : [],
-    };
-    if (current && current.contentHash !== item.contentHash) current.conflict = true;
-    else byVersion.set(row.version_id, item);
-  }
-  return [...byVersion.values()].sort((a, b) => `${a.versionId}:${a.artifactId}`.localeCompare(`${b.versionId}:${b.artifactId}`));
-}
+async function isPackagePublished(pool,packageArtifactId){const r=await pool.query(`SELECT 1 FROM publish_runs WHERE package_artifact_id=$1 AND status='PUBLISHED' LIMIT 1`,[packageArtifactId]);return Boolean(r.rows[0]);}
 
-function buildCanonicalInputs({ episode, packageRecord, finalMedia, qa, approval, metadata, dependencies, timeline, release, policyEpoch = null, toolchain }) {
-  const canonical = {
-    schemaVersion: SCHEMA_VERSION,
-    tenantId: episode.tenant_id,
-    projectId: episode.project_id,
-    episodeId: episode.id,
-    episodeRevision: Number(episode.revision || 0),
-    episodeState: episode.state,
-    sourceVersionIds: dependencies.map((d) => d.versionId),
-    sourceArtifacts: dependencies,
-    finalRender: {
-      artifactId: finalMedia.id,
-      versionId: finalMedia.version_id,
-      contentHash: finalMedia.content_hash,
-    },
-    qa: {
-      id: qa.id,
-      status: qa.status,
-      artifactId: qa.artifact_id,
-      versionId: qa.version_id,
-      checks: qa.checks || [],
-    },
-    approval: {
-      id: approval.id,
-      decision: approval.decision,
-      targetId: approval.target_id,
-      targetVersionId: approval.target_version_id,
-    },
-    metadataHash: sha256(canonicalJson(metadata || {})),
-    package: {
-      artifactId: packageRecord.id,
-      versionId: packageRecord.version_id,
-      manifestHash: packageRecord.manifest_hash,
-    },
-    timelineHash: timeline ? sha256(canonicalJson(timeline)) : null,
-    releaseEpoch: release?.epoch == null ? null : Number(release.epoch),
-    policyEpoch: policyEpoch == null ? null : Number(policyEpoch),
-    toolchain,
-  };
-  return canonicalize(canonical);
-}
+async function verifyPackageAttestation({pool,packageArtifactId,signingSecret=process.env.FORGE_ATTESTATION_SIGNING_SECRET,policyEpoch=null}={}){if(!pool?.query)throw new TypeError('pool is required');const c=await loadPackageContext(pool,packageArtifactId);const {packageRow,qa,approval,dependencies,timeline,attestation}=c;const currentToolchain=await collectToolchain();const inputs=buildCanonicalInputs({episode:packageRow,packageRecord:packageRow,finalMedia:{id:packageRow.final_media_artifact_id,version_id:packageRow.final_media_version_id,content_hash:packageRow.render_hash},qa:qa||{},approval:approval||{},metadata:packageRow.episode_metadata||{},dependencies,timeline,release:{epoch:packageRow.release_epoch},policyEpoch,toolchain:currentToolchain});const diagnostics=diagnosticsForDrift({attestation,currentInputs:inputs,packageHash:packageRow.manifest_hash,currentPackageHash:packageRow.manifest_hash,currentToolchain});if(attestation&&!verifyAttestationSignature(attestation,signingSecret))diagnostics.push({code:'SIGNATURE_INVALID',severity:'ERROR'});if(!qa||!['PASSED','WARNINGS'].includes(qa.status))diagnostics.push({code:'QA_BLOCKED',severity:'ERROR'});if(!approval||approval.decision!=='APPROVED')diagnostics.push({code:'APPROVAL_BLOCKED',severity:'ERROR'});if(packageRow.approved_render_id!==packageRow.final_media_artifact_id||packageRow.current_render_id!==packageRow.final_media_artifact_id)diagnostics.push({code:'PROVENANCE_DRIFT',severity:'ERROR'});if(packageRow.status!=='READY')diagnostics.push({code:'PACKAGE_NOT_READY',severity:'ERROR'});if(dependencies.some((item)=>item.conflict))diagnostics.push({code:'DEPENDENCY_CONFLICT',severity:'ERROR'});return {ok:diagnostics.length===0,packageArtifactId,packageVersionId:packageRow.version_id,buildFingerprint:attestation?.build_fingerprint||sha256(canonicalJson(inputs)),diagnostics,attestationVersion:attestation?.attestation_version||null,status:diagnostics.length?'DRIFTED':'VERIFIED'};}
 
-function buildAttestation({ inputs, packageManifestHash, packageArtifactHash, generatedAt = null, operator = 'system', reason = 'package-build' }, signingSecret) {
-  const payload = canonicalize({
-    schemaVersion: SCHEMA_VERSION,
-    packageManifestHash,
-    packageArtifactHash,
-    buildFingerprint: sha256(canonicalJson(inputs)),
-    inputs,
-    generatedAt: generatedAt || null,
-    operator,
-    reason,
-  });
-  const payloadHash = sha256(canonicalJson(payload));
-  return {
-    ...payload,
-    payloadHash,
-    signature: hmac256(payloadHash, signingSecret),
-    signatureAlgorithm: signingSecret ? 'HMAC-SHA256' : 'UNSIGNED',
-  };
-}
-
-function verifyAttestationSignature(attestation, signingSecret) {
-  if (!attestation?.payloadHash || !signingSecret || !attestation.signature) return false;
-  const payload = { ...attestation };
-  delete payload.signature;
-  delete payload.signatureAlgorithm;
-  const expectedPayloadHash = sha256(canonicalJson(payload));
-  if (expectedPayloadHash !== attestation.payloadHash) return false;
-  const expected = hmac256(expectedPayloadHash, signingSecret);
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(attestation.signature));
-}
-
-function diagnosticsForDrift({ attestation, currentInputs, packageHash, currentPackageHash }) {
-  const diagnostics = [];
-  if (!attestation) diagnostics.push({ code: 'ATTESTATION_MISSING', severity: 'ERROR' });
-  else {
-    const currentFingerprint = sha256(canonicalJson(currentInputs));
-    if (attestation.buildFingerprint !== currentFingerprint) diagnostics.push({ code: 'REPLAY_DIVERGENCE', severity: 'ERROR', expected: attestation.buildFingerprint, actual: currentFingerprint });
-    if (attestation.packageManifestHash !== packageHash) diagnostics.push({ code: 'MANIFEST_DRIFT', severity: 'ERROR' });
-  }
-  if (packageHash && currentPackageHash && packageHash !== currentPackageHash) diagnostics.push({ code: 'CHECKSUM_DRIFT', severity: 'ERROR', expected: packageHash, actual: currentPackageHash });
-  return diagnostics;
-}
-
-function assertSafeReattestation({ diagnostics, packagePublished, operatorApproved, reason }) {
-  if (!operatorApproved) throw Object.assign(new Error('Operator approval is required for re-attestation'), { code: 'RE_ATTESTATION_APPROVAL_REQUIRED' });
-  if (packagePublished) throw Object.assign(new Error('Published packages cannot be re-attested'), { code: 'RE_ATTESTATION_UNSAFE' });
-  if (!SAFE_REATTEST_REASONS.has(reason)) throw Object.assign(new Error(`Re-attestation reason ${reason} is not safe`), { code: 'RE_ATTESTATION_UNSAFE' });
-  const blocking = (diagnostics || []).filter((item) => !SAFE_REATTEST_REASONS.has(item.code));
-  if (blocking.length) throw Object.assign(new Error('Re-attestation has unsafe integrity diagnostics'), { code: 'RE_ATTESTATION_UNSAFE', diagnostics: blocking });
-}
-
-async function loadPackageContext(pool, packageArtifactId) {
-  const result = await pool.query(`SELECT ep.*, e.id AS episode_id, e.project_id, e.tenant_id, e.state AS episode_state, e.revision,
-    e.approved_render_id, e.current_render_id, e.metadata AS episode_metadata,
-    a.id AS render_id, a.version_id AS render_version_id, a.content_hash AS render_hash,
-    rs.epoch AS release_epoch
-    FROM episode_packages ep
-    JOIN episodes e ON e.id=ep.episode_id
-    JOIN projects p ON p.id=e.project_id
-    JOIN artifacts a ON a.id=ep.final_media_artifact_id
-    LEFT JOIN forge_release_state rs ON rs.id=true
-    WHERE ep.id=$1`, [packageArtifactId]);
-  const packageRow = result.rows[0];
-  if (!packageRow) throw Object.assign(new Error('Package not found'), { code: 'PACKAGE_NOT_FOUND' });
-  const [qa, approval, deps, timeline, attestation] = await Promise.all([
-    pool.query(`SELECT id,status,artifact_id,version_id,checks FROM qa_results WHERE episode_id=$1 AND artifact_id=$2 AND version_id=$3 ORDER BY created_at DESC LIMIT 1`, [packageRow.episode_id, packageRow.final_media_artifact_id, packageRow.final_media_version_id]),
-    pool.query(`SELECT id,decision,target_id,target_version_id,decided_at FROM approvals WHERE episode_id=$1 AND stage='FINAL_RENDER' AND target_id=$2 AND target_version_id=$3 ORDER BY decided_at DESC LIMIT 1`, [packageRow.episode_id, packageRow.final_media_artifact_id, packageRow.final_media_version_id]),
-    pool.query(`SELECT id,version_id,kind,content_hash,media_type,input_version_ids FROM artifacts WHERE episode_id=$1 AND content_hash IS NOT NULL ORDER BY version_id,id`, [packageRow.episode_id]),
-    pool.query(`SELECT id,version_id,timeline,content_hash FROM timeline_snapshots WHERE episode_id=$1 ORDER BY created_at DESC LIMIT 1`, [packageRow.episode_id]),
-    pool.query(`SELECT * FROM package_attestations WHERE package_artifact_id=$1 ORDER BY attestation_version DESC LIMIT 1`, [packageArtifactId]),
-  ]);
-  return { packageRow, qa: qa.rows[0], approval: approval.rows[0], dependencies: dependencyInventory(deps.rows), timeline: timeline.rows[0]?.timeline || null, attestation: attestation.rows[0] || null };
-}
-
-async function attestPackage({ pool, packageArtifactId, operator = 'system', reason = 'package-build', signingSecret = process.env.FORGE_ATTESTATION_SIGNING_SECRET, toolchain = null, policyEpoch = null, reattest = false, operatorApproved = false } = {}) {
-  if (!pool?.query) throw new TypeError('pool is required');
-  if (!signingSecret) throw Object.assign(new Error('FORGE_ATTESTATION_SIGNING_SECRET is required'), { code: 'ATTESTATION_SIGNING_UNAVAILABLE' });
-  const context = await loadPackageContext(pool, packageArtifactId);
-  const { packageRow, qa, approval, dependencies, timeline, attestation: previous } = context;
-  if (!qa || !['PASSED', 'WARNINGS'].includes(qa.status)) throw Object.assign(new Error('Package dependencies do not have passing QA'), { code: 'QA_BLOCKED' });
-  if (!approval || approval.decision !== 'APPROVED') throw Object.assign(new Error('Package dependencies do not have final approval'), { code: 'APPROVAL_BLOCKED' });
-  if (packageRow.approved_render_id !== packageRow.final_media_artifact_id || packageRow.current_render_id !== packageRow.final_media_artifact_id) throw Object.assign(new Error('Package render provenance is stale'), { code: 'PROVENANCE_DRIFT' });
-  const tool = toolchain || await collectToolchain();
-  const inputs = buildCanonicalInputs({ episode: packageRow, packageRecord: packageRow, finalMedia: { id: packageRow.final_media_artifact_id, version_id: packageRow.final_media_version_id, content_hash: packageRow.render_hash }, qa, approval, metadata: packageRow.episode_metadata || {}, dependencies, timeline, release: { epoch: packageRow.release_epoch }, policyEpoch, toolchain: tool });
-  const currentFingerprint = sha256(canonicalJson(inputs));
-  const packageHash = packageRow.manifest_hash;
-  if (reattest) {
-    const currentDiagnostics = diagnosticsForDrift({ attestation: previous, currentInputs: inputs, packageHash, currentPackageHash: packageRow.manifest_hash });
-    assertSafeReattestation({ diagnostics: currentDiagnostics, packagePublished: await isPackagePublished(pool, packageArtifactId), operatorApproved, reason });
-  } else if (previous?.status === 'VERIFIED' && previous.build_fingerprint === currentFingerprint) {
-    return { attestationId: previous.id, attestationVersion: previous.attestation_version, buildFingerprint: currentFingerprint, idempotent: true, status: previous.status };
-  }
-  const payload = buildAttestation({ inputs, packageManifestHash: packageHash, packageArtifactHash: packageRow.final_media_artifact_id, operator, reason }, signingSecret);
-  const inserted = await pool.query(`INSERT INTO package_attestations(package_artifact_id,package_version_id,episode_id,tenant_id,project_id,attestation_version,build_fingerprint,payload_hash,signature,signature_algorithm,status,inputs,toolchain,diagnostics,created_by)
-    VALUES($1,$2,$3,$4,$5,COALESCE((SELECT max(attestation_version)+1 FROM package_attestations WHERE package_artifact_id=$1),1),$6,$7,$8,$9,'VERIFIED',$10::jsonb,$11::jsonb,$12::jsonb,$13)
-    ON CONFLICT(package_artifact_id,build_fingerprint) DO UPDATE SET status='VERIFIED',signature=EXCLUDED.signature,diagnostics=EXCLUDED.diagnostics,updated_at=now()
-    RETURNING *`, [packageArtifactId, packageRow.version_id, packageRow.episode_id, packageRow.tenant_id, packageRow.project_id, currentFingerprint, payload.payloadHash, payload.signature, payload.signatureAlgorithm, JSON.stringify(inputs), JSON.stringify(tool), JSON.stringify([]), operator]);
-  return { attestationId: inserted.rows[0].id, attestationVersion: inserted.rows[0].attestation_version, buildFingerprint: currentFingerprint, payloadHash: payload.payloadHash, status: inserted.rows[0].status, idempotent: false };
-}
-
-async function isPackagePublished(pool, packageArtifactId) {
-  const result = await pool.query(`SELECT 1 FROM publish_runs WHERE package_artifact_id=$1 AND status='PUBLISHED' LIMIT 1`, [packageArtifactId]);
-  return Boolean(result.rows[0]);
-}
-
-async function verifyPackageAttestation({ pool, packageArtifactId, signingSecret = process.env.FORGE_ATTESTATION_SIGNING_SECRET, policyEpoch = null } = {}) {
-  if (!pool?.query) throw new TypeError('pool is required');
-  const context = await loadPackageContext(pool, packageArtifactId);
-  const { packageRow, qa, approval, dependencies, timeline, attestation } = context;
-  const toolchain = attestation?.toolchain || await collectToolchain();
-  const inputs = buildCanonicalInputs({ episode: packageRow, packageRecord: packageRow, finalMedia: { id: packageRow.final_media_artifact_id, version_id: packageRow.final_media_version_id, content_hash: packageRow.render_hash }, qa: qa || {}, approval: approval || {}, metadata: packageRow.episode_metadata || {}, dependencies, timeline, release: { epoch: packageRow.release_epoch }, policyEpoch, toolchain });
-  const diagnostics = diagnosticsForDrift({ attestation, currentInputs: inputs, packageHash: packageRow.manifest_hash, currentPackageHash: packageRow.manifest_hash });
-  if (attestation && !verifyAttestationSignature(attestation, signingSecret)) diagnostics.push({ code: 'SIGNATURE_INVALID', severity: 'ERROR' });
-  const missing = dependencies.filter((item) => !item.contentHash || !item.versionId);
-  if (missing.length) diagnostics.push({ code: 'MISSING_DEPENDENCY', severity: 'ERROR', count: missing.length });
-  if (dependencies.some((item) => item.conflict)) diagnostics.push({ code: 'DEPENDENCY_CONFLICT', severity: 'ERROR' });
-  if (packageRow.status !== 'READY') diagnostics.push({ code: 'PACKAGE_NOT_READY', severity: 'ERROR' });
-  if (packageRow.render_hash !== packageRow.render_hash) diagnostics.push({ code: 'RENDER_CHECKSUM_DRIFT', severity: 'ERROR' });
-  return { ok: diagnostics.length === 0, packageArtifactId, packageVersionId: packageRow.version_id, buildFingerprint: attestation?.build_fingerprint || sha256(canonicalJson(inputs)), diagnostics, attestationVersion: attestation?.attestation_version || null, status: diagnostics.length ? 'DRIFTED' : 'VERIFIED' };
-}
-
-module.exports = { SCHEMA_VERSION, SAFE_REATTEST_REASONS, canonicalize, canonicalJson, sha256, redactSecrets, toolchainFingerprint, collectToolchain, dependencyInventory, buildCanonicalInputs, buildAttestation, verifyAttestationSignature, diagnosticsForDrift, assertSafeReattestation, loadPackageContext, attestPackage, verifyPackageAttestation, isPackagePublished };
+module.exports={SCHEMA_VERSION,SAFE_REATTEST_REASONS,canonicalize,canonicalJson,sha256,redactSecrets,toolchainFingerprint,collectToolchain,dependencyInventory,buildCanonicalInputs,buildAttestation,verifyAttestationSignature,diagnosticsForDrift,assertSafeReattestation,loadPackageContext,attestPackage,verifyPackageAttestation,isPackagePublished};
