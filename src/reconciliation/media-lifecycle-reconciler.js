@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { randomUUID } = require('node:crypto');
+const { verifyPackageIntegrity } = require('../attestation/package-integrity');
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 const NON_TERMINAL = new Set(['QUEUED', 'RUNNING']);
 const IMMUTABLE_KINDS = new Set(['render', 'audio', 'image', 'caption', 'package']);
@@ -22,12 +23,18 @@ class MediaLifecycleReconciler {
     const inputVersionIds = Array.isArray(artifact.input_version_ids) ? artifact.input_version_ids : [];
     if (inputVersionIds.length) { const result = await this.pool.query('SELECT COUNT(*)::int AS count FROM version_records WHERE episode_id=$1 AND id=ANY($2::text[])', [artifact.episode_id, inputVersionIds]); if (Number(result.rows[0]?.count || 0) !== inputVersionIds.length) return { healthy: false, code: 'INVALID_PROVENANCE', reason: 'artifact references a missing or cross-episode input version' }; }
     if (artifact.stored_hash && artifact.stored_hash !== artifact.content_hash) return { healthy: false, code: 'CHECKSUM_MISMATCH', reason: 'database storage checksum differs from artifact checksum' };
+    if (artifact.kind === 'package') {
+      try {
+        const integrity = await verifyPackageIntegrity({ pool: this.pool, packageArtifactId: artifact.id });
+        if (!integrity.ok) return { healthy: false, code: integrity.diagnostics[0]?.code || 'PACKAGE_ATTESTATION_BLOCKED', reason: 'package attestation/integrity verification failed', diagnostics: integrity.diagnostics };
+      } catch (error) { return { healthy: false, code: error.code || 'PACKAGE_ATTESTATION_BLOCKED', reason: error.message }; }
+    }
     try { const resolved = await this.storage.download({ key: artifact.storage_key, expectedSha256: artifact.content_hash }); await consume(resolved.stream, this.signal); return { healthy: true, code: 'HEALTHY' }; }
     catch (error) { return { healthy: false, code: error.code === 'ARTIFACT_NOT_FOUND' ? 'ARTIFACT_NOT_FOUND' : error.code === 'CHECKSUM_MISMATCH' ? 'CHECKSUM_MISMATCH' : 'ARTIFACT_CORRUPT', reason: error.message }; }
   }
   async recordRepair(client, runId, item) {
     const fingerprint = sha(json({ episodeId: item.episodeId, jobId: item.jobId, artifactId: item.artifactId, action: item.action, fromState: item.fromState, toState: item.toState, diagnostic: item.diagnostic }));
-    const result = await client.query(`INSERT INTO forge_reconciliation_repairs (id,run_id,fingerprint,episode_id,job_id,artifact_id,action,from_state,to_state,severity,diagnostics) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (fingerprint) DO NOTHING RETURNING id`, [randomUUID(), runId, fingerprint, item.episodeId || null, item.jobId || null, item.artifactId || null, item.action, item.fromState || null, item.toState || null, item.severity || 'INFO', json(item.diagnostic)]);
+    const result = await client.query(`INSERT INTO forge_reconciliation_repairs (id,run_id,fingerprint,episode_id,job_id,artifact_id,action,from_state,to_state,severity,diagnostics) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (fingerprint) DO NOTHING RETURNING id`, [randomUUID(), runId, item.episodeId || null, item.jobId || null, item.artifactId || null, item.action, item.fromState || null, item.toState || null, item.severity || 'INFO', json(item.diagnostic)]);
     return Boolean(result.rows[0]);
   }
   async reconcileJob(client, runId, job) {
