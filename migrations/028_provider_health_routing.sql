@@ -1,6 +1,7 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS provider_health_state (
+  id bigserial PRIMARY KEY,
   tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   provider text NOT NULL,
@@ -17,9 +18,9 @@ CREATE TABLE IF NOT EXISTS provider_health_state (
   probe_until timestamptz,
   last_event_id text,
   version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, project_id, provider, model, operation)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS provider_health_state_scope_uq ON provider_health_state(tenant_id, COALESCE(project_id,''), provider, model, operation);
 CREATE INDEX IF NOT EXISTS provider_health_state_status_idx ON provider_health_state(state, cooldown_until, updated_at DESC);
 CREATE INDEX IF NOT EXISTS provider_health_state_provider_idx ON provider_health_state(tenant_id, project_id, provider, operation, updated_at DESC);
 
