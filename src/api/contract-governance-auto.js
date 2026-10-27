@@ -1,1 +1,1 @@
-const{installApiContractGovernance}=require('./contract-governance');installApiContractGovernance();
+const{installApiContractGovernance}=require('./contract-governance');installApiContractGovernance();require('./client-contracts-auto');require('./client-contract-store-fix-auto');require('./client-contracts-extensions-auto');require('./client-contract-consumer-report-auto');require('./client-contract-import-auto');

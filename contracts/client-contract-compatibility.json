@@ -1,0 +1,7 @@
+{
+  "policyVersion": 1,
+  "approved": ["deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7"],
+  "rationale": {
+    "deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7": "Initial authoritative runtime contract publication. The existing checked-in v2 document contains routes not present in the registered runtime surface; this decision explicitly accepts the generated runtime contract as the authoritative baseline and does not approve future breaking changes."
+  }
+}
