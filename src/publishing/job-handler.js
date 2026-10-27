@@ -5,14 +5,16 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
+const { createStorageFromEnv } = require('../storage');
 const { createDefaultDestinationRegistry } = require('./destination-contract');
 const { PublishService } = require('./publish-service');
 
-function createPublishingHandlers({ pool, storage, publisher = null, logger = console, now = () => new Date(), observability = null, registry = null } = {}) {
+function createPublishingHandlers({ pool, storage = null, publisher = null, logger = console, now = () => new Date(), observability = null, registry = null } = {}) {
   if (!pool || typeof pool.query !== 'function') throw new TypeError('pool is required');
-  if (!storage || typeof storage.download !== 'function') throw new TypeError('storage backend is required');
+  const backend = storage || createStorageFromEnv();
+  if (!backend || typeof backend.download !== 'function') throw new TypeError('storage backend is required');
   const destinationRegistry = registry || createDefaultDestinationRegistry({ pool, publisher, logger });
-  const service = new PublishService({ pool, storage, registry: destinationRegistry, logger, now, observability });
+  const service = new PublishService({ pool, storage: backend, registry: destinationRegistry, logger, now, observability });
   return {
     'publish:youtube': async (payload, job = {}) => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }),
     'publish:destination': async (payload, job = {}) => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }),
