@@ -18,8 +18,7 @@ async function providerSnapshot(pool, tenantId, projectId, episodeId) {
 }
 
 async function credentialSnapshot(pool, tenantId, projectId, planId) {
-  const leases = (await pool.query(`SELECT credential_id,credential_version,provider,model,purpose,execution_epoch,fencing_token,state,expires_at FROM forge_credential_access_leases WHERE tenant_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND (workflow_id=$3 OR workflow_id IS NULL) AND state IN ('HELD','REVOKED','EXPIRED') ORDER BY credential_id,credential_version,id`, [tenantId, projectId, planId])).rows;
-  return leases;
+  return (await pool.query(`SELECT credential_id,credential_version,provider,model,purpose,workflow_id,job_id,attempt_id,execution_epoch,fencing_token,state,expires_at,revoked_at,released_at FROM forge_credential_access_leases WHERE tenant_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND (workflow_id=$3 OR job_id IN (SELECT id FROM forge_jobs WHERE payload->>'executionPlanId'=$3)) ORDER BY credential_id,credential_version,id`, [tenantId, projectId, planId])).rows;
 }
 
 async function buildEnvelope({pool, planId, tenantId, checkpoint, actor='system'}) {
@@ -95,9 +94,17 @@ async function admitReentry({pool,planId,tenantId,checkpointId,actor='workflow-c
   const cp=(await pool.query(`SELECT * FROM forge_workflow_checkpoints WHERE id=$1 AND plan_id=$2 AND tenant_id=$3`,[checkpointId,planId,tenantId])).rows[0];
   if(!cp) throw fail('CHECKPOINT_MISSING','Checkpoint not found');
   await validateCheckpoint({pool,checkpointId,tenantId,actor});
+  const stage=(await pool.query(`SELECT runtime_stage,job_id FROM forge_execution_plan_stages WHERE plan_id=$1 AND stage_id=$2`,[planId,cp.stage_id])).rows[0];
+  if(stage?.job_id){
+    const uncertain=(await pool.query(`SELECT 1 FROM forge_credential_usage_attestations a WHERE a.tenant_id=$1 AND a.job_id=$2 AND a.outcome='STARTED' AND NOT EXISTS (SELECT 1 FROM forge_credential_usage_attestations s WHERE s.tenant_id=a.tenant_id AND s.job_id=a.job_id AND s.attempt_id=a.attempt_id AND s.operation=a.operation AND s.outcome='SUCCEEDED') LIMIT 1`,[tenantId,stage.job_id])).rows[0];
+    if(uncertain)throw fail('REENTRY_SIDE_EFFECT_UNCERTAIN','An external provider operation started without a durable success attestation; quarantine or reconcile before replay');
+  }
+  if(stage?.runtime_stage==='PUBLISH'){
+    const publishing=(await pool.query(`SELECT 1 FROM publish_runs p JOIN episodes e ON e.id=p.episode_id WHERE e.id=(SELECT episode_id FROM forge_execution_plans WHERE id=$1) AND p.status IN ('UPLOADING','PUBLISHED') LIMIT 1`,[planId])).rows[0];
+    if(publishing)throw fail('REENTRY_PUBLISH_BOUNDARY','Publishing has an in-flight or completed external side effect; replay is blocked');
+  }
   const id=randomUUID();
-  const result=await pool.query(`INSERT INTO forge_workflow_reentry_attempts(id,checkpoint_id,tenant_id,plan_id,execution_epoch,requested_by,status,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,'ADMITTED',$7) RETURNING *`,[id,checkpointId,tenantId,planId,control.execution_epoch,actor,idempotencyKey]);
-  return result.rows[0];
+  return (await pool.query(`INSERT INTO forge_workflow_reentry_attempts(id,checkpoint_id,tenant_id,plan_id,execution_epoch,requested_by,status,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,'ADMITTED',$7) RETURNING *`,[id,checkpointId,tenantId,planId,control.execution_epoch,actor,idempotencyKey])).rows[0];
 }
 
 module.exports={canonical,hash,buildEnvelope,sealCheckpoint,validateCheckpoint,quarantineCheckpoint,admitReentry};
