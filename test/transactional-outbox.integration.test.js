@@ -10,7 +10,7 @@ let projectId;
 let episodeId;
 let tenantId;
 
-integration('transactional outbox preserves per-aggregate ordering under concurrent writers', async () => {
+integration('transactional outbox preserves ordering, integrity and payload redaction', async () => {
   process.env.FORGE_EVENT_SECRET_KEY ||= 'integration-test-secret-0123456789';
   pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 8 });
   projectId = `it-project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -29,6 +29,13 @@ integration('transactional outbox preserves per-aggregate ordering under concurr
   assert.equal(events.length, 12);
   assert.deepEqual(events.map((r) => Number(r.aggregate_sequence)), Array.from({ length: 12 }, (_, i) => i + 1));
   assert.equal(new Set(events.map((r) => r.ordering_key)).size, 1);
+
+  const redactedId = (await pool.query(`SELECT forge_capture_event('job.state.changed',$1,$2,'job','redaction-job',$3::jsonb) AS id`, [projectId, episodeId, JSON.stringify({ jobId: 'redaction-job', projectId, kind: 'integration', status: 'RUNNING', nested: [{ apiKey: 'do-not-leak' }, { password: 'do-not-leak' }] })])).rows[0].id;
+  const redacted = (await pool.query('SELECT payload,redacted_payload,payload_hash FROM forge_events WHERE id=$1', [redactedId])).rows[0];
+  assert.equal(redacted.payload.nested[0].apiKey, 'do-not-leak');
+  assert.equal(redacted.redacted_payload.nested[0].apiKey, '[REDACTED]');
+  assert.equal(redacted.redacted_payload.nested[1].password, '[REDACTED]');
+  assert.equal(redacted.payload_hash.length, 64);
 
   await assert.rejects(
     pool.query(`UPDATE forge_events SET payload='{}'::jsonb WHERE project_id=$1`, [projectId]),
