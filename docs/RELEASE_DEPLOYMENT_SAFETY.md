@@ -38,10 +38,11 @@ All release endpoints require an authenticated OWNER:
 - `POST /v1/ops/releases/:releaseId/rollback`
 - `GET /v1/ops/releases/health`
 - `GET /v1/ops/releases/diagnostics`
+- `GET /v1/ops/releases/metrics`
 
 ## Metrics and diagnostics
 
-The release health/diagnostics payloads expose the active epoch, active workload count, worker admission state, stale public-runner count, failed deployment checks and recent release state. These are intended to be scraped or bridged by the existing Operations Control Plane and incident detector.
+The release health/diagnostics payloads expose the active epoch, active workload count, worker admission state, stale public-runner count, failed deployment checks and recent release state. The metrics endpoint additionally returns grouped deployment-check, job, worker and public-runner execution counts. These are intended to be scraped or bridged by the existing Operations Control Plane and incident detector.
 
 ## Recovery invariants
 
