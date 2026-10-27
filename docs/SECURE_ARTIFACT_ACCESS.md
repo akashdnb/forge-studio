@@ -13,11 +13,13 @@ Content delivery uses a provider-independent storage interface. Responses set a 
 ## Authorization policy
 
 1. The artifact must belong to the requested episode/project.
-2. The actor must be the project owner or a `project_members` member. Artifact administrators and configured worker identities are explicit server-side policies, not client-supplied roles.
-3. The artifact and storage object must be `ACTIVE` and storage must be `READY` unless an explicit administrator recovery policy is used.
+2. The actor must be the project owner or a server-stored project member/actor declared in project access metadata. Artifact administrators and configured worker identities are explicit server-side policies, not client-supplied roles.
+3. The artifact lifecycle ledger must not be `QUARANTINED`, `DELETION_PENDING`, or `DELETED`, and storage must be `READY`, unless an explicit administrator recovery policy is used.
 4. The artifact version must be reachable from the episode's current-version/provenance graph or current/approved render roots.
 5. User downloads/streams require the episode to be `APPROVED`, `PUBLISHING`, or `PUBLISHED` and the artifact to be the approved render. Worker delivery is allowed only for configured worker actors with `purpose=worker`.
 6. Recovery access is administrator-only and is always auditable.
+
+An artifact that is no longer reachable from a delivery root is treated as superseded for delivery purposes, even though immutable provenance records remain retained.
 
 ## Security controls
 
@@ -27,7 +29,7 @@ Content delivery uses a provider-independent storage interface. Responses set a 
 - Full downloads verify SHA-256 and trusted content length. Range reads are bounded and verify the exact requested byte count against the trusted object size.
 - Multiple ranges and oversized ranges are rejected.
 - Access tokens use HMAC-SHA-256, actor/artifact/action binding, `nbf`, and short expiration. Tampering or expiration is denied before storage access.
-- Quarantined, deleted, superseded, missing, and corrupt artifacts are denied by default.
+- Quarantined, deleted, deletion-pending, superseded, missing, and corrupt artifacts are denied by default.
 - Audit events record access decisions and transfer sizes without raw content or storage credentials.
 - Client cache is private and short-lived; the immutable SHA-256 ETag is safe for conditional requests.
 
@@ -60,7 +62,7 @@ Rotate `FORGE_ARTIFACT_ACCESS_SECRET` as an operational deployment change. Exist
 
 ### Monitoring
 
-Watch HTTP 401/403/404/416/503 responses for the artifact routes, storage `MISSING`/`CORRUPT` states, and artifact access audit events. Repeated denial spikes can indicate IDOR probing or malformed-token attacks. Never log raw artifact content, signed URLs, access tokens, storage keys, or provider URLs.
+Watch `/internal/artifact-gateway/healthz`, `/internal/artifact-gateway/metrics`, HTTP 401/403/404/416/503 responses for artifact routes, storage `MISSING`/`CORRUPT` states, and artifact access audit events. Repeated denial spikes can indicate IDOR probing or malformed-token attacks. Never log raw artifact content, signed URLs, access tokens, storage keys, or provider URLs.
 
 ## Canonical consumer rule
 
