@@ -1,0 +1,57 @@
+{
+  "policyVersion": 1,
+  "service": "forge-studio-core",
+  "currentVersion": "v2",
+  "supportedVersions": ["v1", "v2"],
+  "defaultVersion": "v1",
+  "v1": {
+    "status": "deprecated",
+    "sunset": "2027-04-27T00:00:00Z",
+    "mediaType": "application/vnd.forge.v1+json"
+  },
+  "v2": {
+    "status": "current",
+    "mediaType": "application/vnd.forge.v2+json"
+  },
+  "routing": {
+    "path": ["/v1/...", "/v2/..."],
+    "accept": ["application/vnd.forge.v1+json", "application/vnd.forge.v2+json"],
+    "pathAndAcceptMustAgree": true
+  },
+  "compatibility": {
+    "breakingChanges": "new-major-version-only",
+    "additiveRequestFields": "allowed",
+    "additiveResponseFields": "allowed",
+    "clientsMustIgnoreUnknownResponseFields": true,
+    "unknownRequestFields": "preserve-existing-v1-behavior; strict-only-when-endpoint-schema-declares-it",
+    "statusCodesAreProtected": true,
+    "errorCodesAreProtected": true,
+    "securityRequirementsAreProtected": true,
+    "durableSemanticsAreProtected": true
+  },
+  "protectedSemantics": [
+    "tenant-isolation",
+    "authorization-and-rbac",
+    "durable-job-idempotency",
+    "job-state-and-dependency-transitions",
+    "artifact-content-addresses-and-provenance",
+    "episode-version-identity",
+    "approval-gates",
+    "budget-and-usage-decisions",
+    "callback-authentication",
+    "webhook-authentication"
+  ],
+  "validation": {
+    "ids": "non-empty strings <= 256 characters",
+    "pagination": "limit 1..200 and non-negative integer offset",
+    "idempotencyKeys": "8..255 characters, [A-Za-z0-9._:-]",
+    "errors": "{error:{code,message},requestId}",
+    "enums": "reject unsupported protected lifecycle values with INVALID_ENUM"
+  },
+  "deprecationTelemetry": {
+    "event": "api.version.request",
+    "legacyVersion": "v1",
+    "requiredHeaders": ["Deprecation", "Sunset", "Link"],
+    "boundedWindow": true
+  }
+}
