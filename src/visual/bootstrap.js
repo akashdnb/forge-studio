@@ -12,8 +12,8 @@ async function loadScenePlan(pool, episodeId, inputVersionIds = []) {
   return rows.rows.find((row) => row.kind === 'scene-plan') || null;
 }
 async function loadAssets(pool, episodeId) {
-  const result = await pool.query(`SELECT a.id,a.version_id,a.content_hash,a.media_type,a.metadata,a.content_json,s.status FROM artifacts a LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE a.episode_id=$1 AND a.kind IN ('image','video','asset') ORDER BY a.created_at ASC,a.id ASC`, [episodeId]);
-  return result.rows.filter((row) => !row.status || row.status === 'READY').map((row) => ({
+  const result = await pool.query(`SELECT id,version_id,content_hash,media_type,metadata,content_json FROM artifacts WHERE episode_id=$1 AND kind IN ('image','video','asset') ORDER BY created_at ASC,id ASC`, [episodeId]);
+  return result.rows.map((row) => ({
     id: row.id, versionId: row.version_id, contentHash: row.content_hash, mediaType: row.media_type, metadata: row.metadata || {},
     description: row.metadata?.description || row.content_json?.description || '', prompt: row.metadata?.prompt || row.content_json?.prompt || '', subject: row.metadata?.subject || row.content_json?.subject || '',
     location: row.metadata?.location || row.content_json?.location || null, role: row.metadata?.assetRole || row.metadata?.role || null, tags: row.metadata?.tags || row.content_json?.tags || [],
@@ -25,7 +25,7 @@ async function persistJsonVersion({ pool, episodeId, kind, baseVersionId, payloa
   const versionId = `${kind}:visual:${fingerprint}`;
   const artifactId = `${kind}-visual-artifact:${fingerprint}`;
   const checksum = contentHash(payload);
-  await pool.query(`INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,$3,$4::jsonb,$5,$6) ON CONFLICT (id) DO NOTHING`, [versionId, episodeId, kind, JSON.stringify(payload), checksum, actor || 'visual-continuity']);
+  await pool.query(`INSERT INTO version_records(id,episode_id,kind,parent_id,payload,content_hash,created_by) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) ON CONFLICT (id) DO NOTHING`, [versionId, episodeId, kind, baseVersionId || null, JSON.stringify(payload), checksum, actor || 'visual-continuity']);
   for (const dependency of [...new Set([baseVersionId, ...inputVersionIds].filter(Boolean))]) await pool.query('INSERT INTO version_dependencies(episode_id,version_id,depends_on_version_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [episodeId, versionId, dependency]);
   await pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,storage_uri,content_json,content_hash,media_type,source,input_version_ids,metadata,created_by) VALUES($1,$2,$3,$4,NULL,$5::jsonb,$6,'application/json','visual-continuity',$7::jsonb,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING`, [artifactId, episodeId, kind, versionId, JSON.stringify(payload), checksum, JSON.stringify(inputVersionIds), JSON.stringify({ visualRecipe: true, recipeVersion: visual.RECIPE_VERSION, baseVersionId, immutable: true }), actor || 'visual-continuity']);
   return { versionId, artifactId, checksum };
