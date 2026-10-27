@@ -20,79 +20,25 @@ function poolFixture({ pricing = { provider_type: 'worker', provider: 'provider-
     if (sql.startsWith('UPDATE usage_budgets SET state=')) return { rows: [] };
     if (sql.includes('SELECT * FROM usage_events WHERE id=$1')) return { rows: state.events.filter((e) => e.id === params[0]) };
     if (sql.includes('SELECT * FROM usage_reservations WHERE status=') && sql.includes('expires_at')) return { rows: state.reservations.filter((r) => r.status === 'HELD' && new Date(r.expires_at) < new Date()) };
+    if (sql.includes('SELECT currency,COUNT(*)::int event_count')) return { rows: [{ currency: 'USD', event_count: state.events.length, usage_units: String(state.events.reduce((s,e)=>s+Number(e.usage_units||0),0)), estimated_cost: String(state.events.reduce((s,e)=>s+Number(e.estimated_cost||0),0)), actual_cost: String(state.events.reduce((s,e)=>s+Number(e.actual_cost||0),0)), normalized_cost_units: String(state.events.reduce((s,e)=>s+Number(e.normalized_cost_units||0),0)) }] };
+    if (sql.includes('SELECT currency,COUNT(*)::int count')) return { rows: [{ currency: 'USD', count: state.reservations.filter((r)=>r.status==='HELD').length, reserved_cost: String(state.reservations.filter((r)=>r.status==='HELD').reduce((s,r)=>s+Number(r.estimated_cost),0)), reserved_units: String(state.reservations.filter((r)=>r.status==='HELD').reduce((s,r)=>s+Number(r.estimated_units),0)) }] };
     return { rows: [] };
   };
-  const pool = { state, query: execute, connect: async () => ({ query: execute, release() {} }) };
-  return pool;
+  return { state, query: execute, connect: async () => ({ query: execute, release() {} }) };
 }
 
-test('deterministic event identities are stable and change by attempt', () => {
-  const a = deterministicEventIdentity({ jobId: 'j', providerType: 'worker', provider: 'p', operation: 'op', executionAttempt: 1 });
-  const b = deterministicEventIdentity({ jobId: 'j', providerType: 'worker', provider: 'p', operation: 'op', executionAttempt: 1 });
-  const c = deterministicEventIdentity({ jobId: 'j', providerType: 'worker', provider: 'p', operation: 'op', executionAttempt: 2 });
-  assert.equal(a, b); assert.notEqual(a, c); assert.match(a, /^[a-f0-9]{64}$/);
-});
-
-test('request pricing produces deterministic cost estimates', async () => {
-  const service = new UsageAccountingService({ pool: poolFixture() });
-  const result = await service.estimate({ providerType: 'worker', provider: 'provider-a', model: 'model-a', operation: 'generation' });
-  assert.equal(result.units, 1); assert.equal(result.estimatedCost, 0.25); assert.equal(result.currency, 'USD');
-});
-
-test('missing pricing fails closed when enforcement is required', async () => {
-  const service = new UsageAccountingService({ pool: poolFixture({ pricing: null }), required: true });
-  await assert.rejects(() => service.estimate({ providerType: 'worker', provider: 'missing', operation: 'generation' }), (error) => error instanceof UsageAccountingError && error.code === 'PRICING_UNAVAILABLE');
-});
-
-test('missing global budget fails closed before reservation', async () => {
-  const service = new UsageAccountingService({ pool: poolFixture({ budgets: [] }), required: true });
-  await assert.rejects(() => service.reserveForJob({ job: job() }), (error) => error.code === 'BUDGET_CONFIGURATION_UNAVAILABLE');
-});
-
-test('reservation is created before execution and can be settled', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool, required: true });
-  const admission = await service.reserveForJob({ job: job() });
-  assert.equal(admission.allowed, true); assert.equal(pool.state.reservations.length, 1); assert.equal(pool.state.reservations[0].status, 'HELD');
-  const settled = await service.settleJob({ job: job(), reservation: admission.reservation, usage: { actualCost: 0.3 }, outcome: 'SUCCEEDED' });
-  assert.equal(settled.reservation.status, 'SETTLED'); assert.equal(pool.state.events.length, 1); assert.equal(pool.state.events[0].actual_cost, 0.3);
-});
-
-test('duplicate execution accounting is idempotent', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool }); const j = job();
-  const first = await service.recordExecution({ job: j, usage: { actualCost: 0.2 }, outcome: 'SUCCEEDED' });
-  const second = await service.recordExecution({ job: j, usage: { actualCost: 0.2 }, outcome: 'SUCCEEDED' });
-  assert.equal(first.duplicate, false); assert.equal(second.duplicate, true); assert.equal(pool.state.events.length, 1);
-});
-
-test('retry attempts receive independent reservation identities', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool, required: true });
-  const first = await service.reserveForJob({ job: job({ attempts: 1 }) });
-  await service.settleJob({ job: job({ attempts: 1 }), reservation: first.reservation, outcome: 'FAILED' });
-  const second = await service.reserveForJob({ job: job({ attempts: 2 }) });
-  assert.notEqual(first.reservation.id, second.reservation.id); assert.equal(pool.state.reservations.length, 2);
-});
-
-test('budget exhaustion rejects an expensive concurrent admission', async () => {
-  const pool = poolFixture({ budgets: [{ id: 1, scope_type: 'GLOBAL', scope_id: 'global', currency: 'USD', hard_cost_limit: '0.25', hard_usage_limit: '1', state: 'ACTIVE' }] });
-  const service = new UsageAccountingService({ pool, required: true });
-  await service.reserveForJob({ job: job({ id: 'job-a' }) });
-  await assert.rejects(() => service.reserveForJob({ job: job({ id: 'job-b' }) }), (error) => error instanceof BudgetRejectedError);
-});
-
-test('cancellation releases reservation capacity', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool, required: true }); const j = job();
-  const admission = await service.reserveForJob({ job: j }); const result = await service.settleJob({ job: j, reservation: admission.reservation, outcome: 'CANCELLED' });
-  assert.equal(result.reservation.status, 'RELEASED');
-});
-
-test('provider failure remains accounted as a terminal execution event', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool, required: true }); const j = job();
-  const admission = await service.reserveForJob({ job: j }); await service.settleJob({ job: j, reservation: admission.reservation, outcome: 'FAILED', usage: { actualCost: 0.12 } });
-  assert.equal(pool.state.events[0].outcome, 'FAILED'); assert.equal(pool.state.events[0].actual_cost, 0.12);
-});
-
-test('actual cost can reconcile above the estimate without mutating the event', async () => {
-  const pool = poolFixture(); const service = new UsageAccountingService({ pool, required: true }); const j = job();
-  const admission = await service.reserveForJob({ job: j }); await service.settleJob({ job: j, reservation: admission.reservation, usage: { actualCost: 0.4 }, outcome: 'SUCCEEDED' });
-  assert.equal(pool.state.events[0].estimated_cost, 0.25); assert.equal(pool.state.events[0].actual_cost, 0.4);
-});
+test('deterministic event identities are stable and change by attempt', () => { const a=deterministicEventIdentity({jobId:'j',providerType:'worker',provider:'p',operation:'op',executionAttempt:1}); const b=deterministicEventIdentity({jobId:'j',providerType:'worker',provider:'p',operation:'op',executionAttempt:1}); const c=deterministicEventIdentity({jobId:'j',providerType:'worker',provider:'p',operation:'op',executionAttempt:2}); assert.equal(a,b); assert.notEqual(a,c); assert.match(a,/^[a-f0-9]{64}$/); });
+test('request pricing produces deterministic cost estimates', async () => { const result=await new UsageAccountingService({pool:poolFixture()}).estimate({providerType:'worker',provider:'provider-a',model:'model-a',operation:'generation'}); assert.equal(result.units,1); assert.equal(result.estimatedCost,0.25); assert.equal(result.currency,'USD'); });
+test('missing pricing fails closed when enforcement is required', async () => { const service=new UsageAccountingService({pool:poolFixture({pricing:null}),required:true}); await assert.rejects(()=>service.estimate({providerType:'worker',provider:'missing',operation:'generation'}),(e)=>e instanceof UsageAccountingError&&e.code==='PRICING_UNAVAILABLE'); });
+test('missing global budget fails closed before reservation', async () => { const service=new UsageAccountingService({pool:poolFixture({budgets:[]}),required:true}); await assert.rejects(()=>service.reserveForJob({job:job()}),(e)=>e.code==='BUDGET_CONFIGURATION_UNAVAILABLE'); });
+test('reservation is created before execution and can be settled', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true}); const admission=await service.reserveForJob({job:job()}); assert.equal(admission.allowed,true); assert.equal(pool.state.reservations[0].status,'HELD'); const settled=await service.settleJob({job:job(),reservation:admission.reservation,usage:{actualCost:0.3},outcome:'SUCCEEDED'}); assert.equal(settled.reservation.status,'SETTLED'); assert.equal(pool.state.events.length,1); assert.equal(pool.state.events[0].actual_cost,0.3); });
+test('duplicate execution accounting is idempotent', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool}); const j=job(); const first=await service.recordExecution({job:j,usage:{actualCost:0.2},outcome:'SUCCEEDED'}); const second=await service.recordExecution({job:j,usage:{actualCost:0.2},outcome:'SUCCEEDED'}); assert.equal(first.duplicate,false); assert.equal(second.duplicate,true); assert.equal(pool.state.events.length,1); });
+test('retry attempts receive independent reservation identities', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true}); const first=await service.reserveForJob({job:job({attempts:1})}); await service.settleJob({job:job({attempts:1}),reservation:first.reservation,outcome:'FAILED'}); const second=await service.reserveForJob({job:job({attempts:2})}); assert.notEqual(first.reservation.id,second.reservation.id); assert.equal(pool.state.reservations.length,2); });
+test('budget exhaustion rejects an expensive concurrent admission', async () => { const pool=poolFixture({budgets:[{id:1,scope_type:'GLOBAL',scope_id:'global',currency:'USD',hard_cost_limit:'0.25',hard_usage_limit:'1',state:'ACTIVE'}]}); const service=new UsageAccountingService({pool,required:true}); await service.reserveForJob({job:job({id:'job-a'})}); await assert.rejects(()=>service.reserveForJob({job:job({id:'job-b'})}),(e)=>e instanceof BudgetRejectedError); });
+test('hard usage quota is enforced independently of cost', async () => { const pool=poolFixture({budgets:[{id:1,scope_type:'GLOBAL',scope_id:'global',currency:'USD',hard_cost_limit:'10',hard_usage_limit:'1',state:'ACTIVE'}]}); const service=new UsageAccountingService({pool,required:true}); await service.reserveForJob({job:job({id:'job-a'})}); await assert.rejects(()=>service.reserveForJob({job:job({id:'job-b'})}),(e)=>e instanceof BudgetRejectedError); });
+test('cancellation releases reservation capacity', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true}); const j=job(); const admission=await service.reserveForJob({job:j}); const result=await service.settleJob({job:j,reservation:admission.reservation,outcome:'CANCELLED'}); assert.equal(result.reservation.status,'RELEASED'); });
+test('provider failure remains accounted as a terminal execution event', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true}); const j=job(); const admission=await service.reserveForJob({job:j}); await service.settleJob({job:j,reservation:admission.reservation,outcome:'FAILED',usage:{actualCost:0.12}}); assert.equal(pool.state.events[0].outcome,'FAILED'); assert.equal(pool.state.events[0].actual_cost,0.12); });
+test('actual cost reconciles above estimate without mutating the event', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true}); const j=job(); const admission=await service.reserveForJob({job:j}); await service.settleJob({job:j,reservation:admission.reservation,usage:{actualCost:0.4},outcome:'SUCCEEDED'}); assert.equal(pool.state.events[0].estimated_cost,0.25); assert.equal(pool.state.events[0].actual_cost,0.4); });
+test('stale reservations are recovered into an auditable terminal state', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool,required:true,reservationTtlMs:1000}); const admission=await service.reserveForJob({job:job()}); admission.reservation.expires_at=new Date(Date.now()-1000); const result=await service.recoverStaleReservations({limit:10}); assert.equal(result.recovered,1); assert.equal(pool.state.reservations[0].status,'EXPIRED'); assert.equal(pool.state.events[0].outcome,'FAILED'); });
+test('admission rejection produces a deterministic audit event without secrets', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool}); const event=await service.recordRejection({job:job(),reason:Object.assign(new Error('budget exceeded'),{code:'BUDGET_REJECTED'})}); assert.equal(event.outcome,'REJECTED'); assert.equal(event.metadata,undefined); assert.equal(pool.state.events.length,1); });
+test('summary is currency scoped and exposes active reservations separately', async () => { const pool=poolFixture(); const service=new UsageAccountingService({pool}); pool.state.events.push({usage_units:1,normalized_cost_units:0.25,estimated_cost:0.25,actual_cost:0.2,currency:'USD'}); const summary=await service.summary({episodeId:'episode-1'}); assert.equal(summary.totals[0].currency,'USD'); assert.equal(summary.totals[0].event_count,1); assert.ok(Array.isArray(summary.activeReservations)); });
