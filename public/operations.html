@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Forge Operations</title><style>body{font-family:system-ui,sans-serif;margin:24px;background:#0d1117;color:#e6edf3}input,select,button{padding:8px;margin:4px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px}button{cursor:pointer}pre{white-space:pre-wrap;background:#161b22;padding:16px;border-radius:8px;max-height:520px;overflow:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{border:1px solid #30363d;border-radius:8px;padding:14px}</style></head>
+<body>
+<h1>Forge Operations Control Plane</h1>
+<p>OWNER-only operational diagnostics and guarded mutations. All mutations require a reason and idempotency key.</p>
+<div class="card"><input id="token" type="password" placeholder="Bearer token" size="52"><button onclick="health()">Health</button><button onclick="incidents()">Incidents</button><button onclick="jobs()">Jobs</button><button onclick="providers()">Providers</button><button onclick="audit()">Audit</button></div>
+<div class="grid"><div class="card"><h3>Job action</h3><input id="jobId" placeholder="Job ID"><select id="jobAction"><option>retry</option><option>requeue</option><option>cancel</option><option>fence</option><option>recover</option></select><input id="reason" placeholder="Reason (8+ chars)" size="42"><button onclick="act('job')">Preview/action</button></div><div class="card"><h3>Artifact quarantine</h3><input id="artifactId" placeholder="Artifact ID"><input id="artifactReason" placeholder="Reason" size="42"><button onclick="artifactAction()">Quarantine</button></div></div>
+<pre id="out">Ready.</pre>
+<script>
+const out=document.getElementById('out'); const token=()=>document.getElementById('token').value; const headers=()=>({'Authorization':`Bearer ${token()}`,'Content-Type':'application/json'});
+async function call(path,opts={}){const r=await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});const b=await r.json();out.textContent=JSON.stringify(b,null,2);return b}
+function health(){return call('/v1/ops/health')} function incidents(){return call('/v1/ops/incidents')} function jobs(){return call('/v1/ops/jobs?limit=50')} function providers(){return call('/v1/ops/providers?limit=50')} function audit(){return call('/v1/ops/audit?limit=50')}
+async function act(type){const id=document.getElementById('jobId').value;const action=document.getElementById('jobAction').value;const reason=document.getElementById('reason').value;return call('/v1/ops/actions/'+action,{method:'POST',body:JSON.stringify({targetType:type,targetId:id,reason,idempotencyKey:crypto.randomUUID()})})}
+function artifactAction(){const id=document.getElementById('artifactId').value;const reason=document.getElementById('artifactReason').value;return call('/v1/ops/actions/quarantine',{method:'POST',body:JSON.stringify({targetType:'artifact',targetId:id,reason,idempotencyKey:crypto.randomUUID()})})}
+</script></body></html>
