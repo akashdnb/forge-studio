@@ -117,16 +117,15 @@ CREATE INDEX IF NOT EXISTS forge_release_schedule_audit_scope_idx ON forge_relea
 
 CREATE TABLE IF NOT EXISTS forge_release_state (
   id boolean PRIMARY KEY DEFAULT true CHECK (id),
-  epoch bigint NOT NULL DEFAULT 1 CHECK (epoch > 0),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  epoch bigint NOT NULL DEFAULT 1 CHECK (epoch > 0)
 );
 INSERT INTO forge_release_state(id) VALUES(true) ON CONFLICT(id) DO NOTHING;
 
 CREATE OR REPLACE FUNCTION forge_fill_scheduled_publish_package() RETURNS trigger AS $$
 BEGIN
   IF COALESCE((NEW.metadata->>'scheduledRelease')::boolean, false) AND NEW.package_artifact_id IS NULL THEN
-    SELECT ep.id, ep.version_id, ep.manifest_hash
-      INTO NEW.package_artifact_id, NEW.package_version_id, NEW.package_hash
+    SELECT ep.id, ep.version_id
+      INTO NEW.package_artifact_id, NEW.package_version_id
       FROM episode_packages ep
      WHERE ep.episode_id = NEW.episode_id
        AND ep.final_media_artifact_id = NEW.render_artifact_id
@@ -139,8 +138,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS forge_scheduled_publish_package ON publish_runs;
-CREATE TRIGGER forge_scheduled_publish_package
-BEFORE INSERT ON publish_runs
-FOR EACH ROW EXECUTE FUNCTION forge_fill_scheduled_publish_package();
+CREATE TRIGGER forge_scheduled_publish_package BEFORE INSERT ON publish_runs FOR EACH ROW EXECUTE FUNCTION forge_fill_scheduled_publish_package();
 
 COMMIT;
