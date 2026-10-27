@@ -1,5 +1,6 @@
 'use strict';
 require('../usage/billing-worker-hook');
+require('../usage/billing-direct-hooks');
 require('../usage/billing-operator-bootstrap');
 require('../storage/artifact-lifecycle-bootstrap');
 const { UsageAccountingService } = require('../usage/usage-accounting');
