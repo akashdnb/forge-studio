@@ -1,0 +1,4 @@
+const test=require('node:test');const assert=require('node:assert/strict');const {FailureInjector}=require('../src/chaos/failure-injector');
+test('default injector is a no-op',async()=>{await new FailureInjector().trip('missing');});
+test('rules can delay/fail once with retry metadata',async()=>{const injector=new FailureInjector({point:{after:2,once:true,retryable:true,code:'SYNTH',message:'boom'}});await injector.trip('point');await assert.rejects(()=>injector.trip('point'),(error)=>error.code==='SYNTH'&&error.retryable===true);await injector.trip('point');});
+test('environment rules are parsed and invalid JSON fails closed',()=>{assert.ok(FailureInjector.fromEnv({FORGE_CHAOS_JSON:'{"x":{"once":true}}'}));assert.throws(()=>FailureInjector.fromEnv({FORGE_CHAOS_JSON:'not-json'}),/Invalid FORGE_CHAOS_JSON/);});
