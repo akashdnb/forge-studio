@@ -27,4 +27,10 @@ ALTER TABLE forge_workflow_checkpoints ADD COLUMN IF NOT EXISTS schema_hash char
 CREATE INDEX IF NOT EXISTS forge_jobs_schema_compat_idx ON forge_jobs(schema_family,schema_version,schema_hash,status);
 CREATE INDEX IF NOT EXISTS forge_execution_runs_schema_compat_idx ON forge_execution_runs(schema_family,schema_version,schema_hash,status);
 CREATE INDEX IF NOT EXISTS forge_execution_plans_schema_compat_idx ON forge_execution_plans(schema_family,schema_version,schema_hash,status);
+CREATE OR REPLACE FUNCTION forge_bind_workflow_job_schema() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE expected char(64); BEGIN SELECT canonical_hash INTO expected FROM forge_workflow_schema_versions WHERE family=COALESCE(NEW.schema_family,'job-payload') AND version=COALESCE(NEW.schema_version,1) AND status IN ('ACTIVE','RETIRED'); IF expected IS NULL THEN RAISE EXCEPTION 'UNKNOWN_WORKFLOW_SCHEMA' USING ERRCODE='P0001'; END IF; IF NEW.schema_hash IS NULL THEN NEW.schema_hash:=expected; ELSIF NEW.schema_hash IS DISTINCT FROM expected THEN RAISE EXCEPTION 'WORKFLOW_SCHEMA_HASH_MISMATCH' USING ERRCODE='P0001'; END IF; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS forge_jobs_schema_binding_guard ON forge_jobs;
+CREATE TRIGGER forge_jobs_schema_binding_guard BEFORE INSERT OR UPDATE OF schema_family,schema_version,schema_hash ON forge_jobs FOR EACH ROW EXECUTE FUNCTION forge_bind_workflow_job_schema();
+CREATE OR REPLACE FUNCTION forge_reject_schema_drift() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.schema_hash IS NOT NULL AND (NEW.schema_family IS DISTINCT FROM OLD.schema_family OR NEW.schema_version IS DISTINCT FROM OLD.schema_version OR NEW.schema_hash IS DISTINCT FROM OLD.schema_hash) THEN RAISE EXCEPTION 'IMMUTABLE_WORKFLOW_SCHEMA_BINDING' USING ERRCODE='P0001'; END IF; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS forge_jobs_schema_immutability_guard ON forge_jobs;
+CREATE TRIGGER forge_jobs_schema_immutability_guard BEFORE UPDATE ON forge_jobs FOR EACH ROW EXECUTE FUNCTION forge_reject_schema_drift();
 COMMIT;
