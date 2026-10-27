@@ -17,11 +17,7 @@ async function withVersionedApi(run) {
 async function request(base, path, options = {}) {
   const response = await fetch(base + path, {
     ...options,
-    headers: {
-      authorization: 'Bearer test-token',
-      ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
-      ...(options.headers || {}),
-    },
+    headers: { authorization: 'Bearer test-token', ...(options.body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.headers || {}) },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   return { response, body: await response.json() };
@@ -34,12 +30,11 @@ test('v2 live handler is a semantic adapter over the existing v1 durable route',
     assert.equal(v2.response.headers.get('x-api-version'), 'v2');
     assert.equal(v2.response.headers.get('x-api-compatibility'), 'current');
     assert.equal(v2.body.item.id, 'ep-versioned');
-
     const v1 = await request(base, '/v1/episodes/ep-versioned');
     assert.equal(v1.response.status, 200);
     assert.equal(v1.response.headers.get('x-api-version'), 'v1');
     assert.equal(v1.response.headers.get('deprecation'), 'true');
-    assert.equal(v1.response.headers.get('sunset'), 'Mon, 27 Apr 2027 00:00:00 GMT');
+    assert.equal(v1.response.headers.get('sunset'), 'Tue, 27 Apr 2027 00:00:00 GMT');
     assert.equal(v1.body.item.episode.id, v2.body.item.id);
   });
 });
@@ -81,7 +76,6 @@ test('malformed JSON and unknown additive fields preserve v1 compatibility', asy
     const malformed = await fetch(base + '/v2/episodes', { method: 'POST', headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' }, body: '{"id":' });
     assert.equal(malformed.status, 400);
     assert.equal((await malformed.json()).error.code, 'MALFORMED_JSON');
-
     const additive = await request(base, '/v2/episodes', { method: 'POST', body: { id: 'ep-additive', projectId: 'p', title: 'ok', futureField: 'ignored-by-current-domain' } });
     assert.equal(additive.response.status, 201);
   });
