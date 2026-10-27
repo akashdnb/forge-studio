@@ -1,0 +1,11 @@
+'use strict';
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises');
+const os=require('node:os');
+const path=require('node:path');
+const {spawn}=require('node:child_process');
+const {compileTimeline}=require('../src/pipeline/timeline-manifest-compiler');
+const {renderTimeline}=require('../src/pipeline/ffmpeg-renderer');
+function runProvider(input,output){return new Promise((resolve,reject)=>{const child=spawn(process.execPath,[path.join(__dirname,'fixtures','real-video-provider.js'),'--input',input,'--output',output],{stdio:'inherit'});child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(new Error(`provider exited ${code}`)));});}
+test('real visual provider output compiles into the executable timeline and renders with ffmpeg',async()=>{const dir=await fs.mkdtemp(path.join(os.tmpdir(),'forge-visual-e2e-')),request=path.join(dir,'request.json'),video=path.join(dir,'shot.mp4'),output=path.join(dir,'render.mp4');try{await fs.writeFile(request,JSON.stringify({idempotencyKey:'e2e-shot',parameters:{durationSeconds:1}}));await runProvider(request,video);const stat=await fs.stat(video);assert.ok(stat.size>1000);const timeline=compileTimeline({episodeId:'acceptance-episode',versions:{'asset:shot-1':{kind:'asset'}},timeline:{durationSeconds:1,tracks:[{type:'VIDEO',segments:[{id:'shot-1',start:0,duration:1,sourceVersionId:'asset:shot-1',sourcePath:'shot.mp4'}]}]}});const result=await renderTimeline({input:{timeline,timelineVersionId:'timeline:acceptance',timelineContentHash:timeline.checksum},workDir:dir,outputPath:output,timeoutMs:120000});assert.equal(result.metadata.mediaType,'video/mp4');assert.ok(result.sizeBytes>1000);const rendered=await fs.readFile(output);assert.equal(rendered.subarray(4,8).toString('ascii'),'ftyp');}finally{await fs.rm(dir,{recursive:true,force:true});}});
