@@ -1,0 +1,26 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { Pool } = require('pg');
+const { allocateGeneration } = require('../src/recovery/recovery-assurance');
+
+const enabled = Boolean(process.env.DATABASE_URL && process.env.FORGE_RUN_RECOVERY_INTEGRATION === 'true');
+
+test('recovery assurance schema is installed and generation allocation is atomic', { skip: !enabled }, async () => {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
+  try {
+    for (const table of ['forge_recovery_generation_state','forge_recovery_integrity_records','forge_recovery_restore_approvals']) {
+      const result = await pool.query('SELECT to_regclass($1) AS name', [`public.${table}`]);
+      assert.equal(result.rows[0].name, table);
+    }
+    const trigger = await pool.query("SELECT 1 FROM pg_trigger WHERE tgname='forge_recovery_integrity_no_update'");
+    assert.equal(trigger.rowCount, 1);
+    const tenant = await pool.query('SELECT id FROM tenants ORDER BY id LIMIT 1');
+    if (!tenant.rowCount) return;
+    const tenantId = tenant.rows[0].id;
+    const before = await pool.query('SELECT COALESCE(MAX(next_generation-1),0)::bigint AS generation FROM forge_recovery_generation_state WHERE tenant_id=$1', [tenantId]);
+    const [a, b] = await Promise.all([allocateGeneration(pool, tenantId), allocateGeneration(pool, tenantId)]);
+    assert.notEqual(a, b);
+    const after = await pool.query('SELECT next_generation::bigint AS next_generation FROM forge_recovery_generation_state WHERE tenant_id=$1', [tenantId]);
+    assert.equal(Number(after.rows[0].next_generation), Math.max(Number(before.rows[0].generation), a, b) + 2);
+  } finally { await pool.end(); }
+});
