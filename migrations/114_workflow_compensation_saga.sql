@@ -50,6 +50,28 @@ CREATE TABLE IF NOT EXISTS forge_compensation_steps (
 CREATE INDEX IF NOT EXISTS forge_compensation_steps_claim_idx ON forge_compensation_steps(status, available_at, sequence_no);
 CREATE INDEX IF NOT EXISTS forge_compensation_steps_plan_idx ON forge_compensation_steps(plan_id, sequence_no);
 
+CREATE TABLE IF NOT EXISTS forge_compensation_side_effects (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  plan_id text NOT NULL REFERENCES forge_compensation_plans(id) ON DELETE RESTRICT,
+  step_id text NOT NULL REFERENCES forge_compensation_steps(id) ON DELETE RESTRICT,
+  job_id text REFERENCES forge_jobs(id) ON DELETE RESTRICT,
+  attempt integer NOT NULL CHECK (attempt > 0),
+  effect_type text NOT NULL,
+  external_reference text,
+  input_version_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  output_version_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  artifact_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  provider_run_id text,
+  effect_fingerprint char(64) NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(effect_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_side_effects_plan_idx ON forge_compensation_side_effects(plan_id, created_at, id);
+CREATE INDEX IF NOT EXISTS forge_compensation_side_effects_job_idx ON forge_compensation_side_effects(job_id, attempt);
+
 CREATE TABLE IF NOT EXISTS forge_compensation_events (
   id bigserial PRIMARY KEY,
   tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
