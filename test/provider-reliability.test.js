@@ -11,10 +11,7 @@ test('classifies rate limits, timeout and auth failures', () => {
 
 test('backoff is bounded, exponential, jittered and honors Retry-After', () => {
   const policy = { baseBackoffMs: 100, maxBackoffMs: 500, jitterRatio: 0.25 };
-  assert.equal(computeBackoffMs(1, policy, 0, () => 0), 100);
-  assert.equal(computeBackoffMs(2, policy, 0, () => 1), 250);
-  assert.equal(computeBackoffMs(5, policy, 0, () => 0), 500);
-  assert.equal(computeBackoffMs(1, policy, 900, () => 0), 900);
+  assert.equal(computeBackoffMs(1, policy, 0, () => 0), 100); assert.equal(computeBackoffMs(2, policy, 0, () => 1), 250); assert.equal(computeBackoffMs(5, policy, 0, () => 0), 500); assert.equal(computeBackoffMs(1, policy, 900, () => 0), 900);
 });
 
 test('retries transient failures and assigns deterministic attempt identities', async () => {
@@ -25,13 +22,12 @@ test('retries transient failures and assigns deterministic attempt identities', 
 
 test('terminal auth failures are not retried', async () => {
   let calls = 0; const reliability = new ProviderReliability();
-  await assert.rejects(reliability.execute({ provider: provider('auth', async () => { calls += 1; throw Object.assign(new Error('bad key'), { status: 401 }); }), operation: 'tts', request: {}, context: { idempotencyKey: 'auth-1' }, policy: { maxAttempts: 5 } }), /bad key/);
-  assert.equal(calls, 1);
+  await assert.rejects(reliability.execute({ provider: provider('auth', async () => { calls += 1; throw Object.assign(new Error('bad key'), { status: 401 }); }), operation: 'tts', request: {}, context: { idempotencyKey: 'auth-1' }, policy: { maxAttempts: 5 } }), /bad key/); assert.equal(calls, 1);
 });
 
 test('provider timeout is retryable while caller cancellation is terminal', async () => {
   const reliability = new ProviderReliability({ random: () => 0 }); let calls = 0;
-  const result = await reliability.execute({ provider: provider('slow', async (_request, context) => { calls += 1; await new Promise((resolve, reject) => { const timer = setTimeout(resolve, 50); context.signal.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); }, { once: true }); }); return { ok: true }; }), operation: 'video', request: {}, context: { idempotencyKey: 'timeout-1' }, policy: { maxAttempts: 2, timeoutMs: 5, baseBackoffMs: 1, maxBackoffMs: 2 } });
+  const result = await reliability.execute({ provider: provider('slow', async (_request, context) => { calls += 1; if (calls === 1) await new Promise((resolve, reject) => { const timer = setTimeout(resolve, 50); context.signal.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); }, { once: true }); }); return { ok: true }; }), operation: 'video', request: {}, context: { idempotencyKey: 'timeout-1' }, policy: { maxAttempts: 2, timeoutMs: 5, baseBackoffMs: 1, maxBackoffMs: 2 } });
   assert.equal(result.result.ok, true); assert.equal(calls, 2);
   const controller = new AbortController(); const cancelled = reliability.execute({ provider: provider('cancel', async (_request, context) => new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { code: 'CANCELLED' })), { once: true }))), operation: 'video', request: {}, context: { signal: controller.signal, idempotencyKey: 'cancel-1' }, policy: { maxAttempts: 3, timeoutMs: 1000 } }); controller.abort(); await assert.rejects(cancelled, (error) => error.code === 'CANCELLED');
 });
