@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS forge_schedule_occurrences (
   status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','CLAIMED','TRIGGERED','SKIPPED','FAILED')),
   lease_owner text,
   lease_token text,
+  lease_fencing_epoch bigint,
   lease_until timestamptz,
   claimed_at timestamptz,
   triggered_at timestamptz,
