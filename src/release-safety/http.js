@@ -4,8 +4,30 @@ const { URL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { authenticate, hasRole } = require('../security/http-security');
 const { DeploymentSafetyService } = require('./deployment-safety');
+const { migrationPreflight, schemaSnapshot } = require('./release-safety');
 const { installPublicRunnerEpochGuards } = require('./runtime-guards');
 installPublicRunnerEpochGuards();
+
+const originalBuildManifest = DeploymentSafetyService.prototype.buildManifest;
+if (!DeploymentSafetyService.prototype.__forgeManifestV2) {
+  DeploymentSafetyService.prototype.__forgeManifestV2 = true;
+  DeploymentSafetyService.prototype.buildManifest = async function buildManifestV2(input = {}) {
+    const manifest = await originalBuildManifest.call(this, input);
+    const migration = await migrationPreflight({ pool: this.pool, migrationsDir: this.migrationsDir });
+    const schema = await schemaSnapshot(this.pool);
+    manifest.migrationManifest = migration.audit.items.map(m => ({ name: m.name, checksum: m.checksum, number: Number(String(m.name).split('_', 1)[0]), unsafe: Boolean(m.unsafe), destructive: Boolean(m.destructive) }));
+    manifest.workerVersions = input.workerVersions || {};
+    manifest.protocolVersions = input.protocolVersions || { publicRunner: 'forge-public-runner-v1', callbacks: '1' };
+    manifest.requiredProtocolVersion = input.requiredProtocolVersion || '1';
+    manifest.configSnapshotHash = input.configSnapshotHash || null;
+    manifest.schemaSnapshotHash = schema.hash;
+    manifest.rolloutPolicy = input.rolloutPolicy || { allowPreviousEpoch: false, maxUnavailableWorkers: 0, requireDrainForUnsafeMigration: true };
+    manifest.healthPolicy = input.healthPolicy || { requireSchemaMatch: true, requireWorkerAdmission: true, maxStaleRunnerExecutions: 0 };
+    manifest.migrationSetHash = require('./deployment-safety').sha256(manifest.migrationManifest);
+    manifest.manifestHash = require('./deployment-safety').sha256(manifest);
+    return manifest;
+  };
+}
 
 function reply(res, status, body, requestId) { if (res.headersSent) return; res.setHeader('content-type','application/json; charset=utf-8'); res.setHeader('cache-control','no-store'); res.setHeader('x-request-id',requestId); res.writeHead(status); res.end(JSON.stringify(body)); }
 async function body(req) { const chunks=[]; let size=0; for await(const chunk of req){size+=chunk.length;if(size>256*1024)throw Object.assign(new Error('Request body exceeds limit'),{statusCode:413,code:'PAYLOAD_TOO_LARGE'});chunks.push(chunk)} if(!chunks.length)return{}; try{return JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{throw Object.assign(new Error('Malformed JSON request body'),{statusCode:400,code:'VALIDATION_ERROR'})} }
