@@ -19,6 +19,7 @@ function parseVersion(request) {
   const pathname = new URL(request.url || '/', 'http://localhost').pathname;
   const pathMatch = /^\/v(\d+)(?:\/|$)/.exec(pathname);
   const mediaMatch = /application\/vnd\.forge\.v(\d+)\+json/i.exec(String(request.headers.accept || ''));
+  if (!pathMatch && !mediaMatch) return null;
   const requested = pathMatch?.[1] || mediaMatch?.[1] || DEFAULT_VERSION;
   if (!SUPPORTED_VERSIONS.includes(requested)) throw Object.assign(new Error(`Unsupported API version: v${requested}`), { statusCode: 406, code: 'UNSUPPORTED_API_VERSION' });
   if (pathMatch && mediaMatch && pathMatch[1] !== mediaMatch[1]) throw Object.assign(new Error('URL API version and Accept API version must match'), { statusCode: 406, code: 'API_VERSION_MISMATCH' });
@@ -26,8 +27,9 @@ function parseVersion(request) {
 }
 
 function normalizePath(request, version) {
+  if (version !== '2') return;
   const parsed = new URL(request.url || '/', 'http://localhost');
-  if (version === '2' && VERSION_ALIASES[parsed.pathname.split('/').slice(0, 2).join('/')]) {
+  if (VERSION_ALIASES[parsed.pathname.split('/').slice(0, 2).join('/')]) {
     parsed.pathname = parsed.pathname.replace(/^\/v2(?=\/|$)/, '/v1');
     request.url = `${parsed.pathname}${parsed.search}`;
   }
@@ -67,18 +69,9 @@ function readBodyForValidation(request) {
   if (!['POST', 'PUT', 'PATCH'].includes(request.method)) return null;
   if (!String(request.headers['content-type'] || '').toLowerCase().includes('application/json')) return null;
   return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    request.on('data', (chunk) => {
-      size += chunk.length;
-      if (size > JSON_LIMIT_BYTES) reject(Object.assign(new Error('Request body exceeds 1 MiB'), { statusCode: 413, code: 'PAYLOAD_TOO_LARGE' }));
-      else chunks.push(chunk);
-    });
-    request.on('end', () => {
-      if (!size) return resolve({ body: {}, raw: Buffer.alloc(0) });
-      try { const raw = Buffer.concat(chunks); resolve({ body: JSON.parse(raw.toString('utf8')), raw }); }
-      catch (cause) { reject(Object.assign(new Error('Malformed JSON request body'), { statusCode: 400, code: 'MALFORMED_JSON', cause })); }
-    });
+    let size = 0; const chunks = [];
+    request.on('data', (chunk) => { size += chunk.length; if (size > JSON_LIMIT_BYTES) reject(Object.assign(new Error('Request body exceeds 1 MiB'), { statusCode: 413, code: 'PAYLOAD_TOO_LARGE' })); else chunks.push(chunk); });
+    request.on('end', () => { if (!size) return resolve({ body: {}, raw: Buffer.alloc(0) }); try { const raw = Buffer.concat(chunks); resolve({ body: JSON.parse(raw.toString('utf8')), raw }); } catch (cause) { reject(Object.assign(new Error('Malformed JSON request body'), { statusCode: 400, code: 'MALFORMED_JSON', cause })); } });
     request.on('error', reject);
   });
 }
@@ -109,11 +102,12 @@ function createVersioningMiddleware({ logger = console, rateLimitPerMinute = Num
   const buckets = new Map();
   const limit = Number.isSafeInteger(rateLimitPerMinute) && rateLimitPerMinute > 0 ? rateLimitPerMinute : 300;
   return async function versioningMiddleware(request, response, next) {
-    let version = DEFAULT_VERSION;
+    let version = null;
     try {
       version = parseVersion(request);
+      if (!version) return await next();
       const parsed = new URL(request.url || '/', 'http://localhost');
-      if (/^\/v\d+(?:\/|$)/.test(parsed.pathname)) validatePagination(parsed);
+      validatePagination(parsed);
       const tokenFingerprint = createHash('sha256').update(String(request.headers.authorization || 'anonymous')).digest('hex').slice(0, 16);
       const key = `${version}:${tokenFingerprint}:${request.socket?.remoteAddress || 'unknown'}`;
       const now = Date.now();
@@ -124,8 +118,7 @@ function createVersioningMiddleware({ logger = console, rateLimitPerMinute = Num
       response.setHeader('x-api-rate-remaining', String(Math.max(0, limit - bucket.count)));
       response.setHeader('x-api-rate-reset', String(Math.ceil(bucket.resetAt / 1000)));
       if (bucket.count > limit) {
-        versionHeaders(response, version, version === '1');
-        auditEvent(request, version, 429, logger);
+        versionHeaders(response, version, version === '1'); auditEvent(request, version, 429, logger);
         response.writeHead(429, { 'content-type': 'application/json; charset=utf-8' });
         return response.end(JSON.stringify({ error: { code: 'API_VERSION_RATE_LIMITED', message: 'API version rate limit exceeded' }, requestId: request.headers['x-request-id'] || null }));
       }
@@ -135,18 +128,15 @@ function createVersioningMiddleware({ logger = console, rateLimitPerMinute = Num
       request._forgeApiVersion = version;
       normalizePath(request, version);
       versionHeaders(response, version, version === '1');
-      const originalEnd = response.end;
-      let statusCode = 200;
-      const originalWriteHead = response.writeHead;
+      const originalEnd = response.end; let statusCode = 200; const originalWriteHead = response.writeHead;
       response.writeHead = function patchedWriteHead(status, ...args) { statusCode = status; versionHeaders(response, version, version === '1'); return originalWriteHead.call(this, status, ...args); };
       response.end = function patchedEnd(...args) { auditEvent(request, version, statusCode, logger); return originalEnd.apply(this, args); };
       await next();
     } catch (error) {
-      const status = Number.isInteger(error.statusCode) ? error.statusCode : 400;
-      const code = error.code || 'INVALID_REQUEST';
-      auditEvent(request, version, status, logger);
+      const status = Number.isInteger(error.statusCode) ? error.statusCode : 400; const code = error.code || 'INVALID_REQUEST';
+      if (version) auditEvent(request, version, status, logger);
       if (!response.headersSent) {
-        versionHeaders(response, version, version === '1');
+        if (version) versionHeaders(response, version, version === '1');
         response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
         response.end(JSON.stringify({ error: { code, message: error.message }, requestId: request.headers['x-request-id'] || null }));
       }
@@ -161,8 +151,7 @@ function installHttpVersioning(options = {}) {
   const middleware = createVersioningMiddleware(options);
   http.createServer = function patchedCreateServer(requestListener) {
     const server = originalCreateServer.call(this);
-    const originalOn = server.on.bind(server);
-    const originalAddListener = server.addListener.bind(server);
+    const originalOn = server.on.bind(server); const originalAddListener = server.addListener.bind(server);
     const wrap = (listener) => listener ? (request, response) => middleware(request, response, () => listener(request, response)) : listener;
     server.on = (event, listener) => originalOn(event, event === 'request' ? wrap(listener) : listener);
     server.addListener = (event, listener) => originalAddListener(event, event === 'request' ? wrap(listener) : listener);
@@ -174,22 +163,9 @@ function installHttpVersioning(options = {}) {
 
 function apiVersionContract() {
   return {
-    policyVersion: 1,
-    current: `v${CURRENT_VERSION}`,
-    supported: SUPPORTED_VERSIONS.map((version) => `v${version}`),
-    default: `v${DEFAULT_VERSION}`,
+    policyVersion: 1, current: `v${CURRENT_VERSION}`, supported: SUPPORTED_VERSIONS.map((version) => `v${version}`), default: `v${DEFAULT_VERSION}`,
     sunset: { version: 'v1', date: V1_SUNSET, boundedCompatibilityWindowDays: Math.max(1, Math.ceil((new Date(V1_SUNSET) - Date.now()) / 86400000)) },
-    rules: {
-      breakingChanges: 'new-major-version-only',
-      additiveChanges: 'allowed-within-a-version',
-      unknownResponseFields: 'clients-must-ignore',
-      unknownRequestFields: 'accepted-v1-and-ignored; rejected-only-when-schema-marks-strict',
-      durableSemantics: 'version-adapters-must-not-change-job-artifact-workflow-approval-budget-or-security-identity',
-      ids: `non-empty strings <= ${MAX_ID_LENGTH} characters`,
-      pagination: `limit 1-${MAX_PAGE_SIZE}; offset non-negative integer`,
-      errors: 'stable {error:{code,message},requestId}',
-      idempotency: 'Idempotency-Key or idempotencyKey is validated and preserved',
-    },
+    rules: { breakingChanges: 'new-major-version-only', additiveChanges: 'allowed-within-a-version', unknownResponseFields: 'clients-must-ignore', unknownRequestFields: 'accepted-v1-and-ignored; rejected-only-when-schema-marks-strict', durableSemantics: 'version-adapters-must-not-change-job-artifact-workflow-approval-budget-or-security-identity', ids: `non-empty strings <= ${MAX_ID_LENGTH} characters`, pagination: `limit 1-${MAX_PAGE_SIZE}; offset non-negative integer`, errors: 'stable {error:{code,message},requestId}', idempotency: 'Idempotency-Key or idempotencyKey is validated and preserved' },
     mediaTypes: VERSION_MEDIA_TYPES,
   };
 }
