@@ -3,12 +3,14 @@ const { PersistentProductionRepository } = require('./persistence/production-rep
 const { handleGithubRunnerCallback } = require('./execution/github-actions-callback');
 const { createStorageFromEnv } = require('./storage');
 const { ProductionArtifactAccessGateway } = require('./storage/production-artifact-access-gateway');
-const { handleArtifactAccess } = require('./storage/artifact-access-http');
+const { handleArtifactAccess, bearerActor } = require('./storage/artifact-access-http');
 const { URL } = require('node:url');
 
 const port = Number.parseInt(process.env.PORT || '8080', 10);
 const host = process.env.HOST || '0.0.0.0';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError('PORT must be an integer between 1 and 65535');
+
+function sendJson(response, status, body) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(JSON.stringify(body)); }
 
 async function start() {
   let repository = null; let pool = null; let artifactGateway = null;
@@ -28,8 +30,17 @@ async function start() {
   server.on('request', async (request, response) => {
     const pathname = new URL(request.url || '/', 'http://localhost').pathname;
     if (pathname === '/internal/github-actions/callback') {
-      if (!repository) return response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'PERSISTENCE_UNAVAILABLE', message: 'PostgreSQL is required for runner callbacks' } }));
+      if (!repository) return sendJson(response, 503, { error: { code: 'PERSISTENCE_UNAVAILABLE', message: 'PostgreSQL is required for runner callbacks' } });
       return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN });
+    }
+    if (artifactGateway && (pathname === '/internal/artifact-gateway/healthz' || pathname === '/internal/artifact-gateway/metrics')) {
+      if (!bearerActor(request, apiToken)) return sendJson(response, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid bearer token is required' } });
+      if (pathname.endsWith('/healthz')) {
+        try { await pool.query('SELECT 1'); return sendJson(response, 200, { status: 'ready', gateway: 'enabled', storageDriver: process.env.FORGE_STORAGE_DRIVER || 'local', maxRangeBytes: artifactGateway.maxRangeBytes, maxTransferBytes: artifactGateway.maxTransferBytes }); }
+        catch { return sendJson(response, 503, { status: 'not-ready', gateway: 'enabled' }); }
+      }
+      const result = await pool.query(`SELECT action,count(*)::int AS count FROM audit_events WHERE target_type='artifact' AND created_at >= now() - interval '15 minutes' GROUP BY action ORDER BY action`);
+      return sendJson(response, 200, { windowMinutes: 15, accessEvents: result.rows });
     }
     if (artifactGateway && (pathname.startsWith('/v1/artifacts/') || pathname === '/v1/artifacts')) {
       return handleArtifactAccess(request, response, { gateway: artifactGateway, apiToken });
