@@ -38,6 +38,7 @@ jobs:
           node --check src/release-safety/release-safety.js
           node --check src/release-safety/migration-runner.js
           node --check src/release-safety/deployment-safety.js
+          node --check src/release-safety/deployment-controller.js
           node --check src/release-safety/runtime-guards.js
           node --check src/release-safety/http.js
           node --check src/persistence/job-queue.js
