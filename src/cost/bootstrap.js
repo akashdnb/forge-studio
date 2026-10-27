@@ -3,6 +3,7 @@ const { UsageAccountingService } = require('../usage/usage-accounting');
 const { WorkflowScheduler } = require('../scheduling/workflow-scheduler');
 const { CostGovernanceService, CostBudgetRejectedError } = require('./cost-governance');
 require('./config-sync');
+require('./budget-config');
 const { handleCostRequest } = require('./http');
 const { hasRole } = require('../security/http-security');
 
