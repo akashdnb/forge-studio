@@ -9,7 +9,7 @@ Forge releases are treated as a compatibility window, not a single binary rollou
 3. Run `DATABASE_URL=... npm run release:preflight -- --manifest release-manifest.json`.
 4. Do not bypass `MIGRATION_PREFLIGHT_FAILED`, checksum mismatch, unsafe pending DDL, missing required indexes/configuration, or an invalid schema compatibility window.
 
-Destructive SQL is blocked unless the migration contains an explicit `-- forge:allow-destructive reason=...` annotation. Existing legacy duplicate `007_*` prefixes are reported as evidence but are preserved for backward compatibility; new duplicate prefixes at 009+ are release-blocking.
+The existing Forge schema chain currently ends at migration 012. This feature adds migration 013. Legacy duplicate `007_*` through `010_*` prefixes are reported as evidence but preserved for compatibility; new duplicate prefixes at 013+ are release-blocking. Destructive migrations that are already part of the historical 001-012 chain are allowed to bootstrap an existing database; new destructive migrations from 013 onward require an explicit `-- forge:allow-destructive reason=...` annotation.
 
 ## Expand/contract
 
@@ -23,7 +23,7 @@ Never rename/drop a field in the same release that first introduces a reader/wri
 
 ## Deployment gate
 
-A deployment is activated under a PostgreSQL advisory lock and advances `forge_release_state.epoch`. Workers register a fence record. A worker whose release identity or schema version is outside the active manifest compatibility window is marked `FENCED` and must not claim production work. The state `ROLL_FORWARD_REQUIRED` fences every worker until the recovery release is active.
+A deployment is activated under a PostgreSQL advisory lock and advances `forge_release_state.epoch`. Activation requires a persisted approval. Workers register a fence record. A worker whose release identity or schema version is outside the active manifest compatibility window is marked `FENCED` and must not claim production work. The state `ROLL_FORWARD_REQUIRED` fences every worker until the recovery release is active.
 
 Required operational phases are persisted in `forge_release_checkpoints`: `PREFLIGHT`, `MIGRATION`, `DEPLOY`, `POST_DEPLOY`, `ROLLBACK`, and `ROLL_FORWARD`.
 
