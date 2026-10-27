@@ -1,0 +1,129 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+let Pool;
+try { ({ Pool } = require('pg')); } catch { Pool = null; }
+
+const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+const integration = Boolean(Pool && databaseUrl);
+const maybe = integration ? test : test.skip;
+
+const { PersistentProductionRepository } = require('../src/persistence/production-repository');
+
+function ids(prefix) {
+  const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return { projectId: `${prefix}-project-${suffix}`, episodeId: `${prefix}-episode-${suffix}` };
+}
+
+maybe('parallel episode transitions allow exactly one stale revision writer', async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const repo = new PersistentProductionRepository({ pool });
+  await repo.migrate();
+  const { projectId, episodeId } = ids('transition');
+  await repo.createProject({ id: projectId, name: 'Concurrency test', createdBy: 'test' });
+  await repo.createEpisode({ id: episodeId, projectId, title: 'Race', createdBy: 'test' });
+
+  const results = await Promise.allSettled([
+    repo.transitionEpisode({ id: episodeId, nextState: 'RESEARCHING', expectedRevision: 1, actor: 'worker-a' }),
+    repo.transitionEpisode({ id: episodeId, nextState: 'SCRIPT_DRAFT', expectedRevision: 1, actor: 'worker-b' }),
+  ]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((r) => r.status === 'rejected' && r.reason.code === 'REVISION_CONFLICT').length, 1);
+  const episode = await repo.getEpisode(episodeId);
+  assert.equal(episode.revision, 2);
+  await pool.end();
+});
+
+maybe('parallel version creation is idempotent and rejects cross-episode dependencies', async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const repo = new PersistentProductionRepository({ pool });
+  await repo.migrate();
+  const a = ids('version-a');
+  const b = ids('version-b');
+  await repo.createProject({ id: a.projectId, name: 'A', createdBy: 'test' });
+  await repo.createProject({ id: b.projectId, name: 'B', createdBy: 'test' });
+  await repo.createEpisode({ id: a.episodeId, projectId: a.projectId, title: 'A', createdBy: 'test' });
+  await repo.createEpisode({ id: b.episodeId, projectId: b.projectId, title: 'B', createdBy: 'test' });
+  const versionId = `version-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const input = { id: versionId, episodeId: a.episodeId, kind: 'script', payload: { text: 'same' }, contentHash: 'a'.repeat(64), createdBy: 'test' };
+  const results = await Promise.all([repo.db.appendVersion(input), repo.db.appendVersion(input)]);
+  assert.equal(results[0].id, versionId);
+  assert.equal(results[1].id, versionId);
+  await assert.rejects(
+    () => repo.db.appendVersion({ ...input, id: `${versionId}-child`, parentId: versionId, episodeId: b.episodeId }),
+    (error) => error.code === 'INVALID_PROVENANCE' || error.code === 'INVALID_DEPENDENCY',
+  );
+  await pool.end();
+});
+
+maybe('parallel final-render approvals produce one approval and one conflict', async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const repo = new PersistentProductionRepository({ pool });
+  await repo.migrate();
+  const { projectId, episodeId } = ids('approval');
+  const versionId = `render-version-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const artifactId = `render-artifact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await repo.createProject({ id: projectId, name: 'Approval race', createdBy: 'test' });
+  await repo.createEpisode({ id: episodeId, projectId, title: 'Approval', createdBy: 'test' });
+  await pool.query(`INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,'render','{}'::jsonb,$3,$4)`, [versionId, episodeId, 'b'.repeat(64), 'test']);
+  await pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,content_json,content_hash,media_type,created_by) VALUES($1,$2,'render',$3,'{}'::jsonb,$4,'video/mp4',$5)`, [artifactId, episodeId, versionId, 'b'.repeat(64), 'test']);
+  await pool.query(`INSERT INTO qa_results(id,episode_id,artifact_id,version_id,status,checks,runner,metadata,idempotency_key) VALUES($1,$2,$3,$4,'PASSED','[]'::jsonb,'test','{}'::jsonb,$1)`, [`qa-${artifactId}`, episodeId, artifactId, versionId]);
+  await pool.query(`UPDATE episodes SET state='AWAITING_APPROVAL',current_render_id=$1,revision=2 WHERE id=$2`, [artifactId, episodeId]);
+
+  const makeApproval = (actor, id) => repo.appendApproval({
+    id, episodeId, stage: 'FINAL_RENDER', targetId: artifactId, targetVersionId: versionId,
+    decision: 'APPROVED', actor, expectedRevision: 2,
+  });
+  const results = await Promise.allSettled([makeApproval('a', `approval-a-${artifactId}`), makeApproval('b', `approval-b-${artifactId}`)]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((r) => r.status === 'rejected').length, 1);
+  const stored = await pool.query(`SELECT count(*)::int AS count FROM approvals WHERE episode_id=$1 AND stage='FINAL_RENDER' AND decision='APPROVED'`, [episodeId]);
+  assert.equal(stored.rows[0].count, 1);
+  const episode = await repo.getEpisode(episodeId);
+  assert.equal(episode.state, 'APPROVED');
+  assert.equal(episode.approvedRenderId, artifactId);
+  await pool.end();
+});
+
+maybe('duplicate QA callbacks with the same idempotency key converge to one row', async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const repo = new PersistentProductionRepository({ pool });
+  await repo.migrate();
+  const { projectId, episodeId } = ids('qa');
+  const versionId = `qa-version-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const artifactId = `qa-artifact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await repo.createProject({ id: projectId, name: 'QA race', createdBy: 'test' });
+  await repo.createEpisode({ id: episodeId, projectId, title: 'QA', createdBy: 'test' });
+  await pool.query(`INSERT INTO version_records(id,episode_id,kind,payload,created_by) VALUES($1,$2,'render','{}'::jsonb,$3)`, [versionId, episodeId, 'test']);
+  await pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,content_json,created_by) VALUES($1,$2,'render',$3,'{}'::jsonb,$4)`, [artifactId, episodeId, versionId, 'test']);
+  const input = { id: `qa-id-${artifactId}`, idempotencyKey: `callback-${artifactId}`, episodeId, artifactId, versionId, status: 'PASSED', checks: [], runner: 'test' };
+  const results = await Promise.all([repo.recordQa(input), repo.recordQa({ ...input, id: `qa-id-2-${artifactId}` })]);
+  assert.equal(results[0].id, results[1].id);
+  const count = await pool.query(`SELECT count(*)::int AS count FROM qa_results WHERE idempotency_key=$1`, [input.idempotencyKey]);
+  assert.equal(count.rows[0].count, 1);
+  await pool.end();
+});
+
+maybe('database guards reject cross-version publish provenance and inconsistent terminal states', async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const repo = new PersistentProductionRepository({ pool });
+  await repo.migrate();
+  const a = ids('guard-a');
+  const b = ids('guard-b');
+  await repo.createProject({ id: a.projectId, name: 'A', createdBy: 'test' });
+  await repo.createProject({ id: b.projectId, name: 'B', createdBy: 'test' });
+  await repo.createEpisode({ id: a.episodeId, projectId: a.projectId, title: 'A', createdBy: 'test' });
+  await repo.createEpisode({ id: b.episodeId, projectId: b.projectId, title: 'B', createdBy: 'test' });
+  const av = `guard-v-a-${Date.now()}`;
+  const bv = `guard-v-b-${Date.now()}`;
+  await pool.query(`INSERT INTO version_records(id,episode_id,kind,created_by) VALUES($1,$2,'render','test'),($3,$4,'render','test')`, [av, a.episodeId, bv, b.episodeId]);
+  await assert.rejects(
+    () => pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,content_json,created_by) VALUES($1,$2,'render',$3,'{}'::jsonb,'test')`, [`cross-${Date.now()}`, a.episodeId, bv]),
+    (error) => error.code === '23503',
+  );
+  await assert.rejects(
+    () => pool.query(`UPDATE episodes SET state='PUBLISHED' WHERE id=$1`, [a.episodeId]),
+    (error) => error.code === '23514',
+  );
+  await pool.end();
+});
