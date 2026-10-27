@@ -1,10 +1,12 @@
 const { TenantProjectLifecycle } = require('./tenant-project-lifecycle');
 const { PrivacyGovernance } = require('../privacy/privacy-governance');
+const { FinalArtifactLifecycleControlPlane } = require('../storage/artifact-lifecycle-final-safety');
 
 function createLifecycleHandlers({ pool, storage, logger = console } = {}) {
   if (!pool) throw new TypeError('pool is required');
   const lifecycle = new TenantProjectLifecycle({ pool, storage });
   const privacy = new PrivacyGovernance({ pool, storage });
+  const artifactGc = new FinalArtifactLifecycleControlPlane({ pool, storage });
   return {
     'lifecycle:plan-delete': async (payload = {}, job = {}) => {
       const tenantId = payload.tenantId || job.payload?.tenantId;
@@ -21,6 +23,13 @@ function createLifecycleHandlers({ pool, storage, logger = console } = {}) {
       return result;
     },
     'lifecycle:reconcile': async (payload = {}) => lifecycle.reconcile({ tenantId: payload.tenantId, projectId: payload.projectId }),
+    'workflow:artifact-gc-preview': async (payload = {}, job = {}) => artifactGc.preview({ tenantId: payload.tenantId || job.payload?.tenantId, actor: payload.actor || job.created_by || 'system', policy: payload.policy || {} }),
+    'workflow:artifact-gc-mark': async (payload = {}, job = {}) => artifactGc.markGeneration({ tenantId: payload.tenantId || job.payload?.tenantId, generationId: payload.generationId || job.payload?.generationId, actor: payload.actor || job.created_by || 'system', scanLimit: payload.scanLimit }),
+    'workflow:artifact-gc-sweep': async (payload = {}, job = {}) => artifactGc.sweepGeneration({ tenantId: payload.tenantId || job.payload?.tenantId, generationId: payload.generationId || job.payload?.generationId, actor: payload.actor || job.created_by || 'system', dryRun: payload.dryRun === true }),
+    'workflow:artifact-gc-approve': async (payload = {}, job = {}) => artifactGc.approveGeneration({ tenantId: payload.tenantId || job.payload?.tenantId, generationId: payload.generationId || job.payload?.generationId, actor: payload.actor || job.created_by || 'system' }),
+    'workflow:artifact-gc-delete': async (payload = {}, job = {}) => artifactGc.executeApprovedDeletes({ tenantId: payload.tenantId || job.payload?.tenantId, generationId: payload.generationId || job.payload?.generationId, actor: payload.actor || job.created_by || 'system', maxDeletes: payload.maxDeletes, maxDeleteBytes: payload.maxDeleteBytes }),
+    'workflow:artifact-gc-reconcile': async (payload = {}, job = {}) => artifactGc.reconcileProvider({ tenantId: payload.tenantId || job.payload?.tenantId, limit: payload.limit }),
+    'workflow:artifact-gc-recover-leases': async (payload = {}, job = {}) => artifactGc.recoverStaleLeases({ tenantId: payload.tenantId || job.payload?.tenantId, limit: payload.limit }),
   };
 }
 
