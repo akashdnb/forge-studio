@@ -12,9 +12,7 @@ function installIncidentConcurrencyBridge() {
       if (error?.code !== '23505' && !/duplicate key value violates unique constraint "operational_incidents_active_fingerprint_uq"/.test(String(error?.message || ''))) throw error;
       result = await original.call(this, args);
     }
-    if (result?.reopened) {
-      return this.transition({ tenantId: args.tenantId, incidentId: result.incident.id, actorId: 'system', action: 'REOPEN', reason: 'Maintenance window or alert-rate suppression ended', idempotencyKey: `detector-reopen:${result.incident.id}:${new Date().toISOString().slice(0,13)}` }).then(item => ({ ...result, incident: item }));
-    }
+    if (result?.reopened) return this.transition({ tenantId: args.tenantId, incidentId: result.incident.id, actorId: 'system', action: 'REOPEN', reason: 'Maintenance window or alert-rate suppression ended', idempotencyKey: `detector-reopen:${result.incident.id}:${new Date().toISOString().slice(0,13)}` }).then(item => ({ ...result, incident: item }));
     return result;
   };
   IncidentManager.prototype.evaluateRule = async function evaluateRuleWithSafeScopes(tenantId, rule, limit) {
@@ -31,6 +29,18 @@ function installIncidentConcurrencyBridge() {
       return result.rows.map(row => ({ projectId: row.project_id, episodeId: row.episode_id, sourceType: 'reconciliation', sourceId: String(row.source_id), title: 'Reconciliation drift detected', summary: `Reconciliation run ${row.source_id} failed or repaired drift`, evidence: { reconciliationRunId: row.source_id, projectId: row.project_id, episodeId: row.episode_id, status: row.status, repairCount: row.repaired_count } }));
     }
     return originalEvaluate.call(this, tenantId, rule, limit);
+  };
+  IncidentManager.prototype.metrics = async function incidentMetrics({ tenantId = null } = {}) {
+    const where = tenantId ? 'WHERE tenant_id=$1' : '';
+    const args = tenantId ? [tenantId] : [];
+    const [active, notifications, latency, suppressed, escalation] = await Promise.all([
+      this.pool.query(`SELECT severity,COUNT(*)::int count FROM operational_incidents ${where ? where + ' AND' : 'WHERE'} status IN ('OPEN','ACKNOWLEDGED') GROUP BY severity ORDER BY severity`, args),
+      this.pool.query(`SELECT COUNT(*) FILTER(WHERE status IN ('PENDING','RETRY','IN_FLIGHT'))::int pending,COUNT(*) FILTER(WHERE status='DEAD_LETTER')::int dead_letter FROM forge_event_deliveries ${where}`, args),
+      this.pool.query(`SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (first_seen_at-created_at))*1000),0)::bigint detection_latency_ms,COALESCE(AVG(EXTRACT(EPOCH FROM (last_notified_at-first_seen_at))*1000),0)::bigint notification_latency_ms FROM operational_incidents ${where}`, args),
+      this.pool.query(`SELECT COALESCE(SUM(suppressed_count),0)::int suppressed_events FROM operational_incidents ${where}`, args),
+      this.pool.query(`SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (now()-first_seen_at))),0)::bigint escalation_lag_seconds FROM operational_incidents ${where ? where + ' AND' : 'WHERE'} current_escalation_level>0`, args),
+    ]);
+    return { active: active.rows, notifications: notifications.rows[0], latency: latency.rows[0], suppressed: suppressed.rows[0], escalation: escalation.rows[0] };
   };
   if (!IncidentManager.prototype.resolve) {
     IncidentManager.prototype.resolve = async function resolve(id, actorId, reason, evidence = {}) {
