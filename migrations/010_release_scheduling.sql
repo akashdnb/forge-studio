@@ -1,14 +1,16 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS forge_release_calendar_controls (
+  id bigserial PRIMARY KEY,
   tenant_id text NOT NULL,
   project_id text REFERENCES projects(id) ON DELETE CASCADE,
   emergency_hold boolean NOT NULL DEFAULT false,
   release_epoch bigint NOT NULL DEFAULT 1 CHECK (release_epoch > 0),
   updated_by text NOT NULL DEFAULT 'system',
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, project_id)
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS forge_release_calendar_controls_scope_idx
+  ON forge_release_calendar_controls(tenant_id, COALESCE(project_id, ''));
 CREATE INDEX IF NOT EXISTS forge_release_calendar_controls_tenant_idx
   ON forge_release_calendar_controls(tenant_id, project_id);
 
@@ -111,7 +113,7 @@ CREATE INDEX IF NOT EXISTS forge_release_schedule_executions_run_idx
 CREATE TABLE IF NOT EXISTS forge_release_schedule_audit (
   id bigserial PRIMARY KEY,
   tenant_id text NOT NULL,
-  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   episode_id text REFERENCES episodes(id) ON DELETE RESTRICT,
   schedule_id text REFERENCES forge_release_schedules(id) ON DELETE RESTRICT,
   schedule_version bigint,
