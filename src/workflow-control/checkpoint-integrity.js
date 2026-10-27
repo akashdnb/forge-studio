@@ -8,6 +8,7 @@ const canonical = value => {
   return value;
 };
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+const stableEnvelope = envelope => { const copy={...envelope}; delete copy.actor; return copy; };
 const fail = (code, message, statusCode=409) => Object.assign(new Error(message), { code, statusCode });
 
 async function providerSnapshot(pool, tenantId, projectId, episodeId) {
@@ -31,7 +32,7 @@ async function buildEnvelope({pool, planId, tenantId, checkpoint, actor='system'
   const provider = await providerSnapshot(pool, tenantId, plan.project_id, plan.episode_id);
   const credentials = await credentialSnapshot(pool, tenantId, plan.project_id, planId);
   const stageState = stages.map(s => ({ id:s.id, stageId:s.stage_id, runtimeStage:s.runtime_stage, status:s.status, jobId:s.job_id, inputContract:s.input_contract, outputContract:s.output_contract, outputVersionIds:s.output_version_ids||[], outputArtifactIds:s.output_artifact_ids||[] }));
-  const inputs = { planSnapshot:plan.snapshot, stage: stageState, workflowRun:run ? { attemptId:run.attempt_id, manifestVersion:run.manifest_version, manifestHash:run.manifest_hash, resultHash:run.result_hash } : null };
+  const inputs = { planSnapshot:plan.snapshot, stage: stageState, workflowRun:run ? { id:run.id, attemptId:run.attempt_id, manifestVersion:run.manifest_version, manifestHash:run.manifest_hash, resultHash:run.result_hash } : null };
   const outputs = { stage: stage ? { outputVersionIds:stage.output_version_ids||[], outputArtifactIds:stage.output_artifact_ids||[] } : null };
   const envelope = {
     checkpointVersion: Number(checkpoint.checkpoint_version), checkpointEpoch:Number(checkpoint.execution_epoch),
@@ -39,7 +40,7 @@ async function buildEnvelope({pool, planId, tenantId, checkpoint, actor='system'
     templateVersionId:plan.template_version_id, templateContentHash:plan.template_content_hash, releaseEpoch:Number(plan.release_epoch),
     schemaFamily:plan.schema_family, schemaVersion:Number(plan.schema_version), schemaHash:plan.schema_hash, executionSnapshotId:plan.execution_snapshot_id,
     planHash:plan.content_hash, stageVersion:checkpoint.stage_version || '1', stageId:checkpoint.stage_id || null, runtimeStage:checkpoint.runtime_stage || null,
-    inputFingerprint:hash(inputs), outputFingerprint:hash(outputs), providerStateHash:hash(provider), credentialStateHash:hash(credentials),
+    workflowRunId:run?.id || null, inputFingerprint:hash(inputs), outputFingerprint:hash(outputs), providerStateHash:hash(provider), credentialStateHash:hash(credentials),
     admissionStateHash:hash(provider.decisions), deadlineAt:run?.manifest_expires_at || null,
     sideEffectBoundary: checkpoint.side_effect_boundary || 'NONE', safeState:checkpoint.safe_state, reentryContract:checkpoint.reentry_contract,
     actor
@@ -51,8 +52,8 @@ async function sealCheckpoint({pool, checkpointId, tenantId, actor='system'}) {
   const cp=(await pool.query(`SELECT * FROM forge_workflow_checkpoints WHERE id=$1 AND tenant_id=$2`,[checkpointId,tenantId])).rows[0];
   if(!cp) throw fail('CHECKPOINT_MISSING','Checkpoint not found',404);
   const {envelope}=await buildEnvelope({pool,planId:cp.plan_id,tenantId,checkpoint:cp,actor});
-  const validationHash=hash(envelope);
-  await pool.query(`UPDATE forge_workflow_checkpoints SET checkpoint_epoch=$2,plan_hash=$3,input_fingerprint=$4,output_fingerprint=$5,provider_state_hash=$6,credential_state_hash=$7,admission_state_hash=$8,deadline_at=$9,validity='VALID',validated_at=now(),validated_by=$10,validation_hash=$11,schema_family=$12,schema_hash=$13,updated_at=now() WHERE id=$1 AND tenant_id=$14`,[checkpointId,envelope.checkpointEpoch,envelope.planHash,envelope.inputFingerprint,envelope.outputFingerprint,envelope.providerStateHash,envelope.credentialStateHash,envelope.admissionStateHash,envelope.deadlineAt,actor,validationHash,envelope.schemaFamily,envelope.schemaHash,tenantId]);
+  const validationHash=hash(stableEnvelope(envelope));
+  await pool.query(`UPDATE forge_workflow_checkpoints SET checkpoint_epoch=$2,workflow_run_id=$3,plan_hash=$4,input_fingerprint=$5,output_fingerprint=$6,provider_state_hash=$7,credential_state_hash=$8,admission_state_hash=$9,deadline_at=$10,validity='VALID',validated_at=now(),validated_by=$11,validation_hash=$12,schema_family=$13,schema_hash=$14,updated_at=now() WHERE id=$1 AND tenant_id=$15`,[checkpointId,envelope.checkpointEpoch,envelope.workflowRunId,envelope.planHash,envelope.inputFingerprint,envelope.outputFingerprint,envelope.providerStateHash,envelope.credentialStateHash,envelope.admissionStateHash,envelope.deadlineAt,actor,validationHash,envelope.schemaFamily,envelope.schemaHash,tenantId]);
   return (await pool.query(`SELECT * FROM forge_workflow_checkpoints WHERE id=$1 AND tenant_id=$2`,[checkpointId,tenantId])).rows[0];
 }
 
@@ -62,23 +63,23 @@ async function validateCheckpoint({pool, checkpointId, tenantId, actor='system',
   if(cp.validity==='QUARANTINED') throw fail('CHECKPOINT_QUARANTINED','Checkpoint is quarantined');
   const {envelope}=await buildEnvelope({pool,planId:cp.plan_id,tenantId,checkpoint:cp,actor});
   const mismatches=[];
-  for(const key of ['templateVersionId','templateContentHash','schemaFamily','schemaVersion','schemaHash','planHash','inputFingerprint','outputFingerprint','providerStateHash','credentialStateHash','admissionStateHash','sideEffectBoundary']) {
+  for(const key of ['templateVersionId','templateContentHash','schemaFamily','schemaVersion','schemaHash','planHash','inputFingerprint','outputFingerprint','providerStateHash','credentialStateHash','admissionStateHash','sideEffectBoundary','workflowRunId']) {
     const column = key.replace(/[A-Z]/g, m => `_${m.toLowerCase()}`);
     if(cp[column] != null && String(cp[column]) !== String(envelope[key])) mismatches.push(key);
   }
   if(cp.checkpoint_epoch != null && Number(cp.checkpoint_epoch)!==Number(envelope.checkpointEpoch)) mismatches.push('checkpointEpoch');
   if(cp.deadline_at && !allowExpired && new Date(cp.deadline_at).getTime() <= Date.now()) mismatches.push('deadlineExpired');
   if(hash(cp.safe_state)!==cp.state_hash) mismatches.push('stateHash');
-  if(cp.validation_hash && cp.validation_hash!==hash({...envelope, actor:cp.validated_by||'system'})) mismatches.push('validationHash');
+  if(cp.validation_hash && cp.validation_hash!==hash(stableEnvelope(envelope))) mismatches.push('validationHash');
   const valid=mismatches.length===0;
   await pool.query(`INSERT INTO forge_workflow_checkpoint_diagnostics(checkpoint_id,tenant_id,plan_id,execution_epoch,outcome,reason,evidence,actor) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,[cp.id,tenantId,cp.plan_id,cp.execution_epoch,valid?'VALID':'INVALID',valid?null:'Checkpoint compatibility or integrity validation failed',JSON.stringify({mismatches,current:{templateVersionId:envelope.templateVersionId,schemaHash:envelope.schemaHash,providerStateHash:envelope.providerStateHash,credentialStateHash:envelope.credentialStateHash,admissionStateHash:envelope.admissionStateHash}}),actor]);
-  await pool.query(`UPDATE forge_workflow_checkpoints SET validity=$2,validated_at=now(),validated_by=$3,invalid_reason=$4 WHERE id=$1 AND tenant_id=$5`,[cp.id,valid?'VALID':'INVALID',actor,valid?null:mismatches.join(','),tenantId]);
+  await pool.query(`UPDATE forge_workflow_checkpoints SET validity=$2,validated_at=now(),validated_by=$3,invalid_reason=$4,updated_at=now() WHERE id=$1 AND tenant_id=$5`,[cp.id,valid?'VALID':'INVALID',actor,valid?null:mismatches.join(','),tenantId]);
   if(!valid) throw fail('CHECKPOINT_INVALID',`Checkpoint is not safely reusable: ${mismatches.join(',')}`);
   return {valid:true,checkpoint:cp,mismatches:[]};
 }
 
 async function quarantineCheckpoint({pool,checkpointId,tenantId,actor='operator',reason='operator quarantine'}) {
-  const result=await pool.query(`UPDATE forge_workflow_checkpoints SET validity='QUARANTINED',invalid_reason=$3,validated_at=now(),validated_by=$4 WHERE id=$1 AND tenant_id=$2 RETURNING *`,[checkpointId,tenantId,reason,actor]);
+  const result=await pool.query(`UPDATE forge_workflow_checkpoints SET validity='QUARANTINED',invalid_reason=$3,validated_at=now(),validated_by=$4,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`,[checkpointId,tenantId,reason,actor]);
   if(!result.rows[0]) throw fail('CHECKPOINT_MISSING','Checkpoint not found',404);
   await pool.query(`INSERT INTO forge_workflow_checkpoint_diagnostics(checkpoint_id,tenant_id,plan_id,execution_epoch,outcome,reason,evidence,actor) VALUES($1,$2,$3,$4,'QUARANTINED',$5,'{}',$6)`,[checkpointId,tenantId,result.rows[0].plan_id,result.rows[0].execution_epoch,reason,actor]);
   return result.rows[0];
