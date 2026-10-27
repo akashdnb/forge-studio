@@ -83,15 +83,17 @@ class ArtifactStorageService {
   }
 
   async _recordLineage(artifactId, inputVersionIds, actor) {
-    if (!Array.isArray(inputVersionIds) || !inputVersionIds.length) return;
-    try {
-      const controlPlane = new ArtifactIntegrityControlPlane({ pool: this.repository.db.pool, storage: this.storage, logger: this.repository.logger || console, metrics: this.observability?.metrics });
-      await controlPlane.ensureArtifactLineage({ artifactId, inputVersionIds, actor });
-    } catch (error) {
-      if (error.code === 'TENANT_SCOPE_VIOLATION' || error.code === 'BROKEN_LINEAGE') throw error;
-      this.observability?.metrics.inc('forge_artifact_lineage_total', { outcome: 'failed' });
-      throw error;
-    }
+    const versions = [...new Set(Array.isArray(inputVersionIds) ? inputVersionIds.filter(Boolean) : [])];
+    if (!versions.length) return;
+    const artifact = (await this.repository.db.pool.query(`SELECT a.id,e.episode_id,e.project_id,p.tenant_id
+      FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE a.id=$1`, [artifactId])).rows[0];
+    if (!artifact) throw Object.assign(new Error('artifact not found for lineage'), { code: 'ARTIFACT_NOT_FOUND' });
+    const parents = (await this.repository.db.pool.query(`SELECT DISTINCT ON (a.version_id) a.id,a.version_id
+      FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id
+      WHERE a.version_id=ANY($1::text[]) AND e.episode_id=$2 AND p.id=$3 AND p.tenant_id=$4
+      ORDER BY a.version_id,a.created_at DESC,a.id`, [versions, artifact.episode_id, artifact.project_id, artifact.tenant_id])).rows;
+    const controlPlane = new ArtifactIntegrityControlPlane({ pool: this.repository.db.pool, storage: this.storage, logger: this.repository.logger || console, metrics: this.observability?.metrics });
+    for (const parent of parents) await controlPlane.recordArtifactLineage({ childArtifactId: artifact.id, parentArtifactId: parent.id, relation: 'DERIVED_FROM', actor, evidence: { inputVersionId: parent.version_id } });
   }
 
   async openArtifact({ artifactId, projectId, expectedVersionId }) {
