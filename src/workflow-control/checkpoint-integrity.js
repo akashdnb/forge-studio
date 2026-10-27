@@ -48,17 +48,23 @@ async function buildEnvelope({pool, planId, tenantId, checkpoint, actor='system'
 }
 
 async function captureStageCheckpoint({pool,planId,tenantId,actor='workflow',stageId=null}) {
-  const control=(await pool.query(`SELECT * FROM forge_workflow_controls WHERE plan_id=$1 AND tenant_id=$2`,[planId,tenantId])).rows[0];
-  if(!control||!['RUNNABLE','RESUMING'].includes(control.state))return null;
-  const stages=(await pool.query(`SELECT * FROM forge_execution_plan_stages WHERE plan_id=$1 ORDER BY created_at,id`,[planId])).rows;
-  const stage=stageId?stages.find(s=>s.stage_id===stageId):stages.find(s=>['QUEUED','RUNNING','FAILED'].includes(s.status));
-  if(!stage)return null;
-  const safeState={planId,templateVersionId:control.template_version_id,executionEpoch:Number(control.execution_epoch),stages:stages.map(s=>({id:s.stage_id,runtimeStage:s.runtime_stage,status:s.status,jobId:s.job_id,outputVersionIds:s.output_version_ids||[],outputArtifactIds:s.output_artifact_ids||[]}))};
-  const checkpointId=randomUUID();
-  const sideEffectBoundary=['PUBLISH','PACKAGING','RENDER','ASSETS','NARRATION','TRANSCRIPTION','RESEARCH'].includes(String(stage.runtime_stage).toUpperCase())?'EXTERNAL':'NONE';
-  const contract={schemaVersion:2,entry:'workflow-stage',stageId:stage.stage_id,allowedReentry:['RETRY_FROM_CHECKPOINT'],compensationRequired:stage.status==='FAILED',safeReplay:sideEffectBoundary==='NONE'};
-  const result=await pool.query(`INSERT INTO forge_workflow_checkpoints(id,plan_id,tenant_id,template_version_id,execution_epoch,checkpoint_version,stage_id,runtime_stage,safe_state,reentry_contract,schema_version,state_hash,side_effect_boundary) VALUES($1,$2,$3,$4,$5,(SELECT COALESCE(max(checkpoint_version),0)+1 FROM forge_workflow_checkpoints WHERE plan_id=$2),$6,$7,$8::jsonb,$9::jsonb,1,$10,$11) ON CONFLICT(plan_id,execution_epoch,stage_id) DO NOTHING RETURNING id`,[checkpointId,planId,tenantId,control.template_version_id,control.execution_epoch,stage.stage_id,stage.runtime_stage,JSON.stringify(safeState),JSON.stringify(contract),hash(safeState),sideEffectBoundary]);
-  if(!result.rows[0])return (await pool.query(`SELECT * FROM forge_workflow_checkpoints WHERE plan_id=$1 AND execution_epoch=$2 AND stage_id=$3`,[planId,control.execution_epoch,stage.stage_id])).rows[0]||null;
+  const c=await pool.connect();let checkpointId=null;
+  try{
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`forge-workflow-checkpoint:${tenantId}:${planId}`]);
+    const control=(await c.query(`SELECT * FROM forge_workflow_controls WHERE plan_id=$1 AND tenant_id=$2 FOR UPDATE`,[planId,tenantId])).rows[0];
+    if(!control||!['RUNNABLE','RESUMING'].includes(control.state)){await c.query('ROLLBACK');return null;}
+    const stages=(await c.query(`SELECT * FROM forge_execution_plan_stages WHERE plan_id=$1 ORDER BY created_at,id`,[planId])).rows;
+    const stage=stageId?stages.find(s=>s.stage_id===stageId):stages.find(s=>['QUEUED','RUNNING','FAILED'].includes(s.status));
+    if(!stage){await c.query('ROLLBACK');return null;}
+    const safeState={planId,templateVersionId:control.template_version_id,executionEpoch:Number(control.execution_epoch),stages:stages.map(s=>({id:s.stage_id,runtimeStage:s.runtime_stage,status:s.status,jobId:s.job_id,outputVersionIds:s.output_version_ids||[],outputArtifactIds:s.output_artifact_ids||[]}))};
+    checkpointId=randomUUID();
+    const sideEffectBoundary=['PUBLISH','PACKAGING','RENDER','ASSETS','NARRATION','TRANSCRIPTION','RESEARCH'].includes(String(stage.runtime_stage).toUpperCase())?'EXTERNAL':'NONE';
+    const contract={schemaVersion:2,entry:'workflow-stage',stageId:stage.stage_id,allowedReentry:['RETRY_FROM_CHECKPOINT'],compensationRequired:stage.status==='FAILED',safeReplay:sideEffectBoundary==='NONE'};
+    const result=await c.query(`INSERT INTO forge_workflow_checkpoints(id,plan_id,tenant_id,template_version_id,execution_epoch,checkpoint_version,stage_id,runtime_stage,safe_state,reentry_contract,schema_version,state_hash,side_effect_boundary) VALUES($1,$2,$3,$4,$5,(SELECT COALESCE(max(checkpoint_version),0)+1 FROM forge_workflow_checkpoints WHERE plan_id=$2),$6,$7,$8::jsonb,$9::jsonb,1,$10,$11) ON CONFLICT(plan_id,execution_epoch,stage_id) DO NOTHING RETURNING id`,[checkpointId,planId,tenantId,control.template_version_id,control.execution_epoch,stage.stage_id,stage.runtime_stage,JSON.stringify(safeState),JSON.stringify(contract),hash(safeState),sideEffectBoundary]);
+    if(!result.rows[0]){await c.query('COMMIT');return (await pool.query(`SELECT * FROM forge_workflow_checkpoints WHERE plan_id=$1 AND execution_epoch=$2 AND stage_id=$3`,[planId,control.execution_epoch,stage.stage_id])).rows[0]||null;}
+    await c.query('COMMIT');
+  }catch(error){await c.query('ROLLBACK').catch(()=>{});throw error}finally{c.release()}
   return sealCheckpoint({pool,checkpointId,tenantId,actor});
 }
 
