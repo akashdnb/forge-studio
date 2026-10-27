@@ -26,7 +26,7 @@ class DistributedLock {
         const result = await this._tx(async (client) => {
           const remaining = Math.max(25, Math.min(pollMs, Math.max(25, deadline - Date.now())));
           await client.query(`SET LOCAL lock_timeout = '${remaining}ms'`);
-          const existing = await client.query('SELECT * FROM forge_coordination_locks WHERE scope_key=$1 FOR UPDATE', [scopeKey]);
+          const existing = await client.query("SELECT *, (state='HELD' AND expires_at>clock_timestamp()) AS coordination_active FROM forge_coordination_locks WHERE scope_key=$1 FOR UPDATE", [scopeKey]);
           const row = existing.rows[0];
           if (!row) {
             const inserted = await client.query(`INSERT INTO forge_coordination_locks
@@ -34,8 +34,7 @@ class DistributedLock {
               VALUES($1,$2,$3,$4,1,1,clock_timestamp(),clock_timestamp()+($5::text||' milliseconds')::interval,clock_timestamp(),$6,$7,$8,$9,'HELD',$10::jsonb,clock_timestamp()) RETURNING *`, [scopeKey, tenantId, projectId, ownerId, leaseMs, waitPolicy, priority, purpose, resourceVersion, JSON.stringify(metadata)]);
             await this._audit(client, inserted.rows[0], 'ACQUIRED', { attempts }); return this._lease(inserted.rows[0]);
           }
-          const active = row.state === 'HELD' && row.expires_at && new Date(row.expires_at).getTime() > Date.now();
-          if (active) return { acquired: false, code: 'LOCK_BUSY', holder: this._public(row) };
+          if (row.coordination_active) return { acquired: false, code: 'LOCK_BUSY', holder: this._public(row) };
           const token = BigInt(row.fencing_token || 0) + 1n; const epoch = BigInt(row.epoch || 0) + 1n;
           const updated = await client.query(`UPDATE forge_coordination_locks SET tenant_id=$2,project_id=$3,owner_id=$4,fencing_token=$5,epoch=$6,acquired_at=clock_timestamp(),expires_at=clock_timestamp()+($7::text||' milliseconds')::interval,last_renewed_at=clock_timestamp(),wait_policy=$8,priority=$9,purpose=$10,resource_version=$11,state='HELD',metadata=$12::jsonb,updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [row.id, tenantId, projectId, ownerId, token.toString(), epoch.toString(), leaseMs, waitPolicy, priority, purpose, resourceVersion, JSON.stringify(metadata)]);
           await this._audit(client, updated.rows[0], row.state === 'HELD' ? 'RECOVERED_EXPIRED' : 'ACQUIRED', { attempts, previousOwner: row.owner_id, previousToken: row.fencing_token }); return this._lease(updated.rows[0]);
@@ -73,10 +72,10 @@ class DistributedLock {
   }
   async inspect({ scopeKey = null, tenantId = null, projectId = null, includeReleased = false, limit = 100 } = {}) {
     limit = int('limit', limit, { min: 1, max: 500 }); const where = [], params = []; if (scopeKey) { params.push(scopeKey); where.push(`scope_key=$${params.length}`); } if (tenantId) { params.push(tenantId); where.push(`tenant_id=$${params.length}`); } if (projectId) { params.push(projectId); where.push(`project_id=$${params.length}`); } if (!includeReleased) where.push(`state='HELD'`); params.push(limit);
-    const result = await this.pool.query(`SELECT * FROM forge_coordination_locks ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY priority DESC,expires_at ASC LIMIT $${params.length}`, params); return result.rows.map((row) => ({ ...this._public(row), expired: row.state === 'HELD' && new Date(row.expires_at).getTime() <= Date.now() }));
+    const result = await this.pool.query(`SELECT *, (state='HELD' AND expires_at<=clock_timestamp()) AS coordination_expired FROM forge_coordination_locks ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY priority DESC,expires_at ASC LIMIT $${params.length}`, params); return result.rows.map((row) => ({ ...this._public(row), expired: row.coordination_expired === true }));
   }
   async recoverExpired({ scopeKey, reason = 'operator_recovery' } = {}) {
-    required(scopeKey, 'scopeKey'); return this._tx(async (client) => { const current = await client.query('SELECT * FROM forge_coordination_locks WHERE scope_key=$1 FOR UPDATE', [scopeKey]); const row = current.rows[0]; if (!row) return { recovered: false, code: 'NOT_FOUND' }; if (row.state !== 'HELD' || new Date(row.expires_at).getTime() > Date.now()) return { recovered: false, code: 'NOT_EXPIRED', lock: this._public(row) }; const updated = await client.query(`UPDATE forge_coordination_locks SET state='RELEASED',expires_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [row.id]); await this._audit(client, updated.rows[0], 'FORCE_RECOVERED', { reason, previousOwner: row.owner_id, previousToken: row.fencing_token }); this._metric('recover', 'success'); return { recovered: true, lock: this._public(updated.rows[0]) }; });
+    required(scopeKey, 'scopeKey'); return this._tx(async (client) => { const current = await client.query("SELECT *, (state='HELD' AND expires_at<=clock_timestamp()) AS coordination_expired FROM forge_coordination_locks WHERE scope_key=$1 FOR UPDATE", [scopeKey]); const row = current.rows[0]; if (!row) return { recovered: false, code: 'NOT_FOUND' }; if (!row.coordination_expired) return { recovered: false, code: 'NOT_EXPIRED', lock: this._public(row) }; const updated = await client.query(`UPDATE forge_coordination_locks SET state='RELEASED',expires_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [row.id]); await this._audit(client, updated.rows[0], 'FORCE_RECOVERED', { reason, previousOwner: row.owner_id, previousToken: row.fencing_token }); this._metric('recover', 'success'); return { recovered: true, lock: this._public(updated.rows[0]) }; });
   }
   async health() { const result = await this.pool.query(`SELECT count(*) FILTER(WHERE state='HELD')::int held,count(*) FILTER(WHERE state='HELD' AND expires_at<=clock_timestamp())::int expired,count(*)::int total FROM forge_coordination_locks`); return { status: 'ok', ...result.rows[0] }; }
   _assertLease(lease) { if (!lease || !lease.scopeKey || lease.fencingToken == null || lease.epoch == null || !lease.ownerId) throw new TypeError('A valid coordination lease is required'); }
