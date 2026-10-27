@@ -1,0 +1,28 @@
+groups:
+  - name: forge-recovery
+    rules:
+      - alert: ForgeRecoveryBackupIntegrityFailed
+        expr: forge_recovery_backup_integrity_failed_total > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: Forge recovery backup integrity failure }
+      - alert: ForgeRecoveryCoverageIncomplete
+        expr: forge_recovery_backup_coverage_incomplete > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: Forge recovery coverage is incomplete }
+      - alert: ForgeRecoveryLastKnownGoodStale
+        expr: forge_recovery_last_known_good_age_seconds > 86400
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: Forge last-known-good recovery point is stale }
+      - alert: ForgeRecoveryRestoreVerificationFailed
+        expr: forge_recovery_restore_verification_failed_total > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: Forge restore drill verification failed }
+      - alert: ForgeRecoveryRtoBudgetExceeded
+        expr: forge_recovery_last_verified_rto_ms > forge_recovery_rto_budget_ms
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: Forge recovery RTO budget exceeded }
