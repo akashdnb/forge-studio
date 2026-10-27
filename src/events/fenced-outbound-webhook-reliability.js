@@ -3,12 +3,18 @@
 const crypto = require('node:crypto');
 const { OutboundWebhookReliability } = require('./outbound-webhook-reliability');
 const { computeBackoff } = require('./durable-delivery');
+const { requestPinned } = require('./outbound-webhook-http');
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 class FencedOutboundWebhookReliability extends OutboundWebhookReliability {
+  constructor(options = {}) {
+    super(options);
+    this.requestImpl = options.requestImpl || requestPinned;
+  }
+
   async finishDelivery(delivery, options = {}) {
     const statusCode = options.response?.status || null;
     let next = options.outcome;
