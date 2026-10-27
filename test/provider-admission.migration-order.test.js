@@ -1,0 +1,3 @@
+'use strict';
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+test('provider admission migration is uniquely ordered after the migration frontier',()=>{const files=fs.readdirSync(path.join(__dirname,'..','migrations')).filter(f=>f.endsWith('.sql'));const nums=files.map(f=>({f,n:Number(f.match(/^(\d+)_/)?.[1])})).filter(x=>Number.isInteger(x.n));const seen=new Map();for(const x of nums){assert.equal(seen.get(x.n),undefined,`duplicate migration number ${x.n}`);seen.set(x.n,x.f)}assert.equal(seen.get(111),'111_provider_execution_admission.sql');assert.ok(Math.max(...nums.filter(x=>x.n<111).map(x=>x.n))<111)});
