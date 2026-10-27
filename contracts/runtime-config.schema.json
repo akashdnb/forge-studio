@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Forge Studio runtime policy",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean", "default": true } }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+          "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "secretRef": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxDispatchesPerTick": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "leaseSeconds": { "type": "integer", "minimum": 10, "maximum": 3600 }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxEstimatedCost": { "type": "number", "minimum": 0 },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+      }
+    },
+    "artifactStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "driver": { "enum": ["local", "s3"] },
+        "maxBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requiredApproval": { "type": "boolean" },
+        "allowHotReload": { "type": "boolean" }
+      }
+    }
+  }
+}

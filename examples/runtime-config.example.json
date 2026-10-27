@@ -1,0 +1,15 @@
+{
+  "execution": { "enabled": true },
+  "providers": {
+    "tenant-123:openai": {
+      "enabled": true,
+      "timeoutMs": 600000,
+      "maxAttempts": 3,
+      "secretRef": "openai.api_key"
+    }
+  },
+  "scheduler": { "maxDispatchesPerTick": 2, "leaseSeconds": 300 },
+  "budgets": { "maxEstimatedCost": 25, "currency": "USD" },
+  "artifactStorage": { "driver": "s3", "maxBytes": 10737418240 },
+  "release": { "requiredApproval": true, "allowHotReload": true }
+}
