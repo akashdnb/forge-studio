@@ -35,21 +35,6 @@ CREATE INDEX IF NOT EXISTS evidence_search_tenant_target_idx ON evidence_search_
 CREATE INDEX IF NOT EXISTS evidence_search_tenant_request_idx ON evidence_search_index(tenant_id, request_id, ledger_seq DESC);
 CREATE INDEX IF NOT EXISTS evidence_search_tenant_hash_idx ON evidence_search_index(tenant_id, event_hash);
 
-CREATE TABLE IF NOT EXISTS evidence_legal_holds (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id text NOT NULL,
-  project_id text,
-  event_id char(64),
-  reason text NOT NULL,
-  created_by text NOT NULL,
-  released_by text,
-  active boolean NOT NULL DEFAULT true,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  released_at timestamptz
-);
-CREATE INDEX IF NOT EXISTS evidence_legal_holds_scope_idx ON evidence_legal_holds(tenant_id, project_id, active);
-CREATE INDEX IF NOT EXISTS evidence_legal_holds_event_idx ON evidence_legal_holds(tenant_id, event_id, active);
-
 CREATE TABLE IF NOT EXISTS evidence_integrity_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id text,
@@ -112,12 +97,12 @@ DECLARE
   service_value text;
 BEGIN
   class_name := forge_evidence_event_class(source_name, NEW.operation);
-  version_value := COALESCE(NEW.provenance_id, NULL);
+  version_value := NEW.provenance_id;
   service_value := NULLIF(current_setting('forge.service_identity', true), '');
   SELECT EXISTS (
-    SELECT 1 FROM evidence_legal_holds h
+    SELECT 1 FROM privacy_holds h
     WHERE h.active AND h.tenant_id IS NOT DISTINCT FROM NEW.tenant_id
-      AND (h.event_id = NEW.event_id OR (h.event_id IS NULL AND (h.project_id IS NULL OR h.project_id = NEW.project_id)))
+      AND (h.project_id IS NULL OR h.project_id = NEW.project_id)
   ) INTO hold_flag;
   IF hold_flag THEN retention_state_value := 'PRESERVED'; END IF;
   INSERT INTO evidence_search_index(
