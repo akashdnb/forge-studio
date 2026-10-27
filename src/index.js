@@ -6,6 +6,7 @@ module.exports = {
   ...require('./domain/approval-service'),
   ...require('./domain/qa-service'),
   ...require('./domain/production-service'),
+  ...require('./approval-control/approval-control'),
   ...require('./pipeline/provider-pipeline'),
   ...require('./pipeline/pipeline-service'),
   ...require('./pipeline/scene-plan'),

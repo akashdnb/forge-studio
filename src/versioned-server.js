@@ -1,6 +1,7 @@
 require('./security/boundary-bootstrap');
 require('./generation-reproducibility/http-bootstrap');
 require('./storage/artifact-delivery-http-bootstrap');
+require('./approval-control/http-bootstrap');
 const { installHttpVersioning } = require('./api/api-versioning');
 require('./runtime/runtime-http-hook');
 require('./diff/http');
