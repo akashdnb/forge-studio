@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS package_attestations (
   payload_hash char(64) NOT NULL,
   signature char(64) NOT NULL,
   signature_algorithm text NOT NULL CHECK (signature_algorithm IN ('HMAC-SHA256')),
+  reason text NOT NULL DEFAULT 'package-build',
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   status text NOT NULL DEFAULT 'VERIFIED' CHECK (status IN ('VERIFIED','DRIFTED','REVOKED')),
   inputs jsonb NOT NULL DEFAULT '{}'::jsonb,
   toolchain jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -22,6 +24,8 @@ CREATE TABLE IF NOT EXISTS package_attestations (
   UNIQUE(package_artifact_id, build_fingerprint),
   UNIQUE(package_artifact_id, attestation_version)
 );
+ALTER TABLE package_attestations ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'package-build';
+ALTER TABLE package_attestations ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS package_attestations_scope_idx ON package_attestations(tenant_id, project_id, episode_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS package_attestations_status_idx ON package_attestations(status, created_at DESC);
 
@@ -54,6 +58,8 @@ BEGIN
      OR OLD.build_fingerprint IS DISTINCT FROM NEW.build_fingerprint
      OR OLD.payload_hash IS DISTINCT FROM NEW.payload_hash
      OR OLD.signature IS DISTINCT FROM NEW.signature
+     OR OLD.reason IS DISTINCT FROM NEW.reason
+     OR OLD.payload IS DISTINCT FROM NEW.payload
      OR OLD.inputs IS DISTINCT FROM NEW.inputs
      OR OLD.toolchain IS DISTINCT FROM NEW.toolchain THEN
     RAISE EXCEPTION 'package attestation identity is immutable';
