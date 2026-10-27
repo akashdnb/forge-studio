@@ -10,143 +10,77 @@ const { WorkflowScheduler } = require('./scheduling/workflow-scheduler');
 const { URL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { authenticate, minimumRoleForRoute, hasRole, RateLimiter, csrfAllowed, applySecurityHeaders, cors, safeError } = require('./security/http-security');
-
-const port = Number.parseInt(process.env.PORT || '8080', 10);
-const host = process.env.HOST || '0.0.0.0';
+const port = Number.parseInt(process.env.PORT || '8080', 10), host = process.env.HOST || '0.0.0.0';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError('PORT must be an integer between 1 and 65535');
-
-function json(response, status, body, requestId) {
-  applySecurityHeaders(response);
-  response.setHeader('content-type', 'application/json; charset=utf-8');
-  if (requestId) response.setHeader('x-request-id', requestId);
-  response.writeHead(status); response.end(JSON.stringify(body));
-}
-
-function isArtifactContentRequest(request) {
-  const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-  return /^\/v1\/artifacts\/[^/]+\/content$/.test(pathname) && (request.url || '').includes('access_token=');
-}
-
+function json(response, status, body, requestId) { applySecurityHeaders(response); response.setHeader('content-type', 'application/json; charset=utf-8'); if (requestId) response.setHeader('x-request-id', requestId); response.writeHead(status); response.end(JSON.stringify(body)); }
+function isArtifactContentRequest(request) { const pathname = new URL(request.url || '/', 'http://localhost').pathname; return /^\/v1\/artifacts\/[^/]+\/content$/.test(pathname) && (request.url || '').includes('access_token='); }
 async function start() {
   let repository = null, pool = null, usage = null, artifactGateway = null, scheduler = null;
   if (process.env.DATABASE_URL) {
     let Pool; try { ({ Pool } = require('pg')); } catch { throw new Error('DATABASE_URL is set but the optional pg package is unavailable'); }
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '10', 10), idleTimeoutMillis: 30000, connectionTimeoutMillis: 5000 });
-    repository = new PersistentProductionRepository({ pool }); usage = new UsageAccountingService({ pool });
-    scheduler = new WorkflowScheduler({ pool, queue: new JobQueue({ pool }), schedulerId: 'forge-api-metrics' });
+    repository = new PersistentProductionRepository({ pool }); usage = new UsageAccountingService({ pool }); scheduler = new WorkflowScheduler({ pool, queue: new JobQueue({ pool }), schedulerId: 'forge-api-metrics' });
     try { await pool.query('SELECT 1'); } catch (error) { await pool.end(); throw new Error(`PostgreSQL connection failed: ${error.message}`); }
-    if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate();
-    if (usage.required) await usage.syncConfiguration();
-    artifactGateway = new ProductionArtifactAccessGateway({ repository, storage: createStorageFromEnv() });
+    if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate(); if (usage.required) await usage.syncConfiguration(); artifactGateway = new ProductionArtifactAccessGateway({ repository, storage: createStorageFromEnv() });
   }
-
-  const { server } = createExtendedApiServer({ repository, apiToken: process.env.API_BEARER_TOKEN || null, allowUnauthenticatedRead: false });
+  const internalBridgeToken = randomUUID();
+  const { server } = createExtendedApiServer({ repository, apiToken: internalBridgeToken, allowUnauthenticatedRead: false });
   const apiHandler = server.listeners('request')[0]; server.removeAllListeners('request');
-  const authSecret = process.env.FORGE_AUTH_SIGNING_SECRET || null;
-  const staticActor = process.env.FORGE_STATIC_ACTOR_ID || null;
-  const staticTenant = process.env.FORGE_STATIC_TENANT_ID || null;
+  const authSecret = process.env.FORGE_AUTH_SIGNING_SECRET || null, staticActor = process.env.FORGE_STATIC_ACTOR_ID || null, staticTenant = process.env.FORGE_STATIC_TENANT_ID || null;
   const origins = new Set((process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || '').split(',').map((v) => v.trim()).filter(Boolean));
   const limiter = new RateLimiter({ limit: Number.parseInt(process.env.FORGE_RATE_LIMIT_PER_MINUTE || '120', 10), windowMs: 60_000 });
-
   async function securityContext(request, requestId) {
     const auth = authenticate(request, { apiToken: process.env.API_BEARER_TOKEN || null, authSecret, staticActor, staticTenant });
     if (!auth) { safeError(request._response, 401, 'UNAUTHORIZED', requestId); return null; }
+    if (auth.tokenId && pool) { const revoked = await pool.query('SELECT 1 FROM security_token_revocations WHERE jti=$1 AND expires_at > now()', [auth.tokenId]); if (revoked.rows[0]) { safeError(request._response, 401, 'TOKEN_REVOKED', requestId); return null; } }
     if (!csrfAllowed(request, origins)) { safeError(request._response, 403, 'CSRF_BLOCKED', requestId); return null; }
     const bucket = limiter.check(`${auth.tenantId || 'public'}:${auth.actor}:${request.socket.remoteAddress || 'unknown'}`);
     request._response.setHeader('x-ratelimit-limit', String(limiter.limit)); request._response.setHeader('x-ratelimit-remaining', String(bucket.remaining)); request._response.setHeader('x-ratelimit-reset', String(Math.ceil(bucket.resetAt / 1000)));
     if (!bucket.allowed) { safeError(request._response, 429, 'RATE_LIMITED', requestId); return null; }
-    request.headers['x-actor-id'] = auth.actor;
-    request._auth = auth;
-    return auth;
+    request.headers['x-actor-id'] = auth.actor; request.headers.authorization = `Bearer ${internalBridgeToken}`; request._auth = auth; return auth;
   }
-
   async function projectAccess(auth, projectId, requiredRole) {
-    const result = await pool.query(`SELECT p.id,p.tenant_id,p.created_by,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.actor_id=$2 WHERE p.id=$1`, [projectId, auth.actor]);
-    const row = result.rows[0];
-    if (!row || row.tenant_id !== auth.tenantId) return false;
-    const role = row.role || (row.created_by === auth.actor ? 'OWNER' : null);
-    return Boolean(role && (requiredRole === 'VIEWER' || hasRole({ roles: [role] }, requiredRole)));
+    const result = await pool.query(`SELECT p.id,p.tenant_id,p.created_by,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.actor_id=$2 WHERE p.id=$1`, [projectId, auth.actor]); const row = result.rows[0];
+    if (!row || row.tenant_id !== auth.tenantId) return false; const role = row.role || (row.created_by === auth.actor ? 'OWNER' : null); return Boolean(role && (requiredRole === 'VIEWER' || hasRole({ roles: [role] }, requiredRole)));
   }
-
   async function resourceProjectId(pathname) {
-    const path = pathname.split('/').filter(Boolean).map(decodeURIComponent);
-    if (path[0] !== 'v1') return null;
+    const path = pathname.split('/').filter(Boolean).map(decodeURIComponent); if (path[0] !== 'v1') return null;
     if (path[1] === 'episodes' && path[2]) return (await pool.query('SELECT project_id FROM episodes WHERE id=$1', [path[2]])).rows[0]?.project_id || null;
     if (path[1] === 'versions' && path[2]) return (await pool.query('SELECT e.project_id FROM version_records v JOIN episodes e ON e.id=v.episode_id WHERE v.id=$1', [path[2]])).rows[0]?.project_id || null;
     if (path[1] === 'artifacts' && path[2]) return (await pool.query('SELECT e.project_id FROM artifacts a JOIN episodes e ON e.id=a.episode_id WHERE a.id=$1', [path[2]])).rows[0]?.project_id || null;
-    if (path[1] === 'jobs' && path[2]) return (await pool.query('SELECT project_id FROM forge_jobs WHERE id=$1', [path[2]])).rows[0]?.project_id || null;
-    return null;
+    if (path[1] === 'jobs' && path[2]) return (await pool.query('SELECT project_id FROM forge_jobs WHERE id=$1', [path[2]])).rows[0]?.project_id || null; return null;
   }
-
   server.on('request', async (request, response) => {
-    const requestId = request.headers['x-request-id'] || randomUUID(); response.setHeader('x-request-id', requestId); request._response = response;
-    applySecurityHeaders(response);
-    const origin = request.headers.origin;
-    if (origin && !cors(request, response, origins)) return safeError(response, 403, 'CORS_BLOCKED', requestId);
-    if (request.method === 'OPTIONS') return json(response, 204, {}, requestId);
-
+    const requestId = request.headers['x-request-id'] || randomUUID(); response.setHeader('x-request-id', requestId); request._response = response; applySecurityHeaders(response);
+    const origin = request.headers.origin; if (origin && !cors(request, response, origins)) return safeError(response, 403, 'CORS_BLOCKED', requestId); if (request.method === 'OPTIONS') return json(response, 204, {}, requestId);
     const pathname = new URL(request.url || '/', 'http://localhost').pathname;
     try {
-      if (pathname === '/internal/github-actions/callback') {
-        if (!repository) return json(response, 503, { error: { code: 'PERSISTENCE_UNAVAILABLE' } }, requestId);
-        return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN });
-      }
-      const auth = isArtifactContentRequest(request) ? null : await securityContext(request, requestId);
-      if (!auth && !isArtifactContentRequest(request)) return;
-
+      if (pathname === '/internal/github-actions/callback') { if (!repository) return json(response, 503, { error: { code: 'PERSISTENCE_UNAVAILABLE' } }, requestId); return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN }); }
+      const auth = isArtifactContentRequest(request) ? null : await securityContext(request, requestId); if (!auth && !isArtifactContentRequest(request)) return;
       if (artifactGateway && (pathname.startsWith('/v1/artifacts/') || pathname === '/v1/artifacts')) return handleArtifactAccess(request, response, { gateway: artifactGateway, apiToken: process.env.API_BEARER_TOKEN || null });
-      if (scheduler && (pathname === '/internal/scheduler/metrics' || pathname === '/internal/scheduler/health')) {
-        if (!auth || !hasRole(auth, 'OWNER')) return safeError(response, 403, 'FORBIDDEN', requestId);
-        const metrics = await scheduler.metrics(); return json(response, 200, { status: 'ok', schedulerId: scheduler.schedulerId, metrics }, requestId);
-      }
+      if (scheduler && (pathname === '/internal/scheduler/metrics' || pathname === '/internal/scheduler/health')) { if (!auth || !hasRole(auth, 'OWNER')) return safeError(response, 403, 'FORBIDDEN', requestId); const metrics = await scheduler.metrics(); return json(response, 200, { status: 'ok', schedulerId: scheduler.schedulerId, metrics }, requestId); }
       if (usage && /^\/v1\/usage(?:\/|$)/.test(pathname)) {
-        if (!auth || !hasRole(auth, 'VIEWER')) return safeError(response, 403, 'FORBIDDEN', requestId);
-        if (request.method !== 'GET') return json(response, 405, { error: { code: 'METHOD_NOT_ALLOWED' } }, requestId);
-        if (pathname === '/v1/usage/health') {
-          const budgets = await pool.query("SELECT state,COUNT(*)::int count FROM usage_budgets GROUP BY state ORDER BY state");
-          const reservations = await pool.query("SELECT status,COUNT(*)::int count FROM usage_reservations GROUP BY status ORDER BY status");
-          return json(response, 200, { enforcementEnabled: usage.required, budgets: budgets.rows, reservations: reservations.rows }, requestId);
-        }
-        const match = /^\/v1\/usage\/(episodes|projects|providers)\/([^/]+)$/.exec(pathname);
-        if (!match) return json(response, 404, { error: { code: 'NOT_FOUND' } }, requestId);
-        const type = match[1], value = decodeURIComponent(match[2]);
+        if (!auth || !hasRole(auth, 'VIEWER')) return safeError(response, 403, 'FORBIDDEN', requestId); if (request.method !== 'GET') return json(response, 405, { error: { code: 'METHOD_NOT_ALLOWED' } }, requestId);
+        if (pathname === '/v1/usage/health') { const budgets = await pool.query("SELECT state,COUNT(*)::int count FROM usage_budgets GROUP BY state ORDER BY state"), reservations = await pool.query("SELECT status,COUNT(*)::int count FROM usage_reservations GROUP BY status ORDER BY status"); return json(response, 200, { enforcementEnabled: usage.required, budgets: budgets.rows, reservations: reservations.rows }, requestId); }
+        const match = /^\/v1\/usage\/(episodes|projects|providers)\/([^/]+)$/.exec(pathname); if (!match) return json(response, 404, { error: { code: 'NOT_FOUND' } }, requestId); const type = match[1], value = decodeURIComponent(match[2]);
         if (type === 'episodes') { const pid = (await pool.query('SELECT project_id FROM episodes WHERE id=$1', [value])).rows[0]?.project_id; if (!pid || !(await projectAccess(auth, pid, 'VIEWER'))) return safeError(response, 403, 'FORBIDDEN', requestId); }
         if (type === 'projects' && !(await projectAccess(auth, value, 'VIEWER'))) return safeError(response, 403, 'FORBIDDEN', requestId);
         return json(response, 200, { item: await usage.summary({ [type === 'episodes' ? 'episodeId' : type === 'projects' ? 'projectId' : 'provider']: value }) }, requestId);
       }
-
-      if (repository && pathname === '/v1/projects' && request.method === 'GET') {
-        const rows = await pool.query(`SELECT p.* FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.actor_id=$1 WHERE p.tenant_id=$2 AND (m.actor_id IS NOT NULL OR p.created_by=$1) ORDER BY p.updated_at DESC`, [auth.actor, auth.tenantId]);
-        return json(response, 200, { items: rows.rows }, requestId);
-      }
+      if (repository && pathname === '/v1/projects' && request.method === 'GET') { const rows = await pool.query(`SELECT p.* FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.actor_id=$1 WHERE p.tenant_id=$2 AND (m.actor_id IS NOT NULL OR p.created_by=$1) ORDER BY p.updated_at DESC`, [auth.actor, auth.tenantId]); return json(response, 200, { items: rows.rows }, requestId); }
       if (repository && pathname === '/v1/episodes' && request.method === 'GET') {
-        const search = new URL(request.url, 'http://localhost').searchParams; const projectId = search.get('projectId');
-        if (projectId && !(await projectAccess(auth, projectId, 'VIEWER'))) return safeError(response, 403, 'FORBIDDEN', requestId);
-        const limit = Math.min(200, Math.max(1, Number(search.get('limit') || 50))); const offset = Math.max(0, Number(search.get('offset') || 0));
-        const rows = projectId
-          ? await pool.query('SELECT * FROM episodes WHERE project_id=$1 AND EXISTS (SELECT 1 FROM projects p WHERE p.id=episodes.project_id AND p.tenant_id=$2) ORDER BY updated_at DESC LIMIT $3 OFFSET $4', [projectId, auth.tenantId, limit, offset])
-          : await pool.query('SELECT e.* FROM episodes e JOIN projects p ON p.id=e.project_id LEFT JOIN project_members m ON m.project_id=e.project_id AND m.actor_id=$1 WHERE p.tenant_id=$2 AND (m.actor_id IS NOT NULL OR e.created_by=$1) ORDER BY e.updated_at DESC LIMIT $3 OFFSET $4', [auth.actor, auth.tenantId, limit, offset]);
+        const search = new URL(request.url, 'http://localhost').searchParams, projectId = search.get('projectId'); if (projectId && !(await projectAccess(auth, projectId, 'VIEWER'))) return safeError(response, 403, 'FORBIDDEN', requestId);
+        const limit = Math.min(200, Math.max(1, Number(search.get('limit') || 50))), offset = Math.max(0, Number(search.get('offset') || 0));
+        const rows = projectId ? await pool.query('SELECT * FROM episodes WHERE project_id=$1 AND EXISTS (SELECT 1 FROM projects p WHERE p.id=episodes.project_id AND p.tenant_id=$2) ORDER BY updated_at DESC LIMIT $3 OFFSET $4', [projectId, auth.tenantId, limit, offset]) : await pool.query('SELECT e.* FROM episodes e JOIN projects p ON p.id=e.project_id LEFT JOIN project_members m ON m.project_id=e.project_id AND m.actor_id=$1 WHERE p.tenant_id=$2 AND (m.actor_id IS NOT NULL OR e.created_by=$1) ORDER BY e.updated_at DESC LIMIT $3 OFFSET $4', [auth.actor, auth.tenantId, limit, offset]);
         return json(response, 200, { items: rows.rows }, requestId);
       }
-      if (repository && (pathname.startsWith('/v1/episodes/') || pathname.startsWith('/v1/versions/'))) {
-        const projectId = await resourceProjectId(pathname); const required = minimumRoleForRoute(request);
-        if (projectId && !(await projectAccess(auth, projectId, required))) return safeError(response, 403, 'FORBIDDEN', requestId);
-        if (!projectId && request.method !== 'GET') return safeError(response, 403, 'FORBIDDEN', requestId);
-      }
-      if (repository && pathname.startsWith('/v1/jobs')) {
-        const projectId = await resourceProjectId(pathname);
-        if (projectId && !(await projectAccess(auth, projectId, minimumRoleForRoute(request)))) return safeError(response, 403, 'FORBIDDEN', requestId);
-      }
-
+      if (repository && (pathname.startsWith('/v1/episodes/') || pathname.startsWith('/v1/versions/'))) { const projectId = await resourceProjectId(pathname), required = minimumRoleForRoute(request); if (projectId && !(await projectAccess(auth, projectId, required))) return safeError(response, 403, 'FORBIDDEN', requestId); if (!projectId && request.method !== 'GET') return safeError(response, 403, 'FORBIDDEN', requestId); }
+      if (repository && pathname.startsWith('/v1/jobs')) { const projectId = await resourceProjectId(pathname); if (projectId && !(await projectAccess(auth, projectId, minimumRoleForRoute(request)))) return safeError(response, 403, 'FORBIDDEN', requestId); }
       return apiHandler(request, response);
-    } catch (error) {
-      console.error(JSON.stringify({ requestId, code: error.code || 'SECURITY_FAILURE', message: error.message }));
-      return safeError(response, Number.isInteger(error.statusCode) ? error.statusCode : 500, error.code || 'INTERNAL_ERROR', requestId);
-    }
+    } catch (error) { console.error(JSON.stringify({ requestId, code: error.code || 'SECURITY_FAILURE', message: error.message })); return safeError(response, Number.isInteger(error.statusCode) ? error.statusCode : 500, error.code || 'INTERNAL_ERROR', requestId); }
   });
   server.listen(port, host, () => console.log(`Forge Studio API listening on ${host}:${port}; persistence=${repository ? 'postgres' : 'in-memory'}; security=enabled`));
-  let shuttingDown = false;
-  async function shutdown() { if (shuttingDown) return; shuttingDown = true; const timeout = setTimeout(() => process.exit(1), 10000); timeout.unref(); server.close(async () => { if (pool) await pool.end().catch(() => {}); clearTimeout(timeout); process.exit(); }); }
+  let shuttingDown = false; async function shutdown() { if (shuttingDown) return; shuttingDown = true; const timeout = setTimeout(() => process.exit(1), 10000); timeout.unref(); server.close(async () => { if (pool) await pool.end().catch(() => {}); clearTimeout(timeout); process.exit(); }); }
   process.on('SIGTERM', () => shutdown('SIGTERM')); process.on('SIGINT', () => shutdown('SIGINT'));
 }
 start().catch((error) => { console.error('Forge API startup failed:', error.message); process.exitCode = 1; });
