@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -28,6 +28,7 @@ jobs:
           --health-retries 12
     env:
       DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
+      FORGE_RUN_RECOVERY_INTEGRATION: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,6 +36,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm install --no-audit --no-fund
+      - run: npm run migrate
       - run: npm run check
+      - run: node --test test/recovery-postgres.integration.test.js
       - run: npm test
       - run: npm run demo -- "Why volcanoes erupt"

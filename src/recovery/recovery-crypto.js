@@ -1,0 +1,11 @@
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const { pipeline } = require('node:stream/promises');
+const { Writable } = require('node:stream');
+const { randomBytes, createCipheriv, createDecipheriv } = crypto;
+function keyFromEnv(value = process.env.FORGE_BACKUP_ENCRYPTION_KEY) { if (!value) throw Object.assign(new Error('FORGE_BACKUP_ENCRYPTION_KEY is required'), { code: 'BACKUP_KEY_MISSING' }); const key = Buffer.from(value, 'base64'); if (key.length !== 32) throw Object.assign(new Error('FORGE_BACKUP_ENCRYPTION_KEY must decode to 32 bytes'), { code: 'BACKUP_KEY_INVALID' }); return key; }
+async function encryptFile(input, output, key = keyFromEnv()) { const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', key, iv); const writer = fs.createWriteStream(output, { flags: 'wx', mode: 0o600 }); writer.write(Buffer.from('FGAR1')); writer.write(iv); await pipeline(fs.createReadStream(input), cipher, writer); await fsp.appendFile(output, cipher.getAuthTag()); return { keyId: process.env.FORGE_BACKUP_ENCRYPTION_KEY_ID || 'default' }; }
+async function decryptFile(input, output, key = keyFromEnv()) { const info = await fsp.stat(input); if (info.size < 33) throw Object.assign(new Error('encrypted artifact archive is truncated'), { code: 'ARTIFACT_ARCHIVE_CORRUPT' }); const handle = await fsp.open(input, 'r'); const header = Buffer.alloc(17); const tag = Buffer.alloc(16); try { await handle.read(header, 0, 17, 0); await handle.read(tag, 0, 16, info.size - 16); } finally { await handle.close(); } if (header.subarray(0, 5).toString() !== 'FGAR1') throw Object.assign(new Error('encrypted artifact archive header is invalid'), { code: 'ARTIFACT_ARCHIVE_CORRUPT' }); const decipher = createDecipheriv('aes-256-gcm', key, header.subarray(5, 17)); decipher.setAuthTag(tag); const writer = fs.createWriteStream(output, { flags: 'wx', mode: 0o600 }); await pipeline(fs.createReadStream(input, { start: 17, end: info.size - 17 }), decipher, writer); return output; }
+async function fileSha256(file) { const hash = crypto.createHash('sha256'); await pipeline(fs.createReadStream(file), new Writable({ write(chunk, _encoding, cb) { hash.update(chunk); cb(); } })); return hash.digest('hex'); }
+module.exports = { keyFromEnv, encryptFile, decryptFile, fileSha256 };
