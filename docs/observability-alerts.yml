@@ -1,0 +1,33 @@
+groups:
+  - name: forge-studio-production
+    rules:
+      - alert: ForgeApiErrorRateHigh
+        expr: sum(rate(forge_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(forge_http_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: Forge API 5xx rate is above 5%, runbook: docs/OBSERVABILITY.md }
+      - alert: ForgeJobQueueBacklog
+        expr: sum(forge_job_queue_depth{outcome="queued"}) > 100
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: Forge durable job queue is backed up }
+      - alert: ForgeJobFailuresHigh
+        expr: sum(rate(forge_job_failures_total{outcome="terminal"}[10m])) > 0.2
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: Forge terminal job failures are elevated }
+      - alert: ForgeProviderFailuresHigh
+        expr: sum(rate(forge_provider_requests_total{outcome=~"failure|retry"}[10m])) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: Provider calls are failing or retrying frequently }
+      - alert: ForgeDependencyDegraded
+        expr: forge_dependency_health == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: A Forge dependency is unavailable }
+      - alert: ForgeArtifactIoFailures
+        expr: sum(rate(forge_artifact_io_total{outcome=~"upload_failed|missing|corrupt"}[10m])) > 0.1
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: Artifact storage integrity or IO failures are elevated }
