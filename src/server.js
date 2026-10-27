@@ -1,6 +1,9 @@
 const { createExtendedApiServer } = require('./extended-http-api');
 const { PersistentProductionRepository } = require('./persistence/production-repository');
 const { handleGithubRunnerCallback } = require('./execution/github-actions-callback');
+const { createStorageFromEnv } = require('./storage');
+const { ArtifactAccessGateway } = require('./storage/artifact-access-gateway');
+const { handleArtifactAccess } = require('./storage/artifact-access-http');
 const { URL } = require('node:url');
 
 const port = Number.parseInt(process.env.PORT || '8080', 10);
@@ -8,7 +11,7 @@ const host = process.env.HOST || '0.0.0.0';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError('PORT must be an integer between 1 and 65535');
 
 async function start() {
-  let repository = null; let pool = null;
+  let repository = null; let pool = null; let artifactGateway = null;
   if (process.env.DATABASE_URL) {
     let Pool;
     try { ({ Pool } = require('pg')); } catch { throw new Error('DATABASE_URL is set but the optional pg package is unavailable'); }
@@ -16,8 +19,10 @@ async function start() {
     repository = new PersistentProductionRepository({ pool });
     try { await pool.query('SELECT 1'); } catch (error) { await pool.end(); throw new Error(`PostgreSQL connection failed: ${error.message}`); }
     if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate();
+    artifactGateway = new ArtifactAccessGateway({ repository, storage: createStorageFromEnv() });
   }
-  const { server } = createExtendedApiServer({ repository, apiToken: process.env.API_BEARER_TOKEN || null, allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true' });
+  const apiToken = process.env.API_BEARER_TOKEN || null;
+  const { server } = createExtendedApiServer({ repository, apiToken, allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true' });
   const apiHandler = server.listeners('request')[0];
   server.removeAllListeners('request');
   server.on('request', async (request, response) => {
@@ -26,19 +31,22 @@ async function start() {
       if (!repository) return response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'PERSISTENCE_UNAVAILABLE', message: 'PostgreSQL is required for runner callbacks' } }));
       return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN });
     }
+    if (artifactGateway && (pathname.startsWith('/v1/artifacts/') || pathname === '/v1/artifacts')) {
+      return handleArtifactAccess(request, response, { gateway: artifactGateway, apiToken });
+    }
     return apiHandler(request, response);
   });
   server.prependListener('request', (request, response) => {
     const origin = request.headers.origin; const allowedOrigin = process.env.CORS_ORIGIN || '';
     if (origin && allowedOrigin && (allowedOrigin === '*' || origin === allowedOrigin)) {
       response.setHeader('access-control-allow-origin', allowedOrigin === '*' ? '*' : origin); response.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      response.setHeader('access-control-allow-headers', 'authorization,content-type,x-actor-id,x-request-id,x-forge-runner-token'); response.setHeader('access-control-max-age', '600'); response.setHeader('vary', 'Origin');
+      response.setHeader('access-control-allow-headers', 'authorization,content-type,x-actor-id,x-request-id,x-forge-runner-token,x-forge-artifact-purpose,x-forge-artifact-recovery,range'); response.setHeader('access-control-max-age', '600'); response.setHeader('vary', 'Origin');
       if (request.method === 'OPTIONS') { request.method = 'GET'; request.url = '/healthz'; }
     }
     response.setHeader('x-frame-options', 'DENY'); response.setHeader('x-content-type-options', 'nosniff'); response.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
     response.setHeader('content-security-policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
   });
-  server.listen(port, host, () => console.log(`Forge Studio API listening on ${host}:${port}; persistence=${repository ? 'postgres' : 'in-memory'}`));
+  server.listen(port, host, () => console.log(`Forge Studio API listening on ${host}:${port}; persistence=${repository ? 'postgres' : 'in-memory'}; artifactGateway=${artifactGateway ? 'enabled' : 'disabled'}`));
   let shuttingDown = false;
   async function shutdown(signal) {
     if (shuttingDown) return; shuttingDown = true;
