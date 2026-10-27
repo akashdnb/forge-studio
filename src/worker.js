@@ -1,2 +1,151 @@
-const { randomUUID }=require('node:crypto');const path=require('node:path');const{JobQueue}=require('./persistence/job-queue');const{createPublishingHandlers}=require('./publishing/job-handler');const{createCanonicalPackageGate}=require('./publishing/package-gate');const{createHttpWorkflowHandlers}=require('./pipeline/http-workflow-handlers');const{createCaptionJobHandler}=require('./captions/job-handler');const{createTranscriptionHandlers}=require('./transcription/whisper-worker');const{createNarrationHandlers,createProviderRegistry}=require('./narration/tts-worker');const{createStorageFromEnv}=require('./storage');const{createFfmpegRenderHandler}=require('./pipeline/ffmpeg-render-handler');const{createTimelineManifestHandler}=require('./pipeline/timeline-manifest-handler');const{EpisodeWorkflowIntegration}=require('./pipeline/episode-workflow-integration');const{createPackagingHandlers}=require('./packaging/worker');const{createMediaLifecycleReconciliationHandler,MediaLifecycleReconciler}=require('./reconciliation/media-lifecycle-reconciler');const{PersistentProductionRepository}=require('./persistence/production-repository');const{createGithubActionsPackageExecutionBackend}=require('./execution/github-actions-package-backend');
-function createWorker({pool,handlers={},workerId=`forge-worker:${randomUUID()}`,pollMs=1000,reconciliationIntervalMs=Number.parseInt(process.env.FORGE_RECONCILIATION_INTERVAL_MS||'300000',10),logger=console,storage=null,executionBackend=null}={}){const queue=new JobQueue({pool}),integration=pool?new EpisodeWorkflowIntegration({pool,queue}):null;if(integration){const dispatchAwareSuccess=integration.handleJobSuccess.bind(integration);integration.handleJobSuccess=async(job,result)=>{try{return await dispatchAwareSuccess(job,result)}catch(error){if(['APPROVAL_BLOCKED','QA_BLOCKED'].includes(error?.code))return{accepted:true,blocked:true,reason:error.message};throw error}}}const githubBackend=executionBackend||(process.env.FORGE_GITHUB_ACTIONS_ENABLED==='true'?createGithubActionsPackageExecutionBackend({pool,queue,logger,onJobSucceeded:async(job,result)=>integration?integration.handleJobSuccess(job,result):undefined,onJobFailed:async(job,error,terminal)=>integration?integration.handleJobFailure(job,error,terminal):undefined}):null);let stopping=false,timer=null,reconciliationTimer=null,reconciling=false;async function reconcileNow(reason='scheduled'){if(reconciling||stopping)return{status:'SKIPPED_BUSY'};reconciling=true;try{return await new MediaLifecycleReconciler({pool,storage:storage||createStorageFromEnv(),workerId,scanLimit:Number.parseInt(process.env.FORGE_RECONCILIATION_SCAN_LIMIT||'50',10),recentWindowMinutes:Number.parseInt(process.env.FORGE_RECONCILIATION_RECENT_MINUTES||'60',10),partialMaxAgeMinutes:Number.parseInt(process.env.FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES||'60',10),logger}).run({reason})}finally{reconciling=false}}async function tick(){if(stopping)return;if(githubBackend)await githubBackend.reconcile();await queue.recoverExpiredLeases();await queue.recoverBlockedDependencies();if(integration){await integration.recover({actor:workerId}).catch(error=>logger.error?.('Forge workflow recovery failed',error));const blocked=await pool.query(`SELECT DISTINCT w.id FROM episode_workflows w JOIN episode_workflow_stages s ON s.workflow_id=w.id WHERE w.status IN ('QUEUED','RUNNING') AND s.status='BLOCKED'`);for(const row of blocked.rows)await integration.dispatchReady(row.id,workerId).catch(error=>{if(!['APPROVAL_BLOCKED','QA_BLOCKED'].includes(error?.code))logger.error?.('Forge blocked-stage dispatch failed',error)})}if(githubBackend)await githubBackend.dispatchNext({workerId});const normalKinds=Object.keys(handlers).filter(kind=>!githubBackend?.isExternalKind(kind));if(!normalKinds.length)return;const job=await queue.claim({workerId,kinds:normalKinds});if(!job)return;const handler=handlers[job.kind];if(typeof handler!=='function'){const failed=await queue.fail(job.id,workerId,Object.assign(new Error(`No worker handler registered for ${job.kind}`),{retryable:false}),{retry:false});if(integration&&failed.status==='FAILED')await integration.handleJobFailure(job,failed.error||new Error('No worker handler'),true);return}const heartbeat=setInterval(()=>queue.heartbeat(job.id,workerId).catch(e=>logger.error?.('Forge worker heartbeat failed',e)),30000);heartbeat.unref?.();try{const result=await handler(job.payload,job);await queue.succeed(job.id,workerId,result||{});if(integration)await integration.handleJobSuccess(job,result||{})}catch(error){logger.error?.(`Forge job ${job.id} (${job.kind}) failed: ${error.message}`);const failed=await queue.fail(job.id,workerId,error,{retry:error?.retryable!==false});if(integration)await integration.handleJobFailure(job,error,failed.status==='FAILED')}finally{clearInterval(heartbeat)}}async function run(){if(Number.isFinite(reconciliationIntervalMs)&&reconciliationIntervalMs>=60000){reconciliationTimer=setInterval(()=>reconcileNow('scheduled').catch(error=>logger.error?.('Forge media reconciliation failed',error)),reconciliationIntervalMs);reconciliationTimer.unref?.()}while(!stopping){try{await tick()}catch(error){logger.error?.('Forge worker loop failed',error)}if(!stopping)await new Promise(resolve=>{timer=setTimeout(resolve,pollMs);timer.unref?.()})}}async function stop(){stopping=true;if(timer)clearTimeout(timer);if(reconciliationTimer)clearInterval(reconciliationTimer)}return{queue,integration,executionBackend:githubBackend,run,stop,workerId,reconcileNow}}function loadHandlers({pool}={}){const storage=pool?createStorageFromEnv():null;let providerRegistry=null,providerConfigError=null;if(pool){try{providerRegistry=createProviderRegistry()}catch(error){providerConfigError=error;providerRegistry={get:()=>({name:'unconfigured-tts',execute:async()=>{throw providerConfigError}})}}}const repository=pool?new PersistentProductionRepository({pool}):null;const handlers=pool?{...createHttpWorkflowHandlers({pool,storage}),...createPublishingHandlers({pool}),...createPackagingHandlers({pool,storage}),'workflow:captions':createCaptionJobHandler({pool}),...createTranscriptionHandlers({pool}),...createNarrationHandlers({pool,storage,providerRegistry}),'workflow:render':createFfmpegRenderHandler({pool,storage}),'workflow:timeline-manifest':createTimelineManifestHandler({pool,storage,repository}),'workflow:media-reconcile':createMediaLifecycleReconciliationHandler({pool,storage})}:{};if(pool)handlers['publish:youtube']=createCanonicalPackageGate({pool,publishHandler:handlers['publish:youtube']});const modulePath=process.env.FORGE_WORKER_HANDLERS;if(modulePath){const loaded=require(path.resolve(modulePath));Object.assign(handlers,loaded.handlers||loaded)}return handlers}if(require.main===module){if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL is required');const{Pool}=require('pg'),pool=new Pool({connectionString:process.env.DATABASE_URL,max:Number.parseInt(process.env.PG_POOL_MAX||'5',10)}),worker=createWorker({pool,handlers:loadHandlers({pool})}),shutdown=async()=>{await worker.stop();await pool.end();process.exit(0)};process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);worker.run().catch(async e=>{console.error('Forge worker failed:',e);await pool.end();process.exit(1)})}module.exports={createWorker,loadHandlers};
+const { randomUUID } = require('node:crypto');
+const path = require('node:path');
+const { JobQueue } = require('./persistence/job-queue');
+const { UsageAccountingService } = require('./usage/usage-accounting');
+const { createPublishingHandlers } = require('./publishing/job-handler');
+const { createCanonicalPackageGate } = require('./publishing/package-gate');
+const { createHttpWorkflowHandlers } = require('./pipeline/http-workflow-handlers');
+const { createCaptionJobHandler } = require('./captions/job-handler');
+const { createTranscriptionHandlers } = require('./transcription/whisper-worker');
+const { createNarrationHandlers, createProviderRegistry } = require('./narration/tts-worker');
+const { createStorageFromEnv } = require('./storage');
+const { createFfmpegRenderHandler } = require('./pipeline/ffmpeg-render-handler');
+const { createTimelineManifestHandler } = require('./pipeline/timeline-manifest-handler');
+const { EpisodeWorkflowIntegration } = require('./pipeline/episode-workflow-integration');
+const { createPackagingHandlers } = require('./packaging/worker');
+const { createMediaLifecycleReconciliationHandler, MediaLifecycleReconciler } = require('./reconciliation/media-lifecycle-reconciler');
+const { PersistentProductionRepository } = require('./persistence/production-repository');
+const { createGithubActionsPackageExecutionBackend } = require('./execution/github-actions-package-backend');
+
+function createWorker({ pool, handlers = {}, workerId = `forge-worker:${randomUUID()}`, pollMs = 1000,
+  reconciliationIntervalMs = Number.parseInt(process.env.FORGE_RECONCILIATION_INTERVAL_MS || '300000', 10),
+  usageRecoveryIntervalMs = Number.parseInt(process.env.FORGE_USAGE_RECOVERY_INTERVAL_MS || '60000', 10),
+  logger = console, storage = null, executionBackend = null, usageAccounting = null } = {}) {
+  const queue = new JobQueue({ pool });
+  const accounting = usageAccounting || (pool ? new UsageAccountingService({ pool }) : null);
+  const integration = pool ? new EpisodeWorkflowIntegration({ pool, queue }) : null;
+  if (integration) {
+    const dispatchAwareSuccess = integration.handleJobSuccess.bind(integration);
+    integration.handleJobSuccess = async (job, result) => {
+      try { return await dispatchAwareSuccess(job, result); }
+      catch (error) { if (['APPROVAL_BLOCKED', 'QA_BLOCKED'].includes(error?.code)) return { accepted: true, blocked: true, reason: error.message }; throw error; }
+    };
+  }
+  const githubBackend = executionBackend || (process.env.FORGE_GITHUB_ACTIONS_ENABLED === 'true' ? createGithubActionsPackageExecutionBackend({
+    pool, queue, logger,
+    onJobSucceeded: async (job, result) => integration ? integration.handleJobSuccess(job, result) : undefined,
+    onJobFailed: async (job, error, terminal) => integration ? integration.handleJobFailure(job, error, terminal) : undefined,
+  }) : null);
+  let stopping = false; let timer = null; let reconciliationTimer = null; let usageRecoveryTimer = null; let reconciling = false; let usageConfigured = false;
+
+  async function ensureUsageConfiguration() {
+    if (!accounting || usageConfigured || !accounting.required) return;
+    await accounting.syncConfiguration();
+    usageConfigured = true;
+  }
+  async function recoverUsage() {
+    if (!accounting) return { recovered: 0 };
+    try { await ensureUsageConfiguration(); return await accounting.recoverStaleReservations({ limit: 50 }); }
+    catch (error) { logger.error?.('Forge usage recovery failed', error); return { recovered: 0, error }; }
+  }
+  async function reconcileNow(reason = 'scheduled') {
+    if (reconciling || stopping) return { status: 'SKIPPED_BUSY' };
+    reconciling = true;
+    try { return await new MediaLifecycleReconciler({ pool, storage: storage || createStorageFromEnv(), workerId,
+      scanLimit: Number.parseInt(process.env.FORGE_RECONCILIATION_SCAN_LIMIT || '50', 10),
+      recentWindowMinutes: Number.parseInt(process.env.FORGE_RECONCILIATION_RECENT_MINUTES || '60', 10),
+      partialMaxAgeMinutes: Number.parseInt(process.env.FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES || '60', 10), logger }).run({ reason }); }
+    finally { reconciling = false; }
+  }
+  async function accountUsage(job, reservation, result, outcome, error = null) {
+    if (!accounting || !reservation) return;
+    const usage = result?.usageAccounting || result?.usage || {};
+    await accounting.settleJob({ job, reservation, outcome, providerRunId: result?.providerRunId || result?.provider_run_id || null, usage,
+      metadata: error ? { errorCode: error.code || 'WORKER_ERROR', retryable: error.retryable !== false } : { source: 'worker' } });
+  }
+  async function admit(job) {
+    if (!accounting) return { allowed: true, reservation: null };
+    await ensureUsageConfiguration();
+    try { return await accounting.reserveForJob({ job }); }
+    catch (error) {
+      await accounting.recordRejection({ job, reason: error }).catch((recordError) => logger.error?.('Forge usage rejection accounting failed', recordError));
+      const cancelled = await queue.cancel(job.id, workerId, `Execution rejected by usage policy: ${error.message}`);
+      if (integration) await integration.handleJobFailure(job, error, true).catch((integrationError) => logger.error?.('Forge budget rejection workflow update failed', integrationError));
+      return { allowed: false, cancelled, error };
+    }
+  }
+  async function tick() {
+    if (stopping) return;
+    await ensureUsageConfiguration();
+    if (githubBackend) await githubBackend.reconcile();
+    await queue.recoverExpiredLeases();
+    await queue.recoverBlockedDependencies();
+    if (integration) {
+      await integration.recover({ actor: workerId }).catch((error) => logger.error?.('Forge workflow recovery failed', error));
+      const blocked = await pool.query(`SELECT DISTINCT w.id FROM episode_workflows w JOIN episode_workflow_stages s ON s.workflow_id=w.id WHERE w.status IN ('QUEUED','RUNNING') AND s.status='BLOCKED'`);
+      for (const row of blocked.rows) await integration.dispatchReady(row.id, workerId).catch((error) => { if (!['APPROVAL_BLOCKED','QA_BLOCKED'].includes(error?.code)) logger.error?.('Forge blocked-stage dispatch failed', error); });
+    }
+    if (githubBackend) await githubBackend.dispatchNext({ workerId });
+    const normalKinds = Object.keys(handlers).filter((kind) => !githubBackend?.isExternalKind(kind));
+    if (!normalKinds.length) return;
+    const job = await queue.claim({ workerId, kinds: normalKinds });
+    if (!job) return;
+    const admission = await admit(job);
+    if (!admission.allowed) return;
+    const handler = handlers[job.kind];
+    if (typeof handler !== 'function') {
+      const error = Object.assign(new Error(`No worker handler registered for ${job.kind}`), { retryable: false });
+      const failed = await queue.fail(job.id, workerId, error, { retry: false });
+      await accountUsage(job, admission.reservation, null, 'FAILED', error).catch((e) => logger.error?.('Forge usage settlement failed', e));
+      if (integration && failed.status === 'FAILED') await integration.handleJobFailure(job, error, true);
+      return;
+    }
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => queue.heartbeat(job.id, workerId).catch((e) => logger.error?.('Forge worker heartbeat failed', e)), 30000);
+    heartbeat.unref?.();
+    try {
+      const result = await handler(job.payload, job);
+      const accountingResult = result && typeof result === 'object' ? { ...result, usageAccounting: { ...(result.usageAccounting || {}), durationMs: result.usageAccounting?.durationMs ?? (Date.now() - startedAt) } } : { usageAccounting: { durationMs: Date.now() - startedAt } };
+      await queue.succeed(job.id, workerId, accountingResult);
+      await accountUsage(job, admission.reservation, accountingResult, 'SUCCEEDED');
+      if (integration) await integration.handleJobSuccess(job, accountingResult);
+    } catch (error) {
+      logger.error?.(`Forge job ${job.id} (${job.kind}) failed: ${error.message}`);
+      const failed = await queue.fail(job.id, workerId, error, { retry: error?.retryable !== false });
+      await accountUsage(job, admission.reservation, null, 'FAILED', error).catch((e) => logger.error?.('Forge usage settlement failed', e));
+      if (integration) await integration.handleJobFailure(job, error, failed.status === 'FAILED');
+    } finally { clearInterval(heartbeat); }
+  }
+  async function run() {
+    await ensureUsageConfiguration();
+    if (Number.isFinite(reconciliationIntervalMs) && reconciliationIntervalMs >= 60000) { reconciliationTimer = setInterval(() => reconcileNow('scheduled').catch((error) => logger.error?.('Forge media reconciliation failed', error)), reconciliationIntervalMs); reconciliationTimer.unref?.(); }
+    if (Number.isFinite(usageRecoveryIntervalMs) && usageRecoveryIntervalMs >= 10000 && accounting) { usageRecoveryTimer = setInterval(() => recoverUsage(), usageRecoveryIntervalMs); usageRecoveryTimer.unref?.(); }
+    while (!stopping) { try { await tick(); } catch (error) { logger.error?.('Forge worker loop failed', error); } if (!stopping) await new Promise((resolve) => { timer = setTimeout(resolve, pollMs); timer.unref?.(); }); }
+  }
+  async function stop() { stopping = true; if (timer) clearTimeout(timer); if (reconciliationTimer) clearInterval(reconciliationTimer); if (usageRecoveryTimer) clearInterval(usageRecoveryTimer); }
+  return { queue, integration, executionBackend: githubBackend, usageAccounting: accounting, run, stop, workerId, reconcileNow, recoverUsage };
+}
+
+function loadHandlers({ pool } = {}) {
+  const storage = pool ? createStorageFromEnv() : null;
+  let providerRegistry = null; let providerConfigError = null;
+  if (pool) { try { providerRegistry = createProviderRegistry(); } catch (error) { providerConfigError = error; providerRegistry = { get: () => ({ name: 'unconfigured-tts', execute: async () => { throw providerConfigError; } }) }; } }
+  const repository = pool ? new PersistentProductionRepository({ pool }) : null;
+  const handlers = pool ? { ...createHttpWorkflowHandlers({ pool, storage }), ...createPublishingHandlers({ pool }), ...createPackagingHandlers({ pool, storage }),
+    'workflow:captions': createCaptionJobHandler({ pool }), ...createTranscriptionHandlers({ pool }), ...createNarrationHandlers({ pool, storage, providerRegistry }),
+    'workflow:render': createFfmpegRenderHandler({ pool, storage }), 'workflow:timeline-manifest': createTimelineManifestHandler({ pool, storage, repository }),
+    'workflow:media-reconcile': createMediaLifecycleReconciliationHandler({ pool, storage }) } : {};
+  if (pool) handlers['publish:youtube'] = createCanonicalPackageGate({ pool, publishHandler: handlers['publish:youtube'] });
+  const modulePath = process.env.FORGE_WORKER_HANDLERS;
+  if (modulePath) { const loaded = require(path.resolve(modulePath)); Object.assign(handlers, loaded.handlers || loaded); }
+  return handlers;
+}
+if (require.main === module) {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  const { Pool } = require('pg'); const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '5', 10) });
+  const worker = createWorker({ pool, handlers: loadHandlers({ pool }) });
+  const shutdown = async () => { await worker.stop(); await pool.end(); process.exit(0); };
+  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  worker.run().catch(async (e) => { console.error('Forge worker failed:', e); await pool.end(); process.exit(1); });
+}
+module.exports = { createWorker, loadHandlers };
