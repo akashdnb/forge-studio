@@ -48,4 +48,4 @@ Source deletes emit durable DELETE events before the existing search delete trig
 
 ## Migration / rollback
 
-Migrations 155-157 are additive/replace-function changes. They preserve the existing search table and query contract. Roll back by disabling the consistency bootstrap and leaving the existing v1 search read path in place; do not drop consistency tables until all pending generations and event retention windows have expired.
+Migrations 155-159 are additive/replace-function changes. They preserve the existing search table and query contract. Roll back by disabling the consistency bootstrap and leaving the existing v1 search read path in place; do not drop consistency tables until all pending generations and event retention windows have expired.
