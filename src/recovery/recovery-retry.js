@@ -1,0 +1,17 @@
+function retryable(error) {
+  return Boolean(error && !['CANCELLED','BACKUP_METADATA_CORRUPT','ARTIFACT_MANIFEST_CORRUPT','CHECKSUM_MISMATCH','ARTIFACT_MISSING','INCOMPATIBLE_MIGRATIONS','INCOMPATIBLE_POSTGRES','RESTORE_TARGET_NOT_ISOLATED'].includes(error.code));
+}
+function delayMs(attempt, baseMs = 250, maxMs = 5000, random = Math.random) {
+  const exponential = Math.min(maxMs, baseMs * (2 ** Math.max(0, attempt - 1)));
+  return Math.floor(exponential * (0.75 + random() * 0.5));
+}
+async function retryBounded(operation, { maxAttempts = 3, baseMs = 250, maxMs = 5000, signal, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  let last;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' });
+    try { return await operation(attempt); }
+    catch (error) { last = error; if (attempt >= maxAttempts || !retryable(error)) throw error; await sleep(delayMs(attempt, baseMs, maxMs)); }
+  }
+  throw last;
+}
+module.exports = { retryable, delayMs, retryBounded };
