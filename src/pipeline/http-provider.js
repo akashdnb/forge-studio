@@ -12,14 +12,12 @@ class HttpJsonProvider {
       const started = Date.now();
       const response = await this.fetchImpl(provider.endpoint, { method: 'POST', headers: { 'content-type': 'application/json', ...provider.headers }, body: JSON.stringify(provider.buildBody(request)), signal });
       const text = await response.text(); let body = null;
-      if (text) { try { body = JSON.parse(text); } catch { const error = Object.assign(new Error(`Provider ${provider.name} returned invalid JSON`), { code: 'MALFORMED_PROVIDER_RESPONSE', status: response.status }); throw error; } }
-      if (!response.ok) {
-        const error = new Error(`Provider ${provider.name} returned HTTP ${response.status}`); error.status = response.status; error.retryAfter = response.headers?.get?.('retry-after'); error.providerBody = body; throw error;
-      }
+      if (text) { try { body = JSON.parse(text); } catch { throw Object.assign(new Error(`Provider ${provider.name} returned invalid JSON`), { code: 'MALFORMED_PROVIDER_RESPONSE', status: response.status }); } }
+      if (!response.ok) { const error = new Error(`Provider ${provider.name} returned HTTP ${response.status}`); error.status = response.status; error.retryAfter = response.headers?.get?.('retry-after'); error.providerBody = body; throw error; }
       return provider.parse(body, { latencyMs: Date.now() - started, attempt });
     };
     const provider = { ...this, execute: undefined };
-    if (context.__reliabilityManaged) return call(provider, context.signal, context.attempt || 1);
+    if (context.__reliabilityManaged || context.attempt) return call(provider, context.signal, context.attempt || 1);
     return (await this.reliability.execute({ provider: { ...provider, execute: (req, ctx) => call(provider, ctx.signal, ctx.attempt) }, operation: context.operation || 'http', request, context: { ...context, idempotencyKey: context.idempotencyKey }, policy: this.policy, fallbacks: this.fallbacks, contract: { idempotent: this.idempotent !== false, allowFailover: this.allowFailover === true, contractCompatible: this.contractCompatible !== false } })).result;
   }
 }
