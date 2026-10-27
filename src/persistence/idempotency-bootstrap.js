@@ -43,9 +43,13 @@ function installPostgresBoundary() {
   async function withIdempotencyBoundary(operation) {
     const context = getIdempotencyContext();
     if (!context) return original.call(this, operation);
-    return withIdempotencyTransaction(this.pool, context, async (client, idempotencyContext) => {
-      // Preserve the request-scoped evidence settings that versioned-server installs
-      // on ordinary repository transactions.
+    let effectiveContext = context;
+    try {
+      const { getEvidenceContext } = require('../evidence/audit-evidence');
+      const evidence = getEvidenceContext();
+      if (evidence?.tenantId) effectiveContext = { ...context, tenantId: evidence.tenantId, actor: evidence.actor || context.actor, requestId: evidence.requestId || context.requestId };
+    } catch { /* evidence context is optional for unit/in-process callers */ }
+    return withIdempotencyTransaction(this.pool, effectiveContext, async (client, idempotencyContext) => {
       try {
         const { getEvidenceContext } = require('../evidence/audit-evidence');
         const evidence = getEvidenceContext();
