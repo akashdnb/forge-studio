@@ -49,8 +49,6 @@ DROP TRIGGER IF EXISTS artifact_integrity_manifest_immutable ON artifact_integri
 CREATE TRIGGER artifact_integrity_manifest_immutable BEFORE UPDATE OR DELETE ON artifact_integrity_manifests
 FOR EACH ROW EXECUTE FUNCTION forge_artifact_integrity_manifest_immutable();
 
-CREATE UNIQUE INDEX IF NOT EXISTS artifact_content_objects_tenant_sha_idx
-  ON artifact_content_objects(tenant_id, sha256) WHERE status <> 'DELETED';
 CREATE INDEX IF NOT EXISTS artifact_content_refs_object_active_idx
   ON artifact_content_refs(tenant_id, object_id, active);
 
