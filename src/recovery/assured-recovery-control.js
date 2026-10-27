@@ -20,12 +20,13 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
     const cover = await coverage(this.pool);
     const rpoSeconds = await rpo(this.pool, snapshotRow.rows[0]?.snapshot_at || new Date().toISOString());
     const keyVersion = process.env.FORGE_BACKUP_ENCRYPTION_KEY_ID || 'default';
-    await this.pool.query(`UPDATE forge_backup_records SET backup_generation=$2,coverage_status=$3,dependency_complete=$4,encryption_algorithm=$5,key_version=$6,last_known_good=true,rpo_seconds=$7 WHERE id=$1`, [result.id, generation, cover.status, cover.dependencyComplete, 'AES-256-GCM', keyVersion, rpoSeconds]);
-    await this.pool.query(`UPDATE forge_backup_records SET last_known_good=false WHERE tenant_id=$1 AND id<>$2 AND status='SUCCEEDED'`, [options.tenantId, result.id]);
-    const payload = { version: 1, backupId: result.id, tenantId: options.tenantId, generation, archiveSha256: result.archiveSha256, manifestSha256: result.manifestSha256, artifactArchiveSha256: result.artifactArchiveSha256, contentRoot: result.contentRoot, schemaFingerprint: result.schemaFingerprint, coverage: cover, encryption: { algorithm: 'AES-256-GCM', keyVersion }, rpoSeconds };
+    const lastKnownGood = cover.dependencyComplete && cover.status === 'COMPLETE';
+    await this.pool.query(`UPDATE forge_backup_records SET backup_generation=$2,coverage_status=$3,dependency_complete=$4,encryption_algorithm=$5,key_version=$6,last_known_good=$7,rpo_seconds=$8 WHERE id=$1`, [result.id, generation, cover.status, cover.dependencyComplete, 'AES-256-GCM', keyVersion, lastKnownGood, rpoSeconds]);
+    if (lastKnownGood) await this.pool.query(`UPDATE forge_backup_records SET last_known_good=false WHERE tenant_id=$1 AND id<>$2 AND status='SUCCEEDED'`, [options.tenantId, result.id]);
+    const payload = { version: 1, backupId: result.id, tenantId: options.tenantId, generation, archiveSha256: result.archiveSha256, manifestSha256: result.manifestSha256, artifactArchiveSha256: result.artifactArchiveSha256, contentRoot: result.contentRoot, schemaFingerprint: result.schemaFingerprint, coverage: cover, encryption: { algorithm: 'AES-256-GCM', keyVersion }, rpoSeconds, lastKnownGood };
     const signed = await recordIntegrity(this.pool, { tenantId: options.tenantId, backupId: result.id, generation, evidenceType: 'BACKUP_COMMIT', payload });
     await this.pool.query('UPDATE forge_backup_records SET signed_integrity_id=$2 WHERE id=$1', [result.id, signed.id]);
-    return { ...result, generation, coverage: cover, rpoSeconds, signedIntegrityId: signed.id, signatureKeyId: signed.keyId };
+    return { ...result, generation, coverage: cover, rpoSeconds, lastKnownGood, signedIntegrityId: signed.id, signatureKeyId: signed.keyId };
   }
 
   async verifyBackupEvidence(tenantId, backupId) {
@@ -41,9 +42,9 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
     await this.verifyBackupEvidence(tenantId, backupId);
     const production = process.env.FORGE_PRODUCTION_DATABASE_URL;
     if (!production || targetDatabaseUrl !== production) throw Object.assign(new Error('production target must match FORGE_PRODUCTION_DATABASE_URL exactly'), { code: 'PRODUCTION_TARGET_MISMATCH' });
-    const backup = await this.pool.query(`SELECT id,tenant_id,status,integrity_status,signed_integrity_id,backup_generation,manifest_sha256,archive_sha256,artifact_archive_sha256,content_root FROM forge_backup_records WHERE id=$1`, [backupId]);
+    const backup = await this.pool.query(`SELECT id,tenant_id,status,integrity_status,signed_integrity_id,backup_generation,manifest_sha256,archive_sha256,artifact_archive_sha256,content_root,coverage_status,dependency_complete,last_known_good FROM forge_backup_records WHERE id=$1`, [backupId]);
     const row = backup.rows[0];
-    if (!row || row.tenant_id !== tenantId || row.status !== 'SUCCEEDED' || row.integrity_status !== 'VERIFIED' || !row.signed_integrity_id) throw Object.assign(new Error('backup is not an eligible verified recovery point'), { code: 'BACKUP_NOT_ELIGIBLE' });
+    if (!row || row.tenant_id !== tenantId || row.status !== 'SUCCEEDED' || row.integrity_status !== 'VERIFIED' || !row.signed_integrity_id || row.coverage_status !== 'COMPLETE' || !row.dependency_complete || !row.last_known_good) throw Object.assign(new Error('backup is not an eligible verified last-known-good recovery point'), { code: 'BACKUP_NOT_ELIGIBLE' });
     const id = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + Math.max(1, Number(expiresMinutes) || 30) * 60000);
     const evidence = { version: 1, approvalId: id, tenantId, backupId, generation: row.backup_generation, targetDatabaseHash: targetHash(targetDatabaseUrl), actor, reason, expiresAt: expiresAt.toISOString(), archiveSha256: row.archive_sha256, manifestSha256: row.manifest_sha256, artifactArchiveSha256: row.artifact_archive_sha256, contentRoot: row.content_root };
