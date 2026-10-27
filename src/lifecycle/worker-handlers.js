@@ -1,12 +1,12 @@
 const { TenantProjectLifecycle } = require('./tenant-project-lifecycle');
 const { PrivacyGovernance } = require('../privacy/privacy-governance');
-const { ProductionArtifactLifecycleControlPlane } = require('../storage/artifact-lifecycle-production');
+const { FinalArtifactLifecycleControlPlane } = require('../storage/artifact-lifecycle-final-safety');
 
 function createLifecycleHandlers({ pool, storage, logger = console } = {}) {
   if (!pool) throw new TypeError('pool is required');
   const lifecycle = new TenantProjectLifecycle({ pool, storage });
   const privacy = new PrivacyGovernance({ pool, storage });
-  const artifactGc = new ProductionArtifactLifecycleControlPlane({ pool, storage });
+  const artifactGc = new FinalArtifactLifecycleControlPlane({ pool, storage });
   return {
     'lifecycle:plan-delete': async (payload = {}, job = {}) => {
       const tenantId = payload.tenantId || job.payload?.tenantId;
