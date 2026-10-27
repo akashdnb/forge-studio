@@ -10,6 +10,8 @@ const { createStorageFromEnv } = require('../storage');
 const { createMediaDerivativeHandler } = require('../media/derivative-worker');
 const { IncidentManager } = require('../incidents/incident-manager');
 const { installIncidentConcurrencyBridge } = require('../incidents/concurrency-bridge');
+const { createPrivacyHandlers } = require('../privacy/worker-handlers');
+const { createLifecycleHandlers } = require('../lifecycle/worker-handlers');
 installIncidentConcurrencyBridge();
 installWorkerReleaseGuards();
 const validation = validateRuntimeConfig(process.env, { requirePersistence: true });
@@ -23,7 +25,7 @@ const originalClaimSpecific = JobQueue.prototype.claimSpecific;
 async function admit(queue, job, actorId) {
   if (!job) return null;
   try {
-    const result = await assertJobRuntimeSnapshot({ pool: queue.pool, policyStore: runtimePolicy, job, actorId });
+    const result = await assertJobRuntimeSnapshot({ pool, policyStore: runtimePolicy, job, actorId });
     await pool.query('INSERT INTO runtime_worker_snapshots(worker_id,tenant_id,runtime_fingerprint,policy_versions,feature_flags) SELECT $1,p.tenant_id,$2,$3::jsonb,$4::jsonb FROM projects p WHERE p.id=$5', [actorId || 'unknown', result.snapshot.fingerprint, JSON.stringify(result.snapshot.policyVersions || []), JSON.stringify(result.snapshot.featureFlags || {}), job.project_id]);
     return job;
   } catch (error) {
@@ -40,6 +42,7 @@ const handlers = loadHandlers({ pool });
 const repository = new PersistentProductionRepository({ pool });
 const storage = createStorageFromEnv();
 handlers['workflow:media-derivative'] = createMediaDerivativeHandler({ pool, storage, repository });
+Object.assign(handlers, createPrivacyHandlers({ pool, storage }), createLifecycleHandlers({ pool, storage }));
 const worker = createWorker({ pool, handlers, workerId });
 const incidentManager = new IncidentManager({ pool, logger: console });
 const incidentIntervalMs = Math.max(30000, Number.parseInt(process.env.FORGE_INCIDENT_DETECTION_INTERVAL_MS || '60000', 10));
@@ -58,7 +61,7 @@ async function start() {
   const readiness = await runtimePolicy.readiness({ requireEncryption: true });
   if (!readiness.ok) throw new Error(`Runtime readiness failed: ${JSON.stringify(readiness)}`);
   const safeEnv = Object.fromEntries(Object.keys(process.env).filter(k => !/(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|DATABASE_URL)/i.test(k)).sort().map(k => [k, process.env[k]]));
-  await pool.query('INSERT INTO runtime_boot_snapshots(boot_id,service,environment,config_fingerprint,env_fingerprint,diagnostics) VALUES($1,$2,$3,$4,$5,$6::jsonb)', [randomUUID(), 'forge-studio-worker', process.env.NODE_ENV || 'development', fingerprint(validation.config), fingerprint(safeEnv), JSON.stringify({ validation, readiness, derivativeWorker: true, workerId, incidentDetector: true, releaseSafety: true })]);
+  await pool.query('INSERT INTO runtime_boot_snapshots(boot_id,service,environment,config_fingerprint,env_fingerprint,diagnostics) VALUES($1,$2,$3,$4,$5,$6::jsonb)', [randomUUID(), 'forge-studio-worker', process.env.NODE_ENV || 'development', fingerprint(validation.config), fingerprint(safeEnv), JSON.stringify({ validation, readiness, derivativeWorker: true, workerId, incidentDetector: true, releaseSafety: true, privacyGovernance: true })]);
   await detectIncidents();
   incidentTimer = setInterval(detectIncidents, incidentIntervalMs);
   incidentTimer.unref?.();
