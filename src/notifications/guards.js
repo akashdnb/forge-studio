@@ -23,6 +23,14 @@ if (!NotificationOrchestrator.prototype.__forgeNotificationGuards) {
     }
     return intent;
   };
+  NotificationOrchestrator.prototype.nextFallback=async function guardedNextFallback(delivery){
+    const sent=(await this.pool.query(`SELECT 1 FROM forge_notification_deliveries WHERE intent_id=$1 AND recipient_id=$2 AND status='SENT' LIMIT 1`,[delivery.intent_id,delivery.recipient_id])).rows[0];
+    if(sent)return;
+    const next=(await this.pool.query(`SELECT id FROM forge_notification_deliveries WHERE intent_id=$1 AND recipient_id=$2 AND status IN ('QUEUED','RETRY') AND id<>$3 ORDER BY priority,created_at LIMIT 1`,[delivery.intent_id,delivery.recipient_id,delivery.id])).rows[0];
+    if(!next)return;
+    await this.pool.query(`UPDATE forge_notification_deliveries SET status='CANCELLED',updated_at=now(),suppression_reason='fallback_not_selected' WHERE intent_id=$1 AND recipient_id=$2 AND status IN ('QUEUED','RETRY') AND id<>$3`,[delivery.intent_id,delivery.recipient_id,next.id]);
+    await this.pool.query(`UPDATE forge_notification_deliveries SET status='RETRY',next_attempt_at=now(),updated_at=now() WHERE id=$1 AND status='QUEUED'`,[next.id]);
+  };
   const originalDeliver=NotificationOrchestrator.prototype.deliver;
   NotificationOrchestrator.prototype.deliver=async function guardedDeliver(delivery) {
     const result=await originalDeliver.call(this,delivery);
