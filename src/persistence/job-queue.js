@@ -1,5 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const { withRetryableTransaction } = require('./transaction-runner');
+const { installPostgresHotpathHardening } = require('./postgres-hotpath-hardening');
+installPostgresHotpathHardening();
 
 const MAX_PAGE_SIZE = 200;
 const MAX_OFFSET = 5000;
@@ -61,14 +63,13 @@ class JobQueue {
     }
     values.push(limit);
     const limitParam = values.length;
-    const sql = `SELECT * FROM forge_jobs ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY priority ASC,created_at ASC,id ASC LIMIT $${limitParam}`;
+    const baseSql = `SELECT * FROM forge_jobs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY priority ASC,created_at ASC,id ASC LIMIT $${limitParam}`;
     if (!decoded && offset > 0) {
       values.push(offset);
-      const result = await this.pool.query(sql.replace(/LIMIT \$\d+$/, `LIMIT $${limitParam} OFFSET $${values.length}`), values);
+      const result = await this.pool.query(baseSql.replace(/LIMIT \$\d+$/, `LIMIT $${limitParam} OFFSET $${values.length}`), values);
       return { items: result.rows, nextCursor: encodeCursor(result.rows[result.rows.length - 1]) };
     }
-    const result = await this.pool.query(sql, values);
+    const result = await this.pool.query(baseSql, values);
     return { items: result.rows, nextCursor: encodeCursor(result.rows[result.rows.length - 1]) };
   }
 
@@ -91,9 +92,7 @@ class JobQueue {
           WHERE j.status='QUEUED' AND j.available_at<=$1
             AND (j.leased_until IS NULL OR j.leased_until<$1)
             AND j.cancellation_requested_at IS NULL ${kind}
-            AND (j.depends_on_job_id IS NULL OR EXISTS (
-              SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED'
-            ))
+            AND (j.depends_on_job_id IS NULL OR EXISTS (SELECT 1 FROM forge_jobs d WHERE d.id=j.depends_on_job_id AND d.status='SUCCEEDED'))
           ORDER BY j.priority ASC,j.created_at ASC,j.id ASC
           FOR UPDATE SKIP LOCKED LIMIT 1
         )
@@ -162,10 +161,8 @@ class JobQueue {
       const retryable = retry && current.attempts < current.max_attempts;
       const updated = await client.query(
         retryable
-          ? `UPDATE forge_jobs SET status='QUEUED',available_at=now()+($1::text||' seconds')::interval,leased_until=NULL,worker_id=NULL,dispatch_token=NULL,timeout_at=NULL,error=$2::jsonb,updated_at=now()
-             WHERE id=$3 AND cancellation_requested_at IS NULL RETURNING *`
-          : `UPDATE forge_jobs SET status='FAILED',leased_until=NULL,worker_id=NULL,dispatch_token=NULL,timeout_at=NULL,error=$2::jsonb,finished_at=now(),updated_at=now()
-             WHERE id=$3 RETURNING *`,
+          ? `UPDATE forge_jobs SET status='QUEUED',available_at=now()+($1::text||' seconds')::interval,leased_until=NULL,worker_id=NULL,dispatch_token=NULL,timeout_at=NULL,error=$2::jsonb,updated_at=now() WHERE id=$3 AND cancellation_requested_at IS NULL RETURNING *`
+          : `UPDATE forge_jobs SET status='FAILED',leased_until=NULL,worker_id=NULL,dispatch_token=NULL,timeout_at=NULL,error=$2::jsonb,finished_at=now(),updated_at=now() WHERE id=$3 RETURNING *`,
         retryable
           ? [Math.max(1, delaySeconds), JSON.stringify({ message: error?.message || String(error) }), id]
           : [null, JSON.stringify({ message: error?.message || String(error) }), id],
