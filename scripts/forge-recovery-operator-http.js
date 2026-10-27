@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const { BackupService } = require('../src/recovery/backup-service');
 const { RecoveryControlPlane } = require('../src/recovery/recovery-control');
 const { createStorageFromEnv } = require('../src/storage');
+const { authenticate, hasRole } = require('../src/security/http-security');
 const { installRecoveryRoutes } = require('../src/recovery/recovery-http');
 const { installRecoveryOperatorRoutes } = require('../src/recovery/recovery-operator-http');
 
@@ -12,11 +13,15 @@ const authSecret = process.env.FORGE_AUTH_SIGNING_SECRET;
 if (!authSecret && !process.env.API_BEARER_TOKEN) throw new Error('FORGE_AUTH_SIGNING_SECRET or API_BEARER_TOKEN is required');
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4, connectionTimeoutMillis: 5000 });
-const backup = new BackupService({ pool, storage: createStorageFromEnv() });
-const control = new RecoveryControlPlane({ pool, backupService: backup, maxConcurrency: Number(process.env.FORGE_RECOVERY_MAX_CONCURRENCY || 1) });
+const sourceStorage = createStorageFromEnv();
+const targetStorage = process.env.FORGE_STORAGE_DRIVER === 's3'
+  ? createStorageFromEnv({ bucket: process.env.FORGE_RECOVERY_TARGET_S3_BUCKET, endpoint: process.env.FORGE_RECOVERY_TARGET_S3_ENDPOINT || undefined, region: process.env.FORGE_RECOVERY_TARGET_S3_REGION || process.env.FORGE_STORAGE_S3_REGION || 'us-east-1' })
+  : createStorageFromEnv({ driver: 'local', rootDir: process.env.FORGE_RECOVERY_TARGET_STORAGE_DIR || '.forge-recovery-storage' });
+const backup = new BackupService({ pool, storage: sourceStorage });
+const control = new RecoveryControlPlane({ pool, backupService: backup, targetStorage, maxConcurrency: Number(process.env.FORGE_RECOVERY_MAX_CONCURRENCY || 1) });
 const server = http.createServer();
 installRecoveryOperatorRoutes(server, { control, authSecret, apiToken: process.env.API_BEARER_TOKEN, staticActor: process.env.FORGE_STATIC_ACTOR_ID, staticTenant: process.env.FORGE_STATIC_TENANT_ID });
-installRecoveryRoutes(server, { service: backup, pool, authorize: async (request) => Boolean(request.headers.authorization) });
-server.listen(port, process.env.HOST || '127.0.0.1', () => console.log(JSON.stringify({ status: 'started', port, operatorOnly: true })));
+installRecoveryRoutes(server, { service: backup, pool, authorize: async (request) => { const auth = authenticate(request, { authSecret, apiToken: process.env.API_BEARER_TOKEN, staticActor: process.env.FORGE_STATIC_ACTOR_ID, staticTenant: process.env.FORGE_STATIC_TENANT_ID }); return Boolean(auth && hasRole(auth, 'OWNER')); } });
+server.listen(port, process.env.HOST || '127.0.0.1', () => console.log(JSON.stringify({ status: 'started', port, operatorOnly: true, targetStorageIsolated: true })));
 const shutdown = async () => { server.close(); await pool.end(); process.exit(0); };
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
