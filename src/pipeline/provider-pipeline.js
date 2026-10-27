@@ -2,7 +2,7 @@
 const { immutableRecord, requiredString } = require('../domain/records');
 const { ProviderReliability } = require('../reliability/provider-reliability');
 const { ProviderHealthRouter } = require('../reliability/provider-health-routing');
-const { ProviderCircuitBreaker } = require('../providers/provider-circuit-breaker-runtime');
+const { ProviderCircuitBreaker } = require('../providers/provider-circuit-breaker-normalized');
 const { ProviderContractService } = require('../providers/provider-contract-service');
 const { CapabilityTokenService } = require('../security/capability-tokens');
 const { SecurityPolicyService } = require('../security/policy-enforcement');

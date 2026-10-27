@@ -1,7 +1,8 @@
 'use strict';
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { ProviderCircuitBreaker, STATES } = require('../src/providers/provider-circuit-breaker-runtime');
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const {ProviderCircuitBreaker}=require('../src/providers/provider-circuit-breaker-normalized');
+const {STATES}=require('../src/providers/provider-circuit-breaker-runtime');
 function candidate(name,priority=10){return{name,priority,capabilities:['llm'],service:'llm',region:'ap-south-1',execute:async()=>({artifacts:[]})};}
 test('opens after bounded failures and stays isolated by tenant/capability/region',async()=>{const breaker=new ProviderCircuitBreaker({policy:{failureThreshold:2,recoveryMs:1000,windowSize:4}});const a={tenantId:'tenant-a',capability:'llm',provider:'openai',region:'ap-south-1'},b={tenantId:'tenant-b',capability:'llm',provider:'openai',region:'ap-south-1'},image={tenantId:'tenant-a',capability:'image',provider:'openai',region:'ap-south-1'};await breaker.outcome(a,{outcome:'TIMEOUT'});await breaker.outcome(a,{outcome:'NETWORK_FAILURE'});assert.equal((await breaker.inspect(a)).state,STATES.OPEN);assert.equal((await breaker.allow(a,candidate('openai'))).allowed,false);assert.equal((await breaker.allow(b,candidate('openai'))).allowed,true);assert.equal((await breaker.allow(image,candidate('openai'))).allowed,true);});
 test('half-open fencing permits one probe and success closes deterministically',async()=>{const breaker=new ProviderCircuitBreaker({policy:{failureThreshold:1,recoveryMs:1,probeLeaseMs:5000}});const context={tenantId:'tenant-a',capability:'tts',provider:'voice',region:'us-east-1'};await breaker.outcome(context,{outcome:'FAILURE'});await new Promise(r=>setTimeout(r,5));const [one,two]=await Promise.all([breaker.allow(context,candidate('voice')),breaker.allow(context,candidate('voice'))]);assert.equal([one,two].filter(r=>r.allowed).length,1);await breaker.outcome(context,{outcome:'SUCCESS'});assert.equal((await breaker.inspect(context)).state,STATES.CLOSED);});
