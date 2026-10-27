@@ -1,5 +1,6 @@
 require('./security/boundary-bootstrap');
 require('./generation-reproducibility/http-bootstrap');
+require('./storage/artifact-delivery-http-bootstrap');
 const { installHttpVersioning } = require('./api/api-versioning');
 require('./runtime/runtime-http-hook');
 require('./diff/http');
@@ -62,5 +63,4 @@ extended.createExtendedApiServer=function createExtendedApiServerWithSearchAndEv
 };
 installHttpVersioning();
 require('./server');
-// Loaded after server construction so the idempotency boundary wraps the final evidence-aware transaction implementation.
 require('./persistence/idempotency-bootstrap');
