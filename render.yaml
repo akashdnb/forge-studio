@@ -169,6 +169,52 @@ services:
         sync: false
       - key: YOUTUBE_CLIENT_SECRET
         sync: false
+  - type: worker
+    name: forge-studio-event-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: node src/events/delivery-worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: FORGE_EVENT_SECRET_KEY
+        sync: false
+      - key: FORGE_EVENT_POLL_MS
+        value: "1000"
+      - key: FORGE_EVENT_FANOUT_BATCH
+        value: "100"
+      - key: FORGE_EVENT_DELIVERY_BATCH
+        value: "10"
+      - key: FORGE_EVENT_RECOVERY_EVERY
+        value: "10"
+      - key: FORGE_EVENT_PG_POOL_MAX
+        value: "5"
+  - type: web
+    name: forge-studio-event-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8090"
+      - key: FORGE_EVENT_PORT
+        value: "8090"
+      - key: DATABASE_URL
+        sync: false
+      - key: FORGE_EVENT_SECRET_KEY
+        sync: false
+      - key: FORGE_AUTH_SIGNING_SECRET
+        sync: false
+      - key: API_BEARER_TOKEN
+        sync: false
+      - key: FORGE_STATIC_ACTOR_ID
+        sync: false
+      - key: FORGE_STATIC_TENANT_ID
+        sync: false
   - type: web
     name: forge-studio-ui
     runtime: static
