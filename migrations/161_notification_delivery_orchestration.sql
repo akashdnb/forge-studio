@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS forge_notification_deliveries (
   intent_id text NOT NULL REFERENCES forge_notification_intents(id) ON DELETE RESTRICT,
   recipient_id text NOT NULL REFERENCES forge_notification_recipients(id) ON DELETE RESTRICT,
   channel text NOT NULL CHECK (channel IN ('webhook','email','push','sms','voice')),
+  priority integer NOT NULL DEFAULT 100 CHECK (priority >= 0),
   status text NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED','LEASED','SENT','FAILED','RETRY','DEAD_LETTER','QUARANTINED','CANCELLED','EXPIRED','SUPPRESSED')),
   provider_route text,
   provider_request_key text NOT NULL,
@@ -75,7 +76,7 @@ CREATE TABLE IF NOT EXISTS forge_notification_deliveries (
   UNIQUE(tenant_id,dedupe_key),
   UNIQUE(provider_request_key)
 );
-CREATE INDEX IF NOT EXISTS forge_notification_delivery_claim_idx ON forge_notification_deliveries(status,next_attempt_at,priority) WHERE status IN ('QUEUED','RETRY');
+CREATE INDEX IF NOT EXISTS forge_notification_delivery_claim_idx ON forge_notification_deliveries(status,next_attempt_at,priority,created_at) WHERE status IN ('QUEUED','RETRY');
 CREATE INDEX IF NOT EXISTS forge_notification_delivery_scope_idx ON forge_notification_deliveries(tenant_id,project_id,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS forge_notification_attempts (
@@ -148,13 +149,16 @@ BEGIN
   VALUES('notification.requested',p_source_type,p_source_key,p_payload,p_tenant_id,p_project_id)
   ON CONFLICT DO NOTHING;
 END $$;
-
 CREATE UNIQUE INDEX IF NOT EXISTS forge_notification_outbox_source_uq ON forge_outbox(topic,aggregate_type,aggregate_id) WHERE topic='notification.requested';
 
 CREATE OR REPLACE FUNCTION forge_job_notification_trigger() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE tenant text;
 BEGIN
   IF NEW.status IN ('SUCCEEDED','FAILED','CANCELLED') AND OLD.status IS DISTINCT FROM NEW.status AND NEW.project_id IS NOT NULL THEN
-    PERFORM forge_notification_outbox('job:'||NEW.id||':'||NEW.status||':'||NEW.attempts,'job',p.tenant_id,NEW.project_id,jsonb_build_object('sourceId',NEW.id,'sourceType','job','status',NEW.status,'kind',NEW.kind,'attempts',NEW.attempts,'episodeId',NEW.episode_id,'result',COALESCE(NEW.result,'{}'::jsonb),'error',COALESCE(NEW.error,'{}'::jsonb)));
+    SELECT tenant_id INTO tenant FROM projects WHERE id=NEW.project_id;
+    IF tenant IS NOT NULL THEN
+      PERFORM forge_notification_outbox('job:'||NEW.id||':'||NEW.status||':'||NEW.attempts,'job',tenant,NEW.project_id,jsonb_build_object('sourceId',NEW.id,'sourceType','job','status',NEW.status,'kind',NEW.kind,'attempts',NEW.attempts,'episodeId',NEW.episode_id,'result',COALESCE(NEW.result,'{}'::jsonb),'error',COALESCE(NEW.error,'{}'::jsonb)));
+    END IF;
   END IF;
   RETURN NEW;
 END $$;
