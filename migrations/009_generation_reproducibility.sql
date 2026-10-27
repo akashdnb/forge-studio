@@ -54,6 +54,21 @@ CREATE TABLE IF NOT EXISTS generation_attempts (
 );
 CREATE INDEX IF NOT EXISTS generation_attempts_recipe_idx ON generation_attempts(recipe_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS generation_attempts_scope_idx ON generation_attempts(tenant_id, project_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS generation_recipe_audit (
+  id bigserial PRIMARY KEY,
+  recipe_id text NOT NULL REFERENCES generation_recipes(id) ON DELETE RESTRICT,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  episode_id text REFERENCES episodes(id) ON DELETE RESTRICT,
+  actor text NOT NULL,
+  action text NOT NULL,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS generation_recipe_audit_idx ON generation_recipe_audit(tenant_id, project_id, recipe_id, created_at DESC);
+CREATE OR REPLACE FUNCTION forge_generation_recipe_audit_immutable() RETURNS trigger AS $$ BEGIN IF TG_OP IN ('UPDATE','DELETE') THEN RAISE EXCEPTION 'generation recipe audit evidence is append-only'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS generation_recipe_audit_immutable ON generation_recipe_audit;
+CREATE TRIGGER generation_recipe_audit_immutable BEFORE UPDATE OR DELETE ON generation_recipe_audit FOR EACH ROW EXECUTE FUNCTION forge_generation_recipe_audit_immutable();
 ALTER TABLE provider_runs ADD COLUMN IF NOT EXISTS generation_recipe_id text REFERENCES generation_recipes(id) ON DELETE RESTRICT;
 CREATE INDEX IF NOT EXISTS provider_runs_generation_recipe_idx ON provider_runs(generation_recipe_id, created_at DESC);
 CREATE OR REPLACE FUNCTION forge_generation_recipe_immutable() RETURNS trigger AS $$
