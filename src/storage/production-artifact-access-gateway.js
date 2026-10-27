@@ -17,11 +17,19 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
   }
 
   async _authorize(artifactId, options = {}) {
-    const access = await super._authorize(artifactId, options);
-    const recovery = Boolean(options.recovery);
-    const released = RELEASED_EPISODE_STATES.has(access.artifact.episode_state) && access.artifact.approved_render_id === access.artifact.id;
-    if (options.action === 'metadata' && !recovery && !access.worker && !released) throw Object.assign(new Error('Artifact is not approved for delivery'), { code: 'APPROVAL_REQUIRED', statusCode: 403 });
-    return access;
+    try {
+      const access = await super._authorize(artifactId, options);
+      const recovery = Boolean(options.recovery);
+      const released = RELEASED_EPISODE_STATES.has(access.artifact.episode_state) && access.artifact.approved_render_id === access.artifact.id;
+      if (options.action === 'metadata' && !recovery && !access.worker && !released) throw Object.assign(new Error('Artifact is not approved for delivery'), { code: 'APPROVAL_REQUIRED', statusCode: 403 });
+      return access;
+    } catch (error) {
+      try {
+        const artifact = await this._loadArtifact(artifactId);
+        if (artifact && options.actor) await this._audit(artifact, options.actor, 'ARTIFACT_ACCESS_DENIED', { action: options.action || 'metadata', code: error.code || 'ACCESS_DENIED' });
+      } catch { /* denial remains fail-closed if audit persistence is unavailable */ }
+      throw error;
+    }
   }
 
   async resolve({ artifactId, actor, action = 'metadata', token = null, purpose = 'user', recovery = false }) {
