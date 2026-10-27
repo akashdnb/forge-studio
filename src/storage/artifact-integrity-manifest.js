@@ -1,0 +1,64 @@
+'use strict';
+
+const { createHash, createHmac, timingSafeEqual } = require('node:crypto');
+
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const MEDIA_TYPE = /^[A-Za-z0-9!#$&^_.+\-]{1,64}\/[A-Za-z0-9!#$&^_.+\-]{1,64}$/;
+
+function normalizeSha256(value) {
+  if (typeof value !== 'string' || !SHA256_HEX.test(value)) throw Object.assign(new TypeError('sha256 must be a lowercase SHA-256 hex digest'), { code: 'INVALID_SHA256' });
+  return value;
+}
+
+function validateMediaType(value) {
+  if (typeof value !== 'string' || !MEDIA_TYPE.test(value) || value.length > 128) throw Object.assign(new TypeError('mediaType must be a valid bounded MIME type'), { code: 'INVALID_MEDIA_TYPE' });
+  return value.toLowerCase();
+}
+
+function validateSize(sizeBytes) {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) throw Object.assign(new TypeError('sizeBytes must be a non-negative safe integer'), { code: 'INVALID_SIZE' });
+  return sizeBytes;
+}
+
+function canonicalManifest(input) {
+  const manifest = {
+    schemaVersion: 1,
+    identity: `sha256:${normalizeSha256(input.sha256)}`,
+    tenantId: String(input.tenantId),
+    projectId: String(input.projectId),
+    artifactId: String(input.artifactId),
+    versionId: String(input.versionId),
+    kind: String(input.kind),
+    storageKey: String(input.storageKey),
+    sha256: normalizeSha256(input.sha256),
+    sizeBytes: validateSize(input.sizeBytes),
+    mediaType: validateMediaType(input.mediaType),
+    encryptionMode: String(input.encryptionMode || 'NONE'),
+    encryptionKeyId: input.encryptionKeyId ? String(input.encryptionKeyId) : null,
+  };
+  if (!manifest.tenantId || !manifest.projectId || !manifest.artifactId || !manifest.versionId || !manifest.kind || !manifest.storageKey) throw Object.assign(new TypeError('manifest identity fields are required'), { code: 'INVALID_MANIFEST' });
+  return manifest;
+}
+
+function manifestDigest(manifest) {
+  return createHash('sha256').update(JSON.stringify(canonicalManifest(manifest))).digest('hex');
+}
+
+function resolveManifestKey(key = process.env.FORGE_ARTIFACT_INTEGRITY_KEY || process.env.FORGE_SECRET_ENCRYPTION_KEY) {
+  if (!key || String(key).length < 32) throw Object.assign(new Error('FORGE_ARTIFACT_INTEGRITY_KEY (or FORGE_SECRET_ENCRYPTION_KEY) must contain at least 32 bytes of secret material'), { code: 'MISSING_ARTIFACT_INTEGRITY_KEY' });
+  return Buffer.from(String(key), 'utf8');
+}
+
+function authenticateManifest(manifest, key) {
+  const digest = manifestDigest(manifest);
+  const mac = createHmac('sha256', resolveManifestKey(key)).update(digest).digest('hex');
+  return { digest, mac, algorithm: 'HMAC-SHA256' };
+}
+
+function verifyManifest(manifest, expectedMac, key) {
+  if (typeof expectedMac !== 'string' || !/^[a-f0-9]{64}$/.test(expectedMac)) return false;
+  const actual = authenticateManifest(manifest, key).mac;
+  return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expectedMac, 'hex'));
+}
+
+module.exports = { normalizeSha256, validateMediaType, validateSize, canonicalManifest, manifestDigest, authenticateManifest, verifyManifest };
