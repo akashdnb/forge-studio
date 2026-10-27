@@ -1,3 +1,4 @@
+require('./notifications/http-bootstrap');
 require('./security/boundary-bootstrap');
 require('./generation-reproducibility/http-bootstrap');
 require('./storage/artifact-delivery-http-bootstrap');
