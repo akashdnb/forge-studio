@@ -1,5 +1,6 @@
 const { URL } = require('node:url');
 function json(response, status, body) { response.setHeader('content-type', 'application/json; charset=utf-8'); response.writeHead(status); response.end(JSON.stringify(body)); }
+function metrics(response, values) { response.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8'); response.writeHead(200); response.end(Object.entries(values).map(([name, value]) => `${name} ${Number(value) || 0}`).join('\n') + '\n'); }
 function installRecoveryRoutes(server, { service, pool, authorize }) {
   if (!server || !service || !pool) throw new TypeError('server, service and pool are required');
   server.on('request', async (request, response) => {
@@ -7,6 +8,15 @@ function installRecoveryRoutes(server, { service, pool, authorize }) {
     if (!pathname.startsWith('/internal/recovery/')) return;
     try {
       if (!(await authorize(request))) return json(response, 403, { error: { code: 'FORBIDDEN' } });
+      if (pathname === '/internal/recovery/metrics') {
+        if (request.method !== 'GET') return json(response, 405, { error: { code: 'METHOD_NOT_ALLOWED' } });
+        const failed = await pool.query("SELECT count(*)::int count FROM forge_backup_records WHERE integrity_status='FAILED'");
+        const incomplete = await pool.query("SELECT count(*)::int count FROM forge_backup_records WHERE status='SUCCEEDED' AND coverage_status='INCOMPLETE'").catch(() => ({ rows: [{ count: 0 }] }));
+        const stale = await pool.query("SELECT EXTRACT(EPOCH FROM (now()-MAX(created_at)))::bigint age FROM forge_backup_records WHERE status='SUCCEEDED' AND integrity_status='VERIFIED' AND last_known_good=true").catch(() => ({ rows: [{ age: 0 }] }));
+        const restoreFailures = await pool.query("SELECT count(*)::int count FROM forge_restore_operations WHERE verification_status='FAIL'").catch(() => ({ rows: [{ count: 0 }] }));
+        const rto = await pool.query("SELECT COALESCE(MAX(rto_ms),0)::bigint rto FROM forge_restore_operations WHERE status='SUCCEEDED' AND verification_status='PASS'").catch(() => ({ rows: [{ rto: 0 }] }));
+        return metrics(response, { forge_recovery_backup_integrity_failed_total: failed.rows[0].count, forge_recovery_backup_coverage_incomplete: incomplete.rows[0].count, forge_recovery_last_known_good_age_seconds: stale.rows[0].age || 0, forge_recovery_restore_verification_failed_total: restoreFailures.rows[0].count, forge_recovery_last_verified_rto_ms: rto.rows[0].rto || 0, forge_recovery_rto_budget_ms: Number(process.env.FORGE_RECOVERY_RTO_BUDGET_MS || 3600000) });
+      }
       if (request.method !== 'GET') return json(response, 405, { error: { code: 'METHOD_NOT_ALLOWED' } });
       if (pathname === '/internal/recovery/health') {
         const backups = await pool.query("SELECT status,COUNT(*)::int count FROM forge_backup_records GROUP BY status ORDER BY status");
