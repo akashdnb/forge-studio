@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { Pool } = require('pg');
-const { TransactionalOutboxDelivery } = require('./transactional-outbox');
+const { FencedOutboundWebhookReliability } = require('./fenced-outbound-webhook-reliability');
 
 function createEventDeliveryWorker({
   pool,
@@ -9,7 +9,7 @@ function createEventDeliveryWorker({
   logger = console,
   deliveryConfig = {},
 } = {}) {
-  const delivery = new TransactionalOutboxDelivery({ pool, logger, config: deliveryConfig });
+  const delivery = new FencedOutboundWebhookReliability({ pool, logger, config: deliveryConfig });
   let stopped = false;
   let timer = null;
   let recoveryTick = 0;
@@ -17,10 +17,10 @@ function createEventDeliveryWorker({
   async function reconcileStale() {
     await pool.query(`
       UPDATE forge_event_deliveries d
-      SET status='SUCCEEDED',completed_at=now(),acked_at=now(),acked_by=$1,updated_at=now(),last_error='stale replay suppressed by consumer cursor'
+      SET status='SUCCEEDED',completed_at=now(),acked_at=now(),acked_by=$1,updated_at=now(),last_error='stale delivery suppressed by consumer cursor'
       FROM forge_event_consumer_cursors c
       WHERE d.subscription_id=c.subscription_id AND d.ordering_key=c.ordering_key
-        AND d.status IN ('PENDING','RETRY') AND d.ordering_sequence <= c.last_acked_sequence`, [workerId]);
+        AND d.replay_of IS NULL AND d.status IN ('PENDING','RETRY') AND d.ordering_sequence <= c.last_acked_sequence`, [workerId]);
   }
 
   async function tick() {

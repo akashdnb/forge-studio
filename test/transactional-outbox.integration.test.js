@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Pool } = require('pg');
-const { TransactionalOutboxDelivery } = require('../src/events/transactional-outbox');
+const { OutboundWebhookReliability } = require('../src/events/outbound-webhook-reliability');
 
 const enabled = Boolean(process.env.DATABASE_URL);
 const integration = enabled ? test : test.skip;
@@ -37,14 +37,12 @@ integration('transactional outbox preserves ordering, integrity and payload reda
   assert.equal(redacted.redacted_payload.nested[1].password, '[REDACTED]');
   assert.equal(redacted.payload_hash.length, 64);
 
-  await assert.rejects(
-    pool.query(`UPDATE forge_events SET payload='{}'::jsonb WHERE project_id=$1`, [projectId]),
-    /immutable|55000/i,
-  );
+  await assert.rejects(pool.query(`UPDATE forge_events SET payload='{}'::jsonb WHERE project_id=$1`, [projectId]), /immutable|55000/i);
 });
 
 integration('outbox leases recover and stale replays are suppressed by the consumer cursor', async () => {
-  const delivery = new TransactionalOutboxDelivery({ pool, config: { leaseSeconds: 1 } });
+  const options = { pool, dnsResolver: async () => ({ host: 'example.com', address: '93.184.216.34', family: 4 }), config: { leaseSeconds: 1 } };
+  const delivery = new OutboundWebhookReliability(options);
   const sub = await delivery.createSubscription({ tenantId, projectId, endpointUrl: 'https://example.com/events', eventTypes: [], ordered: true, secret: 'integration-test-secret-0123456789', createdBy: 'integration' });
   await pool.query(`SELECT forge_capture_event('job.state.changed',$1,$2,'job','replay-job',$3::jsonb)`, [projectId, episodeId, JSON.stringify({ jobId: 'replay-job', projectId, kind: 'integration', status: 'SUCCEEDED' })]);
   await delivery.fanout(20, 'integration-worker-a');
@@ -59,9 +57,11 @@ integration('outbox leases recover and stale replays are suppressed by the consu
 
   await pool.query(`UPDATE forge_event_deliveries SET status='SUCCEEDED',acked_at=now(),acked_by='integration' WHERE id=$1`, [row.id]);
   await pool.query(`INSERT INTO forge_event_consumer_cursors(subscription_id,tenant_id,ordering_key,last_acked_sequence,last_event_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(subscription_id,ordering_key) DO UPDATE SET last_acked_sequence=EXCLUDED.last_acked_sequence,last_event_id=EXCLUDED.last_event_id`, [sub.id, tenantId, row.ordering_key, row.ordering_sequence, row.event_id]);
-  await delivery.replayDelivery(row.id, tenantId);
+  const replay = await delivery.replayDelivery(row.id, tenantId, 'integration');
+  assert.equal(replay.replay_of, row.id);
   const claimed = await delivery.claim({ workerId: 'integration-worker-b', limit: 10 });
   assert.equal(claimed.some((item) => item.id === row.id), false);
+  assert.equal(claimed.some((item) => item.id === replay.id), true);
 });
 
 test.after(async () => {
@@ -71,6 +71,7 @@ test.after(async () => {
     await pool.query('DELETE FROM forge_event_dlq WHERE delivery_id IN (SELECT id FROM forge_event_deliveries WHERE project_id=$1)', [projectId]);
     await pool.query('DELETE FROM forge_event_consumer_cursors WHERE tenant_id=$1', [tenantId]);
     await pool.query('DELETE FROM forge_event_deliveries WHERE project_id=$1', [projectId]);
+    await pool.query('DELETE FROM forge_event_subscription_keys WHERE tenant_id=$1', [tenantId]);
     await pool.query('DELETE FROM forge_outbox WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM forge_events WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM forge_event_subscriptions WHERE project_id=$1', [projectId]);
