@@ -1,0 +1,65 @@
+openapi: 3.0.3
+info:
+  title: Forge Studio Durable Event Delivery API
+  version: 1.0.0
+paths:
+  /v1/event-schemas:
+    get:
+      summary: List versioned event contracts
+      responses:
+        '200': { description: Event schema registry }
+  /v1/event-subscriptions:
+    get:
+      summary: List tenant/project-scoped subscriptions
+      parameters:
+        - { in: query, name: projectId, schema: { type: string } }
+      responses: { '200': { description: Subscriptions } }
+    post:
+      summary: Create a signed webhook subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubscriptionCreate' }
+      responses:
+        '201': { description: Created }
+  /v1/event-subscriptions/{id}:
+    patch:
+      summary: Enable/disable or tune delivery limits
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { '200': { description: Updated } }
+    delete:
+      summary: Disable a subscription and cancel queued deliveries
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { '204': { description: Disabled } }
+  /v1/event-deliveries:
+    get:
+      summary: Inspect tenant-scoped delivery state
+      responses: { '200': { description: Deliveries } }
+  /v1/event-deliveries/{id}/cancel:
+    post:
+      summary: Cancel a queued/retry delivery
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { '200': { description: Cancelled } }
+  /v1/event-deliveries/{id}/replay:
+    post:
+      summary: Replay using the same deterministic delivery identity
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { '200': { description: Requeued } }
+  /v1/event-delivery/metrics:
+    get:
+      summary: Backlog, delivery status, and DLQ health
+      responses: { '200': { description: Metrics } }
+components:
+  schemas:
+    SubscriptionCreate:
+      type: object
+      required: [endpointUrl, secret]
+      properties:
+        projectId: { type: string, nullable: true }
+        endpointUrl: { type: string, format: uri }
+        secret: { type: string, minLength: 16, writeOnly: true }
+        eventTypes: { type: array, items: { type: string } }
+        ordered: { type: boolean, default: false }
+        rateLimitPerSecond: { type: integer, minimum: 1, maximum: 1000, default: 10 }
+        maxConcurrency: { type: integer, minimum: 1, maximum: 100, default: 4 }
