@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS forge_provider_credentials (
   UNIQUE(tenant_id, project_id, provider, credential_name, version)
 );
 CREATE INDEX IF NOT EXISTS forge_provider_credentials_select_idx ON forge_provider_credentials(tenant_id, project_id, provider, credential_name, status, version DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS forge_provider_credentials_active_uq ON forge_provider_credentials(tenant_id, project_id, provider, credential_name) WHERE status IN ('ACTIVE','OVERLAP');
+DROP INDEX IF EXISTS forge_provider_credentials_active_uq;
+CREATE UNIQUE INDEX IF NOT EXISTS forge_provider_credentials_active_uq ON forge_provider_credentials(tenant_id, project_id, provider, credential_name) WHERE status='ACTIVE';
 
 CREATE TABLE IF NOT EXISTS forge_provider_credential_leases (
   id text PRIMARY KEY,
