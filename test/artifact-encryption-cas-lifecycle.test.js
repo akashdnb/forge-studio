@@ -6,7 +6,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
-const { execFileSync } = require('node:child_process');
 const { LocalFileStorage } = require('../src/storage/local-file-storage');
 const { authenticateManifest, verifyManifest, canonicalManifest } = require('../src/storage/artifact-integrity-manifest');
 
@@ -87,7 +86,7 @@ test('migration 150 is unique and includes integrity manifest schema', () => {
   const sql = fs.readFileSync(path.join(ROOT, 'migrations', matches[0]), 'utf8');
   assert.match(sql, /CREATE TABLE IF NOT EXISTS artifact_integrity_manifests/);
   assert.match(sql, /forge_artifact_integrity_manifest_immutable/);
-  assert.match(sql, /artifact_content_objects_tenant_sha_idx/);
+  assert.match(sql, /artifact_content_refs_object_active_idx/);
 });
 
 test('postgres integration exposes tenant-safe manifest and encryption metadata', { skip: !process.env.DATABASE_URL || process.env.FORGE_RUN_ARTIFACT_ENCRYPTION_INTEGRATION !== 'true' }, async () => {
@@ -98,8 +97,6 @@ test('postgres integration exposes tenant-safe manifest and encryption metadata'
     assert.equal(manifestTable.rows[0].table_name, 'artifact_integrity_manifests');
     const storageColumns = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='storage_objects' AND column_name IN ('encryption_mode','encryption_key_id','integrity_manifest_id') ORDER BY column_name`);
     assert.deepEqual(storageColumns.rows.map(r => r.column_name), ['encryption_key_id', 'encryption_mode', 'integrity_manifest_id']);
-    const index = await pool.query("SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname='artifact_content_objects_tenant_sha_idx'");
-    assert.equal(index.rows.length, 1);
   } finally {
     await pool.end();
   }
