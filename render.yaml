@@ -153,8 +153,6 @@ services:
         value: "16384"
       - key: FORGE_GENERATION_MAX_DURATION_SECONDS
         value: "3600"
-      - key: FORGE_GENERATION_RETRY_BASE_MS
-        value: "1000"
       - key: FORGE_IMAGE_GENERATION_COMMAND
         sync: false
       - key: FORGE_IMAGE_GENERATION_ARGS
@@ -216,7 +214,7 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: NODE_ENV
-        value: "production"
+        value: production
       - key: PORT
         value: "8090"
       - key: FORGE_EVENT_PORT
