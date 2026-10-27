@@ -10,7 +10,7 @@ function mapError(error) { if (error instanceof ArtifactAccessError) return { st
 async function handleArtifactAccess(request, response, { gateway, apiToken }) {
   const route = routeFor(request); if (!route) return false; const requestId = request.headers['x-request-id'] || randomUUID();
   try {
-    const auth = bearerContext(request, apiToken); const tenantId = auth?.tenantId || null;
+    const auth = bearerContext(request, apiToken); let tenantId = auth?.tenantId || null;
     if (route.action === 'access-token') {
       if (request.method !== 'POST') return sendJson(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST required' }, requestId }, requestId);
       if (!auth?.actor) return sendJson(response, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid bearer token is required' }, requestId }, requestId);
