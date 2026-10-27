@@ -1,14 +1,18 @@
 const { createExtendedApiServer } = require('./extended-http-api');
 const { PersistentProductionRepository } = require('./persistence/production-repository');
 const { handleGithubRunnerCallback } = require('./execution/github-actions-callback');
+const { JobQueue } = require('./persistence/job-queue');
+const { WorkflowScheduler } = require('./scheduling/workflow-scheduler');
+const { timingSafeEqual } = require('node:crypto');
 const { URL } = require('node:url');
 
 const port = Number.parseInt(process.env.PORT || '8080', 10);
 const host = process.env.HOST || '0.0.0.0';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError('PORT must be an integer between 1 and 65535');
 
+function tokenMatches(expected, actual) { if (!expected || typeof actual !== 'string') return false; const a=Buffer.from(expected); const b=Buffer.from(actual); return a.length===b.length&&timingSafeEqual(a,b); }
 async function start() {
-  let repository = null; let pool = null;
+  let repository = null; let pool = null; let scheduler = null;
   if (process.env.DATABASE_URL) {
     let Pool;
     try { ({ Pool } = require('pg')); } catch { throw new Error('DATABASE_URL is set but the optional pg package is unavailable'); }
@@ -16,6 +20,7 @@ async function start() {
     repository = new PersistentProductionRepository({ pool });
     try { await pool.query('SELECT 1'); } catch (error) { await pool.end(); throw new Error(`PostgreSQL connection failed: ${error.message}`); }
     if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate();
+    scheduler = new WorkflowScheduler({ pool, queue: new JobQueue({ pool }), schedulerId: 'forge-api-metrics' });
   }
   const { server } = createExtendedApiServer({ repository, apiToken: process.env.API_BEARER_TOKEN || null, allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true' });
   const apiHandler = server.listeners('request')[0];
@@ -25,6 +30,11 @@ async function start() {
     if (pathname === '/internal/github-actions/callback') {
       if (!repository) return response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'PERSISTENCE_UNAVAILABLE', message: 'PostgreSQL is required for runner callbacks' } }));
       return handleGithubRunnerCallback(request, response, { pool, token: process.env.FORGE_RUNNER_CALLBACK_TOKEN });
+    }
+    if (pathname === '/internal/scheduler/metrics' || pathname === '/internal/scheduler/health') {
+      const auth = /^Bearer\s+(.+)$/i.exec(request.headers.authorization || '');
+      if (!repository || !tokenMatches(process.env.API_BEARER_TOKEN || '', auth?.[1])) return response.writeHead(repository ? 401 : 503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: repository ? 'UNAUTHORIZED' : 'PERSISTENCE_UNAVAILABLE' } }));
+      try { const metrics=await scheduler.metrics(); return response.writeHead(200, { 'content-type':'application/json','cache-control':'no-store' }).end(JSON.stringify({status:'ok',schedulerId:scheduler.schedulerId,metrics})); } catch(error) { return response.writeHead(503, { 'content-type':'application/json' }).end(JSON.stringify({status:'unhealthy',error:{message:error.message}})); }
     }
     return apiHandler(request, response);
   });
