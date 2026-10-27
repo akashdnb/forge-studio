@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ProductionArtifactLifecycleControlPlane } = require('../src/storage/artifact-lifecycle-production');
+const { FinalArtifactLifecycleControlPlane } = require('../src/storage/artifact-lifecycle-final-safety');
 
 function fakePool() {
   const calls = [];
@@ -48,4 +49,10 @@ test('deletion provider errors are retained as quarantine evidence', async () =>
   await service._providerFailure({ id: 'intent-1', tenant_id: 't1', object_id: 'o1', storage_key: 'safe/key' }, Object.assign(new Error('provider unavailable'), { code: 'ECONNRESET' }));
   assert.ok(pool.calls.some(call => /artifact_deletion_intents/.test(call.sql)));
   assert.ok(pool.calls.some(call => /artifact_provider_reconciliation/.test(call.sql)));
+});
+
+test('final controller is fail-closed by class construction', () => {
+  const service = new FinalArtifactLifecycleControlPlane({ pool: fakePool(), storage: { delete: async () => {}, head: async () => null } });
+  assert.equal(typeof service._isProtected, 'function');
+  assert.equal(service.constructor.name, 'FinalArtifactLifecycleControlPlane');
 });
