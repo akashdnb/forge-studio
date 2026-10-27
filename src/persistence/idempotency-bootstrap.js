@@ -1,5 +1,8 @@
 const http = require('node:http');
 const { PostgresRepository } = require('./postgres-repository');
+const { PersistentProductionRepository } = require('./production-repository');
+const { AsyncEpisodeOrchestrator } = require('../pipeline/async-orchestrator');
+const { requiredString } = require('../domain/records');
 const { runIdempotencyContext, getIdempotencyContext, withIdempotencyTransaction } = require('./api-idempotency');
 
 function operationForRequest(req) {
@@ -63,6 +66,36 @@ function installPostgresBoundary() {
   PostgresRepository.prototype.withTransaction = withIdempotencyBoundary;
 }
 
+function installProjectCreationBoundary() {
+  const original = PersistentProductionRepository.prototype.createProject;
+  if (original.__forgeIdempotencyBoundary) return;
+  async function createProjectWithIdempotency(input) {
+    const context = getIdempotencyContext();
+    if (!context) return original.call(this, input);
+    const normalized = { ...input, id: requiredString(input.id, 'id'), name: requiredString(input.name, 'name') };
+    return withIdempotencyTransaction(this.db.pool, context, async (client) => {
+      const project = (await client.query('INSERT INTO projects(id,name,created_by,metadata) VALUES($1,$2,$3,$4::jsonb) RETURNING *',
+        [normalized.id, normalized.name, normalized.createdBy || 'system', JSON.stringify(normalized.metadata || {})])).rows[0];
+      await client.query("INSERT INTO project_members(project_id,actor_id,role) VALUES($1,$2,'OWNER') ON CONFLICT DO NOTHING", [project.id, normalized.createdBy || 'system']);
+      return project;
+    }, { responseStatus: 201 });
+  }
+  createProjectWithIdempotency.__forgeIdempotencyBoundary = true;
+  PersistentProductionRepository.prototype.createProject = createProjectWithIdempotency;
+}
+
+function installWorkflowKeyBridge() {
+  const original = AsyncEpisodeOrchestrator.prototype.enqueue;
+  if (original.__forgeIdempotencyKeyBridge) return;
+  async function enqueueWithRequestKey(args) {
+    const context = getIdempotencyContext();
+    if (!context || args?.idempotencyPrefix) return original.call(this, args);
+    return original.call(this, { ...args, idempotencyPrefix: context.idempotencyKey });
+  }
+  enqueueWithRequestKey.__forgeIdempotencyKeyBridge = true;
+  AsyncEpisodeOrchestrator.prototype.enqueue = enqueueWithRequestKey;
+}
+
 function installHttpContext() {
   const originalEmit = http.Server.prototype.emit;
   if (originalEmit.__forgeIdempotencyHttpContext) return;
@@ -109,6 +142,8 @@ function installHttpContext() {
 }
 
 installPostgresBoundary();
+installProjectCreationBoundary();
+installWorkflowKeyBridge();
 installHttpContext();
 
 module.exports = { operationForRequest, resourceIdForRequest, responseStatusForOperation };
