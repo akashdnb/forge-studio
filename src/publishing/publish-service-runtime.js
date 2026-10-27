@@ -11,7 +11,7 @@ class RuntimePublishService extends PublishService {
   constructor(options = {}) {
     super(options);
     this.mediaValidator = new MediaValidationService({ pool: options.pool, workerId: process.env.FORGE_WORKER_ID || 'runtime-publish-validator', maxConcurrency: 1 });
-    this.coordinator = options.coordinator || new DistributedLock({ pool: options.pool, ownerId: process.env.FORGE_WORKER_ID || 'runtime-publisher' });
+    this.coordinator = options.coordinator || new DistributedLock({ pool: options.pool, ownerId: process.env.FORGE_WORKER_ID || `runtime-publisher:${process.pid}` });
     this._publishFences = new Map();
   }
   async loadRun(runId) { const run = await super.loadRun(runId); if (!run) return null; return { ...run, package_id: run.package_artifact_id, package_version_id: run.package_version_id }; }
