@@ -15,6 +15,7 @@ const { installProvenance } = require('./provenance/install');
 const { installProvenanceHttp } = require('./provenance/http');
 const { EvidenceService, runEvidenceContext, getEvidenceContext } = require('./evidence/audit-evidence');
 const { handleEvidenceRequest } = require('./evidence/http');
+const { handleReviewRequest } = require('./review/http');
 installProvenance(PersistentProductionRepository);
 installProvenanceHttp(extended);
 installOperationsControlPlane();
@@ -33,8 +34,6 @@ if (!PostgresRepository.prototype.__forgeEvidenceContextPatched) {
   PostgresRepository.prototype.__forgeEvidenceOriginalWithTransaction=originalWithTransaction;
 }
 
-// server.js removes the initial extended-api listener and captures it as apiHandler.
-// Wrap that listener so search and evidence routes stay behind the production identity boundary.
 const originalReconcile = ProductionSearchService.prototype.reconcile;
 ProductionSearchService.prototype.reconcile = async function reconcileWithMissingDetection(args) {
   const result=await originalReconcile.call(this,args); const missing=await this.pool.query({text:`WITH expected AS (
@@ -58,7 +57,7 @@ extended.createExtendedApiServer=function createExtendedApiServerWithSearchAndEv
   const result=originalCreateExtendedApiServer(options); if(!result?.server||!options.repository)return result; const originalListeners=result.server.listeners.bind(result.server); const evidence=new EvidenceService({pool:options.repository.db.pool,logger:console});
   result.server.listeners=function listenersWithSearchAndEvidence(eventName){
     const listeners=originalListeners(eventName); if(eventName!=='request'||!listeners.length)return listeners; const baseHandler=listeners[0]; const pool=options.repository.db.pool; const search=new ProductionSearchService({pool});
-    const wrapped=async(request,response)=>{const pathname=new URL(request.url||'/','http://localhost').pathname;const requestId=request.headers['x-request-id']||randomUUID();response.setHeader('x-request-id',requestId);applySecurityHeaders(response);const auth=request._auth||authenticate(request,{apiToken:process.env.API_BEARER_TOKEN||null,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});if(!auth)return safeError(response,401,'UNAUTHORIZED',requestId);return runEvidenceContext({actor:auth.actor,tenantId:auth.tenantId,requestId,causalEventId:request.headers['x-causal-event-id']||''},async()=>{if(pathname.startsWith('/v1/evidence/')||pathname.startsWith('/internal/evidence/')){const handled=await handleEvidenceRequest(request,response,{evidence,auth,hasRole,pool,json:(res,status,body)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(body));},safeError});if(handled!==false)return handled;}if(pathname.startsWith('/v1/search')){try{return handleSearchRequest(request,response,{pool,auth,observability:null,service:search});}catch(error){return safeError(response,error.statusCode||500,error.code||'INTERNAL_ERROR',requestId);}}return baseHandler(request,response);});};
+    const wrapped=async(request,response)=>{const pathname=new URL(request.url||'/','http://localhost').pathname;const requestId=request.headers['x-request-id']||randomUUID();response.setHeader('x-request-id',requestId);applySecurityHeaders(response);const auth=request._auth||authenticate(request,{apiToken:process.env.API_BEARER_TOKEN||null,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});if(!auth)return safeError(response,401,'UNAUTHORIZED',requestId);return runEvidenceContext({actor:auth.actor,tenantId:auth.tenantId,requestId,causalEventId:request.headers['x-causal-event-id']||''},async()=>{if(pathname.startsWith('/v1/evidence/')||pathname.startsWith('/internal/evidence/')){const handled=await handleEvidenceRequest(request,response,{evidence,auth,hasRole,pool,json:(res,status,body)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(body));},safeError});if(handled!==false)return handled;}if(pathname.startsWith('/v1/reviews')){const handled=await handleReviewRequest(request,response,{pool,auth,hasRole,requestId,safeError});if(handled!==false)return handled;}if(pathname.startsWith('/v1/search')){try{return handleSearchRequest(request,response,{pool,auth,observability:null,service:search});}catch(error){return safeError(response,error.statusCode||500,error.code||'INTERNAL_ERROR',requestId);}}return baseHandler(request,response);});};
     return[wrapped,...listeners.slice(1)];
   }; return result;
 };
