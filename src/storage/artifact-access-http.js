@@ -23,7 +23,9 @@ function routeFor(request) {
   const url = new URL(request.url || '/', 'http://localhost');
   const match = /^\/v1\/artifacts\/([^/]+)(?:\/(access-token|content))?$/.exec(url.pathname);
   if (!match) return null;
-  return { url, artifactId: decodeURIComponent(match[1]), action: match[2] || 'metadata' };
+  let artifactId = match[1];
+  try { artifactId = decodeURIComponent(artifactId); } catch { /* gateway validation will return a safe 400 */ }
+  return { url, artifactId, action: match[2] || 'metadata' };
 }
 
 function mapError(error) {
@@ -62,6 +64,7 @@ async function handleArtifactAccess(request, response, { gateway, apiToken }) {
       'content-length': String(delivery.contentLength),
       'content-disposition': delivery.contentDisposition,
       'cache-control': 'private, max-age=60, must-revalidate',
+      'referrer-policy': 'no-referrer',
       etag: delivery.etag,
       'accept-ranges': delivery.acceptRanges,
       'x-content-type-options': 'nosniff',
