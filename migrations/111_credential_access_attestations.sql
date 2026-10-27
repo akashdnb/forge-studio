@@ -3,6 +3,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS forge_credential_access_leases (
   id text PRIMARY KEY,
   credential_id text NOT NULL REFERENCES forge_provider_credentials(id) ON DELETE RESTRICT,
+  credential_version bigint NOT NULL CHECK (credential_version > 0),
   tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   purpose text NOT NULL,
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS forge_credential_access_leases (
 );
 CREATE INDEX IF NOT EXISTS forge_credential_access_leases_active_idx ON forge_credential_access_leases(tenant_id, project_id, state, expires_at);
 CREATE INDEX IF NOT EXISTS forge_credential_access_leases_expiry_idx ON forge_credential_access_leases(state, expires_at);
-CREATE INDEX IF NOT EXISTS forge_credential_access_leases_credential_idx ON forge_credential_access_leases(credential_id, state, expires_at);
+CREATE INDEX IF NOT EXISTS forge_credential_access_leases_credential_idx ON forge_credential_access_leases(credential_id, credential_version, state, expires_at);
 
 CREATE TABLE IF NOT EXISTS forge_credential_access_grants (
   grant_id text PRIMARY KEY,
