@@ -1,5 +1,6 @@
 const { ArtifactAccessGateway, ArtifactAccessError, verifyToken, signToken, parseRange } = require('./artifact-access-gateway');
 const { ArtifactDeliveryCache } = require('./artifact-delivery-cache');
+const { verifyCachedFile } = require('./artifact-cache-integrity');
 const { getActiveObservability } = require('../observability');
 const { randomUUID } = require('node:crypto');
 const RELEASED_EPISODE_STATES = new Set(['APPROVED', 'PUBLISHING', 'PUBLISHED']);
@@ -58,13 +59,15 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
     this.deliveryCache.observability = this.deliveryCache.observability || getActiveObservability();
     try {
       const resolved = await this.deliveryCache.open({ tenantId: tenantId || artifact.project_id, artifact, originStorage: this.storage, range, signal });
+      await verifyCachedFile({ path: resolved.key, expectedSha256: artifact.content_hash, expectedSize: artifact.size_bytes });
       const actualLength = range ? range.length : resolved.sizeBytes;
       if (actualLength !== (range ? range.length : sizeBytes)) throw new ArtifactAccessError('Cached content length mismatch', 'CONTENT_LENGTH_MISMATCH', 503);
       await this._audit(artifact, actor, range ? 'ARTIFACT_STREAM_CACHE' : 'ARTIFACT_DOWNLOAD_CACHE', { bytes: actualLength, ranged: Boolean(range), cache: true, purpose });
       const safeKind = String(artifact.kind || 'artifact').replace(/[^A-Za-z0-9._-]/g, 'artifact'); const ext = String(artifact.media_type || '').split('/')[1]?.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'bin';
       return { artifact, stream: resolved.stream, statusCode: range ? 206 : 200, contentLength: actualLength, contentRange: range ? `bytes ${range.start}-${range.end}/${sizeBytes}` : null, contentType: artifact.media_type || 'application/octet-stream', contentDisposition: `attachment; filename="forge-${safeKind}-${artifact.id}.${ext}"`, etag: `"sha256-${artifact.content_hash}"`, acceptRanges: 'bytes' };
     } catch (error) {
-      if (error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'ARTIFACT_CORRUPT') throw new ArtifactAccessError('Artifact delivery failed', error.code, error.code === 'ARTIFACT_NOT_FOUND' ? 404 : 503);
+      if (error.code === 'CHECKSUM_MISMATCH' || error.code === 'CONTENT_LENGTH_MISMATCH') { await this.deliveryCache.evict({ tenantId: tenantId || artifact.project_id, sha256: artifact.content_hash, reason: 'integrity_failure' }).catch(() => {}); }
+      if (error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'ARTIFACT_CORRUPT' || error.code === 'CHECKSUM_MISMATCH') throw new ArtifactAccessError('Artifact delivery failed', error.code === 'CHECKSUM_MISMATCH' ? 'ARTIFACT_CORRUPT' : error.code, error.code === 'ARTIFACT_NOT_FOUND' ? 404 : 503);
       throw error;
     }
   }
