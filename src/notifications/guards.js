@@ -23,6 +23,12 @@ if (!NotificationOrchestrator.prototype.__forgeNotificationGuards) {
     }
     return intent;
   };
+  NotificationOrchestrator.prototype.claim=async function guardedClaim(limit=20){
+    return this.tx(async c=>{
+      const rows=(await c.query(`WITH candidates AS (SELECT d.id FROM forge_notification_deliveries d WHERE d.status IN ('QUEUED','RETRY') AND d.next_attempt_at<=now() AND(d.deadline_at IS NULL OR d.deadline_at>now()) AND NOT EXISTS(SELECT 1 FROM forge_notification_deliveries earlier WHERE earlier.intent_id=d.intent_id AND earlier.recipient_id=d.recipient_id AND earlier.status IN ('QUEUED','RETRY','LEASED') AND (earlier.priority<d.priority OR (earlier.priority=d.priority AND earlier.created_at<d.created_at))) ORDER BY d.priority,d.next_attempt_at,d.created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE forge_notification_deliveries d SET status='LEASED',attempt_count=d.attempt_count+1,lease_token=$2,fencing_token=d.fencing_token+1,lease_until=now()+interval '90 seconds',updated_at=now() FROM candidates c WHERE d.id=c.id RETURNING d.*`,[Math.max(1,Math.min(100,limit)),this.workerId])).rows;
+      return rows;
+    });
+  };
   NotificationOrchestrator.prototype.nextFallback=async function guardedNextFallback(delivery){
     const sent=(await this.pool.query(`SELECT 1 FROM forge_notification_deliveries WHERE intent_id=$1 AND recipient_id=$2 AND status='SENT' LIMIT 1`,[delivery.intent_id,delivery.recipient_id])).rows[0];
     if(sent)return;
