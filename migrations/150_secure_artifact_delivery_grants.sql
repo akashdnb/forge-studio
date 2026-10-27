@@ -2,120 +2,46 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS artifact_delivery_grants (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
-  artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
-  artifact_version_id text NOT NULL REFERENCES version_records(id) ON DELETE RESTRICT,
-  content_hash char(64) NOT NULL,
-  subject_actor text NOT NULL,
-  purpose text NOT NULL CHECK (purpose IN ('user','browser','runner','export','replay','internal')),
-  audience text NOT NULL CHECK (audience IN ('browser','runner','server','cdn')),
-  action text NOT NULL CHECK (action IN ('download','stream')),
-  nonce uuid NOT NULL UNIQUE,
-  token_hash char(64) NOT NULL UNIQUE,
-  key_epoch bigint NOT NULL CHECK (key_epoch >= 0),
-  issued_at timestamptz NOT NULL DEFAULT now(),
-  not_before timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL,
-  max_bytes bigint CHECK (max_bytes IS NULL OR max_bytes > 0),
-  range_start bigint CHECK (range_start IS NULL OR range_start >= 0),
-  range_end bigint CHECK (range_end IS NULL OR range_end >= 0),
-  max_uses integer NOT NULL DEFAULT 1 CHECK (max_uses > 0),
-  use_count integer NOT NULL DEFAULT 0 CHECK (use_count >= 0),
-  status text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED','EXHAUSTED','EXPIRED')),
-  revoked_at timestamptz,
-  revoked_by text,
-  revocation_reason text,
-  last_used_at timestamptz,
-  created_by text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (range_end IS NULL OR range_start IS NULL OR range_end >= range_start),
-  CHECK (expires_at > not_before)
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT, project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT, artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT, artifact_version_id text NOT NULL REFERENCES version_records(id) ON DELETE RESTRICT, content_hash char(64) NOT NULL, subject_actor text NOT NULL, purpose text NOT NULL CHECK (purpose IN ('user','browser','runner','export','replay','internal')), audience text NOT NULL CHECK (audience IN ('browser','runner','server','cdn')), action text NOT NULL CHECK (action IN ('download','stream')), nonce uuid NOT NULL UNIQUE, token_hash char(64) NOT NULL UNIQUE, key_epoch bigint NOT NULL CHECK (key_epoch >= 0), issued_at timestamptz NOT NULL DEFAULT now(), not_before timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL, max_bytes bigint CHECK (max_bytes IS NULL OR max_bytes > 0), range_start bigint CHECK (range_start IS NULL OR range_start >= 0), range_end bigint CHECK (range_end IS NULL OR range_end >= 0), max_uses integer NOT NULL DEFAULT 1 CHECK (max_uses > 0), use_count integer NOT NULL DEFAULT 0 CHECK (use_count >= 0), status text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED','EXHAUSTED','EXPIRED')), revoked_at timestamptz, revoked_by text, revocation_reason text, last_used_at timestamptz, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), CHECK (range_end IS NULL OR range_start IS NULL OR range_end >= range_start), CHECK (expires_at > not_before)
 );
 CREATE INDEX IF NOT EXISTS artifact_delivery_grants_scope_idx ON artifact_delivery_grants(tenant_id, project_id, artifact_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS artifact_delivery_grants_subject_idx ON artifact_delivery_grants(subject_actor, status, expires_at);
 CREATE INDEX IF NOT EXISTS artifact_delivery_grants_epoch_idx ON artifact_delivery_grants(tenant_id, project_id, key_epoch, status);
 
-CREATE TABLE IF NOT EXISTS artifact_delivery_denylist (
-  id bigserial PRIMARY KEY,
-  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id text REFERENCES projects(id) ON DELETE RESTRICT,
-  scope_type text NOT NULL CHECK (scope_type IN ('TENANT','PROJECT','ARTIFACT','GRANT')),
-  scope_id text NOT NULL,
-  reason text NOT NULL,
-  actor text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE(scope_type, scope_id)
-);
+CREATE TABLE IF NOT EXISTS artifact_delivery_denylist (id bigserial PRIMARY KEY, tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT, project_id text REFERENCES projects(id) ON DELETE RESTRICT, scope_type text NOT NULL CHECK (scope_type IN ('TENANT','PROJECT','ARTIFACT','GRANT')), scope_id text NOT NULL, reason text NOT NULL, actor text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(scope_type, scope_id));
 CREATE INDEX IF NOT EXISTS artifact_delivery_denylist_scope_idx ON artifact_delivery_denylist(tenant_id, project_id, scope_type, scope_id);
 
-CREATE TABLE IF NOT EXISTS artifact_delivery_grant_uses (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  grant_id uuid NOT NULL REFERENCES artifact_delivery_grants(id) ON DELETE RESTRICT,
-  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
-  artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
-  nonce uuid NOT NULL,
-  request_id text,
-  action text NOT NULL,
-  range_start bigint,
-  range_end bigint,
-  bytes_requested bigint NOT NULL DEFAULT 0 CHECK (bytes_requested >= 0),
-  outcome text NOT NULL CHECK (outcome IN ('RESERVED','SERVED','FAILED','CANCELLED')),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE(grant_id, nonce)
-);
+CREATE TABLE IF NOT EXISTS artifact_delivery_grant_uses (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), grant_id uuid NOT NULL REFERENCES artifact_delivery_grants(id) ON DELETE RESTRICT, tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT, project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT, artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT, nonce uuid NOT NULL, request_id text, action text NOT NULL, range_start bigint, range_end bigint, bytes_requested bigint NOT NULL DEFAULT 0 CHECK (bytes_requested >= 0), outcome text NOT NULL CHECK (outcome IN ('RESERVED','SERVED','FAILED','CANCELLED')), created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(grant_id, nonce));
 CREATE INDEX IF NOT EXISTS artifact_delivery_grant_uses_scope_idx ON artifact_delivery_grant_uses(tenant_id, project_id, artifact_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS artifact_delivery_grant_uses_grant_idx ON artifact_delivery_grant_uses(grant_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS artifact_delivery_authorization_evidence (
-  id bigserial PRIMARY KEY,
-  grant_id uuid REFERENCES artifact_delivery_grants(id) ON DELETE RESTRICT,
-  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id text REFERENCES projects(id) ON DELETE RESTRICT,
-  artifact_id text REFERENCES artifacts(id) ON DELETE RESTRICT,
-  event_type text NOT NULL CHECK (event_type IN ('ISSUED','AUTHORIZED','REVOKED','DENIED','EXHAUSTED','EXPIRED','KEY_REVOKED','DENYLISTED')),
-  actor text NOT NULL,
-  request_id text,
-  details jsonb NOT NULL DEFAULT '{}'::jsonb,
-  prev_digest char(64),
-  digest char(64) NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE(digest)
-);
+CREATE TABLE IF NOT EXISTS artifact_delivery_authorization_evidence (id bigserial PRIMARY KEY, grant_id uuid REFERENCES artifact_delivery_grants(id) ON DELETE RESTRICT, tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT, project_id text REFERENCES projects(id) ON DELETE RESTRICT, artifact_id text REFERENCES artifacts(id) ON DELETE RESTRICT, event_type text NOT NULL CHECK (event_type IN ('ISSUED','AUTHORIZED','REVOKED','DENIED','EXHAUSTED','EXPIRED','KEY_REVOKED','DENYLISTED')), actor text NOT NULL, request_id text, details jsonb NOT NULL DEFAULT '{}'::jsonb, prev_digest char(64), digest char(64) NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(digest));
 CREATE INDEX IF NOT EXISTS artifact_delivery_evidence_grant_idx ON artifact_delivery_authorization_evidence(grant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS artifact_delivery_evidence_scope_idx ON artifact_delivery_authorization_evidence(tenant_id, project_id, artifact_id, created_at DESC);
 
 CREATE OR REPLACE FUNCTION forge_artifact_delivery_grant_immutable_guard() RETURNS trigger AS $$
 BEGIN
-  IF OLD.id IS DISTINCT FROM NEW.id OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id OR OLD.project_id IS DISTINCT FROM NEW.project_id OR OLD.artifact_id IS DISTINCT FROM NEW.artifact_id OR OLD.artifact_version_id IS DISTINCT FROM NEW.artifact_version_id OR OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.subject_actor IS DISTINCT FROM NEW.subject_actor OR OLD.purpose IS DISTINCT FROM NEW.purpose OR OLD.audience IS DISTINCT FROM NEW.audience OR OLD.action IS DISTINCT FROM NEW.action OR OLD.nonce IS DISTINCT FROM NEW.nonce OR OLD.token_hash IS DISTINCT FROM NEW.token_hash OR OLD.key_epoch IS DISTINCT FROM NEW.key_epoch OR OLD.issued_at IS DISTINCT FROM NEW.issued_at OR OLD.not_before IS DISTINCT FROM NEW.not_before OR OLD.expires_at IS DISTINCT FROM NEW.expires_at OR OLD.max_bytes IS DISTINCT FROM NEW.max_bytes OR OLD.range_start IS DISTINCT FROM NEW.range_start OR OLD.range_end IS DISTINCT FROM NEW.range_end OR OLD.max_uses IS DISTINCT FROM NEW.max_uses OR OLD.created_by IS DISTINCT FROM NEW.created_by OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
-    RAISE EXCEPTION 'artifact delivery grant authorization fields are immutable';
-  END IF;
+  IF OLD.id IS DISTINCT FROM NEW.id OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id OR OLD.project_id IS DISTINCT FROM NEW.project_id OR OLD.artifact_id IS DISTINCT FROM NEW.artifact_id OR OLD.artifact_version_id IS DISTINCT FROM NEW.artifact_version_id OR OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.subject_actor IS DISTINCT FROM NEW.subject_actor OR OLD.purpose IS DISTINCT FROM NEW.purpose OR OLD.audience IS DISTINCT FROM NEW.audience OR OLD.action IS DISTINCT FROM NEW.action OR OLD.nonce IS DISTINCT FROM NEW.nonce OR OLD.token_hash IS DISTINCT FROM NEW.token_hash OR OLD.key_epoch IS DISTINCT FROM NEW.key_epoch OR OLD.issued_at IS DISTINCT FROM NEW.issued_at OR OLD.not_before IS DISTINCT FROM NEW.not_before OR OLD.expires_at IS DISTINCT FROM NEW.expires_at OR OLD.max_bytes IS DISTINCT FROM NEW.max_bytes OR OLD.range_start IS DISTINCT FROM NEW.range_start OR OLD.range_end IS DISTINCT FROM NEW.range_end OR OLD.max_uses IS DISTINCT FROM NEW.max_uses OR OLD.created_by IS DISTINCT FROM NEW.created_by OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN RAISE EXCEPTION 'artifact delivery grant authorization fields are immutable'; END IF;
   IF NEW.use_count < OLD.use_count OR NEW.use_count > NEW.max_uses THEN RAISE EXCEPTION 'artifact delivery grant use counter is invalid'; END IF;
   IF OLD.status='REVOKED' AND NEW.status<>'REVOKED' THEN RAISE EXCEPTION 'revoked grant cannot be reactivated'; END IF;
   IF OLD.status='EXHAUSTED' AND NEW.status<>'EXHAUSTED' THEN RAISE EXCEPTION 'exhausted grant cannot be reactivated'; END IF;
   IF OLD.status='EXPIRED' AND NEW.status NOT IN ('EXPIRED','REVOKED') THEN RAISE EXCEPTION 'expired grant cannot be reactivated'; END IF;
   RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS artifact_delivery_grant_immutable ON artifact_delivery_grants;
 CREATE TRIGGER artifact_delivery_grant_immutable BEFORE UPDATE ON artifact_delivery_grants FOR EACH ROW EXECUTE FUNCTION forge_artifact_delivery_grant_immutable_guard();
 
-CREATE OR REPLACE FUNCTION forge_artifact_delivery_evidence_immutable_guard() RETURNS trigger AS $$
-BEGIN RAISE EXCEPTION 'artifact delivery authorization evidence is append-only'; END;
-$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION forge_artifact_delivery_evidence_immutable_guard() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'artifact delivery authorization evidence is append-only'; END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS artifact_delivery_evidence_no_update ON artifact_delivery_authorization_evidence;
 CREATE TRIGGER artifact_delivery_evidence_no_update BEFORE UPDATE OR DELETE ON artifact_delivery_authorization_evidence FOR EACH ROW EXECUTE FUNCTION forge_artifact_delivery_evidence_immutable_guard();
 
 CREATE OR REPLACE FUNCTION forge_artifact_delivery_evidence_digest_guard() RETURNS trigger AS $$
 DECLARE expected text;
 BEGIN
-  expected := encode(digest(COALESCE(NEW.prev_digest,'') || ':' || NEW.event_type || ':' || NEW.tenant_id || ':' || COALESCE(NEW.project_id,'') || ':' || COALESCE(NEW.artifact_id,'') || ':' || NEW.actor || ':' || COALESCE(NEW.request_id,'') || ':' || NEW.details::text || ':' || NEW.created_at::text, 'sha256'),'hex');
+  expected := encode(digest(COALESCE(NEW.prev_digest,'') || ':' || NEW.event_type || ':' || NEW.tenant_id || ':' || COALESCE(NEW.project_id,'') || ':' || COALESCE(NEW.artifact_id,'') || ':' || NEW.actor || ':' || COALESCE(NEW.request_id,'') || ':' || NEW.details::text || ':' || to_char(NEW.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'sha256'),'hex');
   IF expected <> NEW.digest THEN RAISE EXCEPTION 'invalid artifact delivery evidence digest'; END IF;
   RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS artifact_delivery_evidence_digest_guard ON artifact_delivery_authorization_evidence;
 CREATE TRIGGER artifact_delivery_evidence_digest_guard BEFORE INSERT ON artifact_delivery_authorization_evidence FOR EACH ROW EXECUTE FUNCTION forge_artifact_delivery_evidence_digest_guard();
 
