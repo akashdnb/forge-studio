@@ -1,3 +1,4 @@
+require('./security/boundary-bootstrap');
 const { installHttpVersioning } = require('./api/api-versioning');
 require('./runtime/runtime-http-hook');
 require('./diff/http');
@@ -22,7 +23,6 @@ installOperationsControlPlane();
 installIncidentControlPlane();
 installIncidentEventSubscriptionBridge();
 installIncidentHealthEndpoint();
-
 if (!PostgresRepository.prototype.__forgeEvidenceContextPatched) {
   const originalWithTransaction = PostgresRepository.prototype.withTransaction;
   PostgresRepository.prototype.withTransaction = async function withEvidenceContext(operation) {
@@ -33,7 +33,6 @@ if (!PostgresRepository.prototype.__forgeEvidenceContextPatched) {
   PostgresRepository.prototype.__forgeEvidenceContextPatched=true;
   PostgresRepository.prototype.__forgeEvidenceOriginalWithTransaction=originalWithTransaction;
 }
-
 const originalReconcile = ProductionSearchService.prototype.reconcile;
 ProductionSearchService.prototype.reconcile = async function reconcileWithMissingDetection(args) {
   const result=await originalReconcile.call(this,args); const missing=await this.pool.query({text:`WITH expected AS (
@@ -51,7 +50,6 @@ ProductionSearchService.prototype.reconcile = async function reconcileWithMissin
   ) SELECT count(*)::int AS count FROM expected x LEFT JOIN forge_search_documents d ON d.project_id=x.project_id AND d.source_type=x.source_type AND d.source_id=x.source_id WHERE d.source_id IS NULL`,values:[args.tenantId,args.projectId||null],statement_timeout:this.statementTimeoutMs});
   const missingCount=Number(missing.rows[0]?.count||0); if(!missingCount)return{...result,missingEntriesDetected:0,rebuildId:null}; const rebuild=await this.createRebuild({tenantId:args.tenantId,actor:args.actor,projectId:args.projectId||null}); return{...result,missingEntriesDetected:missingCount,rebuildId:rebuild.id,rebuildState:rebuild.state};
 };
-
 const originalCreateExtendedApiServer=extended.createExtendedApiServer;
 extended.createExtendedApiServer=function createExtendedApiServerWithSearchAndEvidence(options={}){
   const result=originalCreateExtendedApiServer(options); if(!result?.server||!options.repository)return result; const originalListeners=result.server.listeners.bind(result.server); const evidence=new EvidenceService({pool:options.repository.db.pool,logger:console});
