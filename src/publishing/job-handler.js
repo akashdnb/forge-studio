@@ -5,6 +5,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
+const { randomUUID } = require('node:crypto');
 const { createStorageFromEnv } = require('../storage');
 const { createDefaultDestinationRegistry } = require('./destination-contract');
 const { PublishService } = require('./publish-service');
@@ -15,14 +16,39 @@ function createPublishingHandlers({ pool, storage = null, publisher = null, logg
   if (!backend || typeof backend.download !== 'function') throw new TypeError('storage backend is required');
   const destinationRegistry = registry || createDefaultDestinationRegistry({ pool, publisher, logger });
   const service = new PublishService({ pool, storage: backend, registry: destinationRegistry, logger, now, observability });
+  const publish = async (payload, job = {}) => withPublishLease({ pool, service, runId: payload?.publishRunId, job, now, logger }, () => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }));
   return {
-    'publish:youtube': async (payload, job = {}) => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }),
-    'publish:destination': async (payload, job = {}) => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }),
+    'publish:youtube': publish,
+    'publish:destination': publish,
     'publish:reconcile': async (payload, job = {}) => service.reconcile(payload?.publishRunId, payload?.actor || job.actor || 'operator'),
     'publish:retry': async (payload, job = {}) => service.retry(payload?.publishRunId, payload?.actor || job.actor || 'operator'),
     'publish:cancel': async (payload, job = {}) => service.cancel(payload?.publishRunId, payload?.actor || job.actor || 'operator', payload?.reason || 'operator cancellation'),
     'publish:quarantine': async (payload, job = {}) => service.quarantine(payload?.publishRunId, payload?.actor || job.actor || 'operator', payload?.reason || 'operator quarantine'),
   };
+}
+
+async function withPublishLease({ pool, runId, job, now, logger }, operation) {
+  if (!runId) throw Object.assign(new Error('publishRunId is required'), { retryable: false, code: 'INVALID_JOB' });
+  const leaseToken = randomUUID();
+  const claimed = await pool.query(`UPDATE publish_runs SET lease_token=$2,lease_until=$3+interval '30 minutes' WHERE id=$1 AND status IN ('QUEUED','UPLOADING') AND (lease_token IS NULL OR lease_until IS NULL OR lease_until<$3) RETURNING id`, [runId, leaseToken, now()]);
+  if (!claimed.rows[0]) {
+    await pool.query(`INSERT INTO forge_concurrency_events(event_type,episode_id,actor,details) SELECT 'PUBLISH_RACE',episode_id,$2,$3::jsonb FROM publish_runs WHERE id=$1`, [runId, job.worker_id || 'worker', JSON.stringify({ publishRunId: runId })]).catch(() => {});
+    throw Object.assign(new Error('Publish run is already owned by another worker'), { retryable: true, code: 'PUBLISH_RACE' });
+  }
+  let renewal = setInterval(() => pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {}), 30000);
+  renewal.unref?.();
+  try {
+    const result = await operation();
+    const verified = await pool.query(`SELECT status,lease_token FROM publish_runs WHERE id=$1`, [runId]);
+    if (verified.rows[0]?.status === 'PUBLISHED' && verified.rows[0]?.lease_token !== leaseToken) throw Object.assign(new Error('Publish run lease was lost after provider success'), { retryable: false, code: 'PUBLISH_RACE', terminalState: 'RECONCILIATION_REQUIRED' });
+    return result;
+  } catch (error) {
+    logger.warn?.({ event: 'publish.lease_operation_failed', runId, code: error.code, message: error.message });
+    throw error;
+  } finally {
+    clearInterval(renewal);
+    await pool.query(`UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2`, [runId, leaseToken]).catch(() => {});
+  }
 }
 
 function assertReleaseGate(run) {
@@ -53,4 +79,4 @@ async function materializeTrustedArtifact({ storage, run }) {
   }
 }
 
-module.exports = { createPublishingHandlers, assertReleaseGate, materializeTrustedArtifact };
+module.exports = { createPublishingHandlers, assertReleaseGate, materializeTrustedArtifact, withPublishLease };
