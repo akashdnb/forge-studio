@@ -1,0 +1,22 @@
+'use strict';
+
+const installed = Symbol.for('forge.provider.credential.contract.hook');
+function install() {
+  const { CredentialAccessService } = require('./credential-access-service');
+  if (CredentialAccessService.prototype[installed]) return;
+  const original = CredentialAccessService.prototype.acquire;
+  CredentialAccessService.prototype.acquire = async function contractBoundAcquire(args = {}) {
+    if (args.capability) {
+      const state=(await this.pool.query('SELECT state FROM forge_provider_contract_state WHERE provider=$1 AND capability=$2',[String(args.provider),String(args.capability)])).rows[0];
+      if (state?.state && state.state !== 'ACTIVE') throw Object.assign(new Error('Provider capability is quarantined'),{code:'PROVIDER_CAPABILITY_QUARANTINED',statusCode:503,retryable:true});
+      const rows=(await this.pool.query(`SELECT contract,status,valid_until FROM forge_provider_contracts WHERE provider=$1 AND capability=$2 AND status='ACTIVE' ORDER BY contract_version DESC LIMIT 5`,[String(args.provider),String(args.capability)])).rows;
+      const region=String(args.region || this.region);
+      const compatible=rows.some(row=>{if(row.valid_until&&new Date(row.valid_until).getTime()<=this.clock())return false;const contract=row.contract||{};const regions=Array.isArray(contract.regions)?contract.regions:[];if(regions.length&&!regions.includes(region))return false;const models=Array.isArray(contract.models)?contract.models:[];if(args.model&&models.length&&!models.includes(String(args.model)))return false;const operations=Array.isArray(contract.operations)?contract.operations:[];return !args.operation||!operations.length||operations.includes(String(args.operation));});
+      if(!compatible) throw Object.assign(new Error('Provider contract is missing, stale or incompatible with the requested credential scope'),{code:'PROVIDER_CONTRACT_STALE',statusCode:503,retryable:true});
+    }
+    return original.call(this,args);
+  };
+  CredentialAccessService.prototype[installed]=true;
+}
+install();
+module.exports={install};
