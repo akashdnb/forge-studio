@@ -1,0 +1,45 @@
+name: Forge Release Safety
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d forge_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: |
+          node --check src/release-safety/release-safety.js
+          node --check src/release-safety/migration-runner.js
+          node --check src/persistence/job-queue.js
+          node --check scripts/release-preflight.js
+          node --check scripts/release-control.js
+      - run: node --test test/release-safety.test.js
+      - run: npm run migrate
+      - run: npm run release:preflight -- --manifest release-manifest.example.json
