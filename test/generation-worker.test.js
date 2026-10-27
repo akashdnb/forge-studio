@@ -1,3 +1,4 @@
+process.env.FORGE_GENERATION_MODE='deterministic';
 const test=require('node:test');const assert=require('node:assert/strict');const{ProviderRegistry}=require('../src/pipeline/provider-pipeline');const{CAPABILITIES,GenerationWorker,classifyError,createGenerationProviderRegistry,validateOutput}=require('../src/generation/generation-worker');const validPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
 
 test('generation registry registers all production capabilities',()=>{const r=createGenerationProviderRegistry({providers:Object.fromEntries(CAPABILITIES.map(c=>[c,{name:`test-${c}`,execute:async()=>({content:Buffer.from('x'),contentType:'text/plain'})}]))});assert.deepEqual(r.list().map(x=>x.capability),CAPABILITIES)});
