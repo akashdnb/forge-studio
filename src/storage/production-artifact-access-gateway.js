@@ -3,15 +3,22 @@ const { ArtifactDeliveryCache } = require('./artifact-delivery-cache');
 const { verifyCachedFile } = require('./artifact-cache-integrity');
 const { getActiveObservability } = require('../observability');
 const { ArtifactDeliveryGrantService } = require('./artifact-delivery-grants');
+const { KeyManagementService } = require('../crypto/key-management');
+const { attachArtifactDeliverySigner } = require('./artifact-delivery-kms-adapter');
 const RELEASED_EPISODE_STATES = new Set(['APPROVED', 'PUBLISHING', 'PUBLISHED']);
 
 class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
   constructor(options = {}) {
     super(options);
     this.deliveryCache = options.deliveryCache || new ArtifactDeliveryCache({ observability: options.observability || null });
+    let kms = options.kms || null;
+    if (!kms && this.repository?.db?.pool && process.env.FORGE_SECRET_ENCRYPTION_KEY) {
+      kms = attachArtifactDeliverySigner(new KeyManagementService({ pool: this.repository.db.pool, rootKey: process.env.FORGE_SECRET_ENCRYPTION_KEY, metrics: options.observability?.metrics }));
+    }
+    this.kms = kms;
     this.grantService = options.grantService || (this.repository?.db?.pool ? new ArtifactDeliveryGrantService({
       pool: this.repository.db.pool,
-      kms: options.kms || null,
+      kms,
       legacySecret: this.signingSecret,
       clock: this.clock,
       tokenTtlSeconds: this.tokenTtlSeconds,
