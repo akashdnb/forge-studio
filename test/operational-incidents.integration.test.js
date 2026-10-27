@@ -29,7 +29,7 @@ test('PostgreSQL incident lifecycle, dedupe, tenant isolation, escalation and du
   const jobA = `it-job-a-${crypto.randomUUID()}`;
   try {
     await runSafeMigrations({ pool, actor: 'incident-integration-test' });
-    await pool.query('INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3),($4,$5,$6)', [tenantA,'Incident A','test'], [tenantB,'Incident B','test']);
+    await pool.query('INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3),($4,$5,$6)', [tenantA,'Incident A','test',tenantB,'Incident B','test']);
     await pool.query('INSERT INTO projects(id,name,created_by,tenant_id) VALUES($1,$2,$3,$4),($5,$6,$7,$8)', [projectA,'Project A','test',tenantA,projectB,'Project B','test',tenantB]);
     await pool.query('INSERT INTO episodes(id,project_id,title,created_by) VALUES($1,$2,$3,$4),($5,$6,$7,$8)', [episodeA,projectA,'Episode A','test',episodeB,projectB,'Episode B','test']);
     await pool.query(`INSERT INTO forge_jobs(id,project_id,episode_id,kind,status,attempts,max_attempts,idempotency_key,created_by,started_at,updated_at) VALUES($1,$2,$3,'workflow:test','RUNNING',1,3,$4,'test',now()-interval '1 hour',now()-interval '1 hour')`, [jobA,projectA,episodeA,`idem-${jobA}`]);
