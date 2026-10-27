@@ -16,8 +16,8 @@ test('query-shape guard rejects unbounded scans', () => {
 });
 
 test('transaction runner retries deadlocks', async () => {
-  let connectCount = 0; const calls = [];
-  const pool = { async connect() { connectCount += 1; let failed = false; return { async query(sql) { calls.push(sql); if (sql === 'COMMIT' && !failed) { failed = true; throw Object.assign(new Error('deadlock'), { code: '40P01' }); } return { rows: [] }; }, release() {} }; } };
+  let connectCount = 0; let failedOnce = false; const calls = [];
+  const pool = { async connect() { connectCount += 1; return { async query(sql) { calls.push(sql); if (sql === 'COMMIT' && !failedOnce) { failedOnce = true; throw Object.assign(new Error('deadlock'), { code: '40P01' }); } return { rows: [] }; }, release() {} }; } };
   const result = await withRetryableTransaction(pool, async (_client, attempt) => `ok-${attempt}`, { maxRetries: 1, baseDelayMs: 0, maxDelayMs: 0 });
   assert.equal(result, 'ok-1');
   assert.equal(connectCount, 2);
