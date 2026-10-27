@@ -1,5 +1,5 @@
 const productionSearch = require('./production-search');
-const { SafeSearchIndexConsistencyService } = require('./index-consistency-safe');
+const { LockedSearchIndexConsistencyService } = require('./index-consistency-locked');
 const { hasRole } = require('../security/http-security');
 
 function readJsonBody(request, maxBytes = 256 * 1024) {
@@ -28,7 +28,7 @@ async function handleConsistencyRequest(request, response, { pool, auth, request
   const url = new URL(request.url || '/', 'http://localhost');
   const pathname = url.pathname;
   if (!pathname.startsWith('/v1/search/consistency/') && !pathname.startsWith('/internal/search/')) return false;
-  const service = new SafeSearchIndexConsistencyService({ pool });
+  const service = new LockedSearchIndexConsistencyService({ pool });
   const projectId = url.searchParams.get('projectId') || null;
 
   if (pathname === '/v1/search/consistency/health' && request.method === 'GET') return json(response, 200, { item: await service.health({ tenantId: auth.tenantId, projectId }) });
