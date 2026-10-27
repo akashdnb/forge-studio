@@ -17,6 +17,7 @@ const { createPublishingHandlers } = require('../src/publishing/job-handler');
 const { createCanonicalPackageGate } = require('../src/publishing/package-gate');
 const { createStorageFromEnv } = require('../src/storage');
 const { createApiServer } = require('../src/http-api');
+const { validateFile } = require('../src/media/content-validation');
 
 const SCENARIOS = ['happy-path','provider-timeout-retry','worker-crash','stale-lease','duplicate-callback','missing-corrupt-artifact','budget-exhaustion','authorization-denial','dependency-failure','cancellation-race','partial-recovery'];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,7 +63,7 @@ async function deterministicTranscript(pool, payload) {
   const content = { schemaVersion: 'forge-transcript-v1', language: 'en', segments: [{ start: 0, end: 1, text: 'Deterministic narration' }], sourceVersionIds: inputs };
   const checksum = sha(JSON.stringify(content));
   await pool.query(`INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,'transcript',$3::jsonb,$4,'synthetic') ON CONFLICT(id) DO NOTHING`, [versionId, payload.episodeId, JSON.stringify(content), checksum]);
-  await pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,content_json,content_hash,media_type,source,input_version_ids,metadata,created_by) VALUES($1,$2,'transcript',$3,$4::jsonb,$5,'application/json','synthetic',$6::jsonb,'{"deterministic":true}'::jsonb,'synthetic') ON CONFLICT(id) DO NOTHING`, [`${versionId}:json`, payload.episodeId, versionId, JSON.stringify(content), checksum, JSON.stringify(inputs)]);
+  await pool.query(`INSERT INTO artifacts(id,episode_id,kind,version_id,content_json,content_hash,media_type,source,input_version_ids,metadata,created_by) VALUES($1,$2,'transcript',$3,$4::jsonb,$5,'application/json','synthetic',$6::jsonb,'{\"deterministic\":true}'::jsonb,'synthetic') ON CONFLICT(id) DO NOTHING`, [`${versionId}:json`, payload.episodeId, versionId, JSON.stringify(content), checksum, JSON.stringify(inputs)]);
   return { stage: 'TRANSCRIPTION', versionId, artifactId: `${versionId}:json` };
 }
 
@@ -115,7 +116,7 @@ async function buildHarness(scenario, seed) {
         const pkg = (await pool.query("SELECT id,version_id,final_media_artifact_id,final_media_version_id FROM episode_packages WHERE episode_id=$1 ORDER BY created_at DESC LIMIT 1", [episodeId])).rows[0]; assert(pkg, 'package missing before publish');
         const renderArtifact = (await pool.query('SELECT id,version_id FROM artifacts WHERE id=$1', [pkg.final_media_artifact_id])).rows[0]; assert(renderArtifact, 'render artifact missing before publish');
         publishRunId = id('publish', seed);
-        await pool.query(`INSERT INTO publish_runs(id,episode_id,destination,status,render_artifact_id,render_version_id,package_artifact_id,package_version_id,metadata,attempt) VALUES($1,$2,'youtube','QUEUED',$3,$4,$5,$6,'{"synthetic":true}'::jsonb,1) ON CONFLICT(id) DO NOTHING`, [publishRunId, episodeId, renderArtifact.id, renderArtifact.version_id, pkg.id, pkg.version_id]);
+        await pool.query(`INSERT INTO publish_runs(id,episode_id,destination,status,render_artifact_id,render_version_id,package_artifact_id,package_version_id,metadata,attempt) VALUES($1,$2,'youtube','QUEUED',$3,$4,$5,$6,'{\"synthetic\":true}'::jsonb,1) ON CONFLICT(id) DO NOTHING`, [publishRunId, episodeId, renderArtifact.id, renderArtifact.version_id, pkg.id, pkg.version_id]);
         payload = { ...payload, publishRunId };
       }
       return publishGate(payload, job);
@@ -151,7 +152,32 @@ async function invariants(h) {
   const duplicates = (await h.pool.query('SELECT idempotency_key,COUNT(*)::int count FROM forge_jobs WHERE episode_id=$1 GROUP BY idempotency_key HAVING COUNT(*)>1', [h.episodeId])).rows;
   const usage = Number((await h.pool.query('SELECT COUNT(*)::int count FROM usage_events WHERE episode_id=$1', [h.episodeId])).rows[0].count || 0);
   const badArtifacts = artifacts.filter((a) => a.episode_id !== h.episodeId || !a.version_id || (a.content_hash && !/^[a-f0-9]{64}$/.test(a.content_hash)));
-  return { episode: episode?.state, terminal: ['PUBLISHED','FAILED','CANCELLED'].includes(episode?.state), stagesTerminal: stages.length > 0 && stages.every((s) => ['SUCCEEDED','FAILED','CANCELLED'].includes(s.status)), tenantIsolation: jobs.every((j) => j.project_id === h.projectId), noDuplicateJobs: duplicates.length === 0, immutableArtifacts: badArtifacts.length === 0, usageAccounting: usage > 0 || process.env.FORGE_ACCEPTANCE_SCENARIO === 'budget-exhaustion', jobCount: jobs.length, artifactCount: artifacts.length, usageEvents: usage, diagnostics: { duplicateJobs: duplicates, badArtifacts: badArtifacts.map((a) => a.id) } };
+  const pkg = (await h.pool.query("SELECT id,version_id,final_media_artifact_id FROM episode_packages WHERE episode_id=$1 ORDER BY created_at DESC LIMIT 1", [h.episodeId])).rows[0];
+  const finalArtifact = pkg?.final_media_artifact_id ? (await h.pool.query('SELECT id,version_id,content_hash,media_type FROM artifacts WHERE id=$1 AND episode_id=$2', [pkg.final_media_artifact_id, h.episodeId])).rows[0] : null;
+  const storageObject = finalArtifact ? (await h.pool.query("SELECT storage_key,status FROM storage_objects WHERE artifact_id=$1 ORDER BY created_at DESC LIMIT 1", [finalArtifact.id])).rows[0] : null;
+  const finalArtifactPersisted = Boolean(finalArtifact && storageObject && storageObject.status !== 'CORRUPT' && /^[a-f0-9]{64}$/.test(finalArtifact.content_hash || '') && finalArtifact.media_type === 'video/mp4');
+  let finalArtifactRetrievable = false;
+  let finalArtifactValidation = null;
+  if (finalArtifactPersisted) {
+    try {
+      const storage = createStorageFromEnv();
+      const opened = await storage.download({ key: storageObject.storage_key, expectedSha256: finalArtifact.content_hash });
+      const chunks = [];
+      for await (const chunk of opened.stream) chunks.push(chunk);
+      const bytes = Buffer.concat(chunks);
+      if (bytes.length > 0) {
+        const tmp = path.join(h.root, 'acceptance-final.mp4');
+        await fs.writeFile(tmp, bytes, { flag: 'w' });
+        finalArtifactValidation = await validateFile(tmp, { mimeType: finalArtifact.media_type, sizeBytes: bytes.length, policy: { requireVideo: true, requireAudio: true, allowedContainers: ['mp4'], allowedCodecs: ['h264', 'aac'], minWidth: 320, minHeight: 180, maxFps: 60, requireCompleteDecode: true } });
+        await fs.rm(tmp, { force: true });
+        finalArtifactRetrievable = finalArtifactValidation.status !== 'FAILED';
+      }
+    } catch (error) {
+      finalArtifactValidation = { status: 'FAILED', diagnostics: { code: error.code || 'ARTIFACT_RETRIEVAL_FAILED', message: error.message } };
+    }
+  }
+  const finalArtifactGate = finalArtifactPersisted && finalArtifactRetrievable;
+  return { episode: episode?.state, terminal: ['PUBLISHED','FAILED','CANCELLED'].includes(episode?.state), stagesTerminal: stages.length > 0 && stages.every((s) => ['SUCCEEDED','FAILED','CANCELLED'].includes(s.status)), tenantIsolation: jobs.every((j) => j.project_id === h.projectId), noDuplicateJobs: duplicates.length === 0, immutableArtifacts: badArtifacts.length === 0, finalArtifactGate, finalArtifactPersisted, finalArtifactRetrievable, usageAccounting: usage > 0 || process.env.FORGE_ACCEPTANCE_SCENARIO === 'budget-exhaustion', jobCount: jobs.length, artifactCount: artifacts.length, usageEvents: usage, diagnostics: { duplicateJobs: duplicates, badArtifacts: badArtifacts.map((a) => a.id), finalPackageId: pkg?.id || null, finalArtifactId: finalArtifact?.id || null, finalArtifactValidation } };
 }
 
 async function runScenario(scenario, seed) {
@@ -180,7 +206,7 @@ async function runScenario(scenario, seed) {
       await h.queue.recoverExpiredLeases();
     }
     const result = { scenario, seed, status: 'PASSED', invariants: await invariants(h) };
-    const invariantFailure = Object.entries(result.invariants).filter(([k,v]) => ['terminal','stagesTerminal','tenantIsolation','noDuplicateJobs','immutableArtifacts','usageAccounting'].includes(k) && v !== true);
+    const invariantFailure = Object.entries(result.invariants).filter(([k,v]) => ['terminal','stagesTerminal','tenantIsolation','noDuplicateJobs','immutableArtifacts','finalArtifactGate','usageAccounting'].includes(k) && v !== true);
     if (invariantFailure.length) { result.status = 'FAILED'; result.invariantFailures = invariantFailure.map(([k]) => k); }
     await fs.mkdir(h.root, { recursive: true }); await fs.writeFile(path.join(h.root, 'result.json'), JSON.stringify(result, null, 2));
     return result;
