@@ -13,7 +13,8 @@ class RuntimePublishService extends PublishService {
   async gate(run) {
     super.gate(run);
     if (!run.package_artifact_id) throw Object.assign(new Error('Publish request has no canonical package identity'), { code: 'PACKAGE_REQUIRED', retryable: false });
-    const verification = await verifyPackageAttestation({ pool: this.pool, packageArtifactId: run.package_artifact_id });
+    const policy = (await this.pool.query(`SELECT COALESCE(MAX(revision),0)::bigint AS epoch FROM runtime_policy_heads WHERE scope_type='SYSTEM' OR (scope_type='TENANT' AND scope_id=$1) OR (scope_type='PROJECT' AND scope_id=$2)`, [run.tenant_id, run.project_id])).rows[0]?.epoch;
+    const verification = await verifyPackageAttestation({ pool: this.pool, packageArtifactId: run.package_artifact_id, policyEpoch: policy == null ? null : Number(policy) });
     if (!verification.ok) throw Object.assign(new Error(`Package attestation verification failed: ${verification.diagnostics.map((item) => item.code).join(', ')}`), { code: 'PACKAGE_ATTESTATION_BLOCKED', retryable: false, diagnostics: verification.diagnostics });
     return true;
   }
