@@ -1,19 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-
-let Pool;
-try { ({ Pool } = require('pg')); } catch {}
-
-const databaseUrl = process.env.DATABASE_URL;
+let Pool; try { ({ Pool } = require('pg')); } catch {}
+const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
 const integration = Boolean(Pool && databaseUrl);
+const { PersistentProductionRepository } = require('../src/persistence/production-repository');
 const { ImmutableUsageLedger, QuotaExceededError } = require('../src/usage/immutable-usage-ledger');
 
 function makePricing(version, rate = 0.25) { return { version, rate }; }
 async function withDb(t, fn) {
-  if (!integration) { t.skip('PostgreSQL integration requires DATABASE_URL'); return; }
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 }); const ledger = new ImmutableUsageLedger({ pool });
-  try { await fn({ pool, ledger }); } finally { await pool.end(); }
+  if (!integration) { t.skip('PostgreSQL integration requires TEST_DATABASE_URL or DATABASE_URL'); return; }
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 }); const repo = new PersistentProductionRepository({ pool });
+  const ledger = new ImmutableUsageLedger({ pool });
+  try { await repo.migrate(); await fn({ pool, ledger }); } finally { await pool.end(); }
 }
 async function ensurePricing(pool, { version, rate }) {
   await pool.query(`INSERT INTO usage_pricing_versions(pricing_version,provider_type,provider,model,operation,unit,rate,currency,effective_at,metadata) VALUES($1,'test','test','model','generate','unit',$2,'USD',now(),'{}'::jsonb) ON CONFLICT(pricing_version) DO NOTHING`, [version, rate]);
