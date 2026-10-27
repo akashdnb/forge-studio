@@ -1,0 +1,94 @@
+'use strict';
+
+const { createHash, randomUUID } = require('node:crypto');
+const { RuntimePolicyStore, SecretCipher } = require('../runtime/runtime-policy');
+const { YouTubePublisher, validateMetadata, redactProviderResponse } = require('./youtube-publisher');
+
+const CAPABILITIES = Object.freeze({
+  youtube: Object.freeze({ resumableUpload: true, receiptLookup: true, callbacks: false, delete: false, maxAttempts: 5 }),
+  boundary: Object.freeze({ resumableUpload: false, receiptLookup: false, callbacks: false, delete: false, maxAttempts: 1 }),
+});
+
+function sha256(value) { return createHash('sha256').update(value).digest('hex'); }
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+}
+function fingerprint(value) { return sha256(JSON.stringify(stable(value))); }
+
+class PublishRequest {
+  constructor(input = {}) {
+    const required = ['tenantId', 'projectId', 'episodeId', 'destination', 'idempotencyKey', 'packageArtifactId', 'packageVersionId', 'packageHash', 'renderArtifactId', 'renderVersionId', 'renderHash'];
+    for (const key of required) if (!input[key]) throw Object.assign(new TypeError(`${key} is required`), { code: 'INVALID_PUBLISH_REQUEST' });
+    if (!/^[a-f0-9]{64}$/.test(input.packageHash) || !/^[a-f0-9]{64}$/.test(input.renderHash)) throw Object.assign(new TypeError('packageHash and renderHash must be SHA-256'), { code: 'INVALID_PUBLISH_REQUEST' });
+    this.id = input.id || randomUUID();
+    this.requestVersion = Number(input.requestVersion || 1);
+    this.tenantId = String(input.tenantId); this.projectId = String(input.projectId); this.episodeId = String(input.episodeId);
+    this.destination = String(input.destination); this.idempotencyKey = String(input.idempotencyKey);
+    this.packageArtifactId = String(input.packageArtifactId); this.packageVersionId = String(input.packageVersionId); this.packageHash = input.packageHash;
+    this.renderArtifactId = String(input.renderArtifactId); this.renderVersionId = String(input.renderVersionId); this.renderHash = input.renderHash;
+    this.metadata = stable(input.metadata || {}); this.gateSnapshot = stable(input.gateSnapshot || {});
+    this.gateFingerprint = input.gateFingerprint || fingerprint(this.gateSnapshot);
+    this.releaseEpoch = input.releaseEpoch == null ? null : Number(input.releaseEpoch);
+    Object.freeze(this.metadata); Object.freeze(this.gateSnapshot); Object.freeze(this);
+  }
+}
+
+class DestinationAdapter {
+  constructor({ name, capabilities }) { if (!name) throw new TypeError('destination name is required'); this.name = name; this.capabilities = Object.freeze({ ...(capabilities || {}) }); }
+  validateRequest() { throw new Error('validateRequest must be implemented'); }
+  async publish() { throw new Error('publish must be implemented'); }
+  async reconcile() { throw new Error('reconcile must be implemented'); }
+  async cancel() { return { supported: false }; }
+}
+
+class YouTubeDestinationAdapter extends DestinationAdapter {
+  constructor({ publisher = null, credentialResolver = null } = {}) {
+    super({ name: 'youtube', capabilities: CAPABILITIES.youtube });
+    this.publisher = publisher || new YouTubePublisher();
+    this.credentialResolver = credentialResolver;
+  }
+  validateRequest(request) { validateMetadata(request.metadata || {}); if (request.destination !== this.name) throw Object.assign(new Error('Destination mismatch'), { code: 'DESTINATION_MISMATCH' }); return true; }
+  async publish({ request, sourcePath, externalId, uploadSessionUri, signal, onSession }) {
+    this.validateRequest(request);
+    return this.publisher.publish({ sourcePath, metadata: request.metadata, externalId, uploadSessionUri, signal, onSession });
+  }
+  async reconcile({ externalId, signal }) {
+    if (!externalId) return { state: 'UNKNOWN' };
+    const result = await this.publisher.getVideo(externalId, signal);
+    return result ? { state: 'PUBLISHED', externalId, url: `https://www.youtube.com/watch?v=${externalId}`, response: redactProviderResponse(result) } : { state: 'UNKNOWN', externalId };
+  }
+}
+
+class BoundaryDestinationAdapter extends DestinationAdapter {
+  constructor({ name = 'boundary' } = {}) { super({ name, capabilities: CAPABILITIES.boundary }); }
+  validateRequest(request) {
+    if (request.destination !== this.name) throw Object.assign(new Error('Destination mismatch'), { code: 'DESTINATION_MISMATCH' });
+    if (!request.packageHash) throw Object.assign(new Error('Immutable package identity is required'), { code: 'PACKAGE_REQUIRED' });
+    return true;
+  }
+  async publish() { throw Object.assign(new Error(`Destination ${this.name} is configured as an adapter boundary; no external success is simulated`), { code: 'DESTINATION_NOT_CONFIGURED', retryable: false, terminalState: 'FAILED' }); }
+  async reconcile() { return { state: 'UNKNOWN', reason: 'DESTINATION_NOT_CONFIGURED' }; }
+}
+
+class DestinationRegistry {
+  constructor({ adapters = [], logger = console } = {}) { this.adapters = new Map(adapters.map((adapter) => [adapter.name, adapter])); this.logger = logger; }
+  register(adapter) { if (!(adapter instanceof DestinationAdapter)) throw new TypeError('adapter must implement DestinationAdapter'); this.adapters.set(adapter.name, adapter); return adapter; }
+  get(name) { const adapter = this.adapters.get(name); if (!adapter) throw Object.assign(new Error(`Unsupported destination: ${name}`), { code: 'INVALID_DESTINATION' }); return adapter; }
+  capabilities(name) { return this.get(name).capabilities; }
+  list() { return [...this.adapters.values()].map((adapter) => ({ name: adapter.name, capabilities: adapter.capabilities })); }
+}
+
+function createDefaultDestinationRegistry({ pool = null, publisher = null, logger = console } = {}) {
+  let credentialResolver = null;
+  if (pool && process.env.FORGE_SECRET_ENCRYPTION_KEY) {
+    try { credentialResolver = new RuntimePolicyStore({ pool, secretCipher: new SecretCipher(process.env.FORGE_SECRET_ENCRYPTION_KEY) }); } catch (error) { logger.warn?.(`Publish credential store unavailable: ${error.message}`); }
+  }
+  const registry = new DestinationRegistry({ logger });
+  registry.register(new YouTubeDestinationAdapter({ publisher, credentialResolver }));
+  registry.register(new BoundaryDestinationAdapter());
+  return registry;
+}
+
+module.exports = { CAPABILITIES, PublishRequest, DestinationAdapter, YouTubeDestinationAdapter, BoundaryDestinationAdapter, DestinationRegistry, createDefaultDestinationRegistry, fingerprint, redactProviderResponse };
