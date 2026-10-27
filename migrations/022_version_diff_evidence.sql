@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS forge_version_diffs (
 );
 CREATE INDEX IF NOT EXISTS forge_version_diffs_episode_created_idx ON forge_version_diffs(episode_id, created_at DESC, report_id DESC);
 CREATE INDEX IF NOT EXISTS forge_version_diffs_project_created_idx ON forge_version_diffs(project_id, created_at DESC, report_id DESC);
+CREATE INDEX IF NOT EXISTS forge_version_diffs_source_target_idx ON forge_version_diffs(source_version_id, target_version_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS forge_version_diff_items (
   report_id text NOT NULL REFERENCES forge_version_diffs(report_id) ON DELETE RESTRICT,
@@ -40,6 +41,27 @@ CREATE TABLE IF NOT EXISTS forge_version_diff_items (
 CREATE INDEX IF NOT EXISTS forge_version_diff_items_page_idx ON forge_version_diff_items(report_id, ordinal);
 CREATE INDEX IF NOT EXISTS forge_version_diff_items_category_idx ON forge_version_diff_items(report_id, category, ordinal);
 
-CREATE INDEX IF NOT EXISTS forge_version_diffs_source_target_idx ON forge_version_diffs(source_version_id, target_version_id, created_at DESC);
+CREATE OR REPLACE FUNCTION forge_version_diff_immutability() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'version diff reports are immutable';
+  END IF;
+  IF OLD.status = 'COMPLETED' THEN
+    RAISE EXCEPTION 'completed version diff reports are immutable';
+  END IF;
+  IF NEW.report_id <> OLD.report_id OR NEW.report_identity <> OLD.report_identity OR NEW.episode_id <> OLD.episode_id OR NEW.project_id <> OLD.project_id OR NEW.source_version_id <> OLD.source_version_id OR NEW.target_version_id <> OLD.target_version_id OR NEW.schema_version <> OLD.schema_version OR NEW.created_by <> OLD.created_by OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'version diff identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_version_diff_immutability_guard ON forge_version_diffs;
+CREATE TRIGGER forge_version_diff_immutability_guard BEFORE UPDATE OR DELETE ON forge_version_diffs FOR EACH ROW EXECUTE FUNCTION forge_version_diff_immutability();
+
+CREATE OR REPLACE FUNCTION forge_version_diff_items_immutable() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION 'version diff items are immutable'; END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_version_diff_items_immutability_guard ON forge_version_diff_items;
+CREATE TRIGGER forge_version_diff_items_immutability_guard BEFORE UPDATE OR DELETE ON forge_version_diff_items FOR EACH ROW EXECUTE FUNCTION forge_version_diff_items_immutable();
 
 COMMIT;
