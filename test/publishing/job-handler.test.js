@@ -20,8 +20,9 @@ function makePool(run, { jobStatus = 'RUNNING' } = {}) {
     async query(sql, params = []) {
       if (sql.includes('FROM publish_runs p')) return { rows: [run] };
       if (sql.includes('SELECT status FROM forge_jobs')) return { rows: [{ status: jobStatus }] };
-      if (sql.startsWith('UPDATE publish_runs')) { updates.push({ sql, params }); return { rows: [] }; }
+      if (sql.startsWith('UPDATE publish_runs')) { updates.push({ sql, params }); return { rows: [run] }; }
       if (sql.startsWith('UPDATE episodes')) { updates.push({ sql, params }); return { rows: [] }; }
+      if (sql.includes('INSERT INTO forge_concurrency_events')) { updates.push({ sql, params }); return { rows: [] }; }
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -89,4 +90,32 @@ test('uncertain provider state is persisted as reconciliation required', async (
   const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher: { async publish() { throw Object.assign(new Error('upload session expired'), { retryable: false, terminalState: 'RECONCILIATION_REQUIRED', code: 'UPLOAD_SESSION_EXPIRED' }); } } })['publish:youtube'];
   await assert.rejects(handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /upload session expired/);
   assert.equal(pool.updates.some((u) => u.sql.includes("status='RECONCILIATION_REQUIRED'")), true);
+});
+
+test('concurrent publish attempts are fenced so only one worker can own the run', async () => {
+  const run = baseRun();
+  let owner = false;
+  const pool = {
+    async query(sql, params = []) {
+      if (sql.includes('FROM publish_runs p')) return { rows: [run] };
+      if (sql.includes('UPDATE publish_runs SET lease_token')) {
+        if (owner) return { rows: [] };
+        owner = true;
+        return { rows: [{ ...run, lease_token: params[1] }] };
+      }
+      if (sql.includes('INSERT INTO forge_concurrency_events')) return { rows: [] };
+      if (sql.startsWith('UPDATE publish_runs')) return { rows: [{ ...run }] };
+      if (sql.startsWith('UPDATE episodes')) return { rows: [] };
+      if (sql.includes('SELECT status FROM forge_jobs')) return { rows: [{ status: 'RUNNING' }] };
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  const publisher = { async publish() { await new Promise((resolve) => setTimeout(resolve, 10)); return { id: 'yt-1', url: 'https://youtube/yt-1', response: {} }; } };
+  const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher, logger: { error() {} } })['publish:youtube'];
+  const results = await Promise.allSettled([
+    handler({ publishRunId: 'run-1' }, { id: 'job-a', attempts: 1, max_attempts: 3 }),
+    handler({ publishRunId: 'run-1' }, { id: 'job-b', attempts: 1, max_attempts: 3 }),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected' && result.reason.code === 'PUBLISH_RACE').length, 1);
 });
