@@ -21,6 +21,6 @@ test('recovery assurance schema is installed and generation allocation is atomic
     const [a, b] = await Promise.all([allocateGeneration(pool, tenantId), allocateGeneration(pool, tenantId)]);
     assert.notEqual(a, b);
     const after = await pool.query('SELECT next_generation::bigint AS next_generation FROM forge_recovery_generation_state WHERE tenant_id=$1', [tenantId]);
-    assert.equal(Number(after.rows[0].next_generation), Math.max(Number(before.rows[0].generation), a, b) + 2);
+    assert.equal(Number(after.rows[0].next_generation), Math.max(Number(before.rows[0].generation), a, b) + 1);
   } finally { await pool.end(); }
 });
