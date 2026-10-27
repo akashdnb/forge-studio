@@ -9,6 +9,7 @@ const { randomUUID } = require('node:crypto');
 const { createStorageFromEnv } = require('../storage');
 const { createDefaultDestinationRegistry } = require('./destination-contract');
 const { RuntimePublishService } = require('./publish-service-runtime');
+const { ProgressiveReleaseController } = require('../release-safety/progressive-controller');
 
 function createPublishingHandlers({ pool, storage = null, publisher = null, logger = console, now = () => new Date(), observability = null, registry = null } = {}) {
   if (!pool || typeof pool.query !== 'function') throw new TypeError('pool is required');
@@ -16,10 +17,22 @@ function createPublishingHandlers({ pool, storage = null, publisher = null, logg
   if (!backend || typeof backend.download !== 'function') throw new TypeError('storage backend is required');
   const destinationRegistry = registry || createDefaultDestinationRegistry({ pool, publisher, logger });
   const service = new RuntimePublishService({ pool, storage: backend, registry: destinationRegistry, logger, now, observability });
-  const publish = async (payload, job = {}) => withPublishLease({ pool, service, runId: payload?.publishRunId, job, now, logger }, () => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }));
+  const progressive = new ProgressiveReleaseController({ pool, logger });
+  const publish = async (payload, job = {}) => withPublishLease({ pool, service, runId: payload?.publishRunId, job, now, logger }, async () => {
+    const gate = await progressive.beforePublish(payload?.publishRunId, payload?.actor || job.actor || 'worker');
+    try {
+      const result = await service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' });
+      await progressive.afterPublish({ gate, success: true, providerRef: result?.externalId || null, actor: payload?.actor || job.actor || 'worker' });
+      return result;
+    } catch (error) {
+      await progressive.afterPublish({ gate, success: false, error, actor: payload?.actor || job.actor || 'worker' }).catch(() => {});
+      throw error;
+    }
+  });
   return {
     'publish:youtube': publish,
     'publish:destination': publish,
+    'publish:rollback': publish,
     'publish:reconcile': async (payload, job = {}) => service.reconcile(payload?.publishRunId, payload?.actor || job.actor || 'operator'),
     'publish:retry': async (payload, job = {}) => service.retry(payload?.publishRunId, payload?.actor || job.actor || 'operator'),
     'publish:cancel': async (payload, job = {}) => service.cancel(payload?.publishRunId, payload?.actor || job.actor || 'operator', payload?.reason || 'operator cancellation'),
@@ -35,20 +48,14 @@ async function withPublishLease({ pool, runId, job, now, logger }, operation) {
     await pool.query(`INSERT INTO forge_concurrency_events(event_type,episode_id,actor,details) SELECT 'PUBLISH_RACE',episode_id,$2,$3::jsonb FROM publish_runs WHERE id=$1`, [runId, job.worker_id || 'worker', JSON.stringify({ publishRunId: runId })]).catch(() => {});
     throw Object.assign(new Error('Publish run is already owned by another worker'), { retryable: true, code: 'PUBLISH_RACE' });
   }
-  const renewal = setInterval(() => pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {}), 30000);
-  renewal.unref?.();
+  const renewal = setInterval(() => pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {}), 30000); renewal.unref?.();
   try {
     const result = await operation();
     const verified = await pool.query('SELECT status,lease_token FROM publish_runs WHERE id=$1', [runId]);
     if (verified.rows[0]?.status === 'PUBLISHED' && verified.rows[0]?.lease_token !== leaseToken) throw Object.assign(new Error('Publish run lease was lost after provider success'), { retryable: false, code: 'PUBLISH_RACE', terminalState: 'RECONCILIATION_REQUIRED' });
     return result;
-  } catch (error) {
-    logger.warn?.({ event: 'publish.lease_operation_failed', runId, code: error.code, message: error.message });
-    throw error;
-  } finally {
-    clearInterval(renewal);
-    await pool.query('UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2', [runId, leaseToken]).catch(() => {});
-  }
+  } catch (error) { logger.warn?.({ event: 'publish.lease_operation_failed', runId, code: error.code, message: error.message }); throw error; }
+  finally { clearInterval(renewal); await pool.query('UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2', [runId, leaseToken]).catch(() => {}); }
 }
 
 function assertReleaseGate(run) {
@@ -67,16 +74,7 @@ function assertReleaseGate(run) {
 
 async function materializeTrustedArtifact({ storage, run }) {
   const temp = path.join(os.tmpdir(), `forge-publish-${run.id}-${Math.random().toString(16).slice(2)}.mp4`);
-  try {
-    const resolved = await storage.download({ key: run.storage_key, expectedSha256: run.content_hash });
-    await pipeline(resolved.stream, fs.createWriteStream(temp, { flags: 'wx', mode: 0o600 }));
-    const stat = await fsp.stat(temp);
-    if (!stat.size) throw Object.assign(new Error('Approved render is empty'), { retryable: false, code: 'INVALID_ARTIFACT' });
-    return { path: temp, size: stat.size };
-  } catch (error) {
-    await fsp.rm(temp, { force: true }).catch(() => {});
-    throw Object.assign(error, { retryable: false });
-  }
+  try { const resolved = await storage.download({ key: run.storage_key, expectedSha256: run.content_hash }); await pipeline(resolved.stream, fs.createWriteStream(temp, { flags: 'wx', mode: 0o600 })); const stat = await fsp.stat(temp); if (!stat.size) throw Object.assign(new Error('Approved render is empty'), { retryable: false, code: 'INVALID_ARTIFACT' }); return { path: temp, size: stat.size }; }
+  catch (error) { await fsp.rm(temp, { force: true }).catch(() => {}); throw Object.assign(error, { retryable: false }); }
 }
-
 module.exports = { createPublishingHandlers, assertReleaseGate, materializeTrustedArtifact, withPublishLease };
