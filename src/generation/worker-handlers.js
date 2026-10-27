@@ -14,18 +14,19 @@ function getHandlers(){
   pool=new Pool({connectionString:process.env.DATABASE_URL,max:Number.parseInt(process.env.PG_POOL_MAX||'5',10)});
   const storage=createStorageFromEnv();
   const visualRegistry=createProductionVisualProviderRegistry({pool});
-  const textRegistry=createGenerationProviderRegistry();
-  textRegistry.pool=pool;textRegistry.contractService=new ProviderContractService({pool});
   const directVisual=new GenerationWorker({pool,storage,providerRegistry:visualRegistry});
-  const legacy=createGenerationJobHandler({pool,storage,providerRegistry:textRegistry});
   const assets=createVisualAssetProductionHandler({pool,storage,providerRegistry:visualRegistry});
   handlers={
     'workflow:assets':assets,
     'generation:image':(payload,job)=>directVisual.execute({...payload,capability:'image-generation'},job),
     'generation:video':(payload,job)=>directVisual.execute({...payload,capability:'video-generation'},job),
-    'generation:text':legacy,
+    'generation:text':null,
   };
   return handlers;
 }
-const lazy=(kind)=>(payload,job)=>getHandlers()[kind](payload,job);
-module.exports={handlers:{'workflow:assets':lazy('workflow:assets'),'generation:image':lazy('generation:image'),'generation:video':lazy('generation:video'),'generation:text':lazy('generation:text')}};
+function generationText(payload,job){
+  const h=getHandlers();
+  if(!h['generation:text']){const registry=createGenerationProviderRegistry();registry.pool=pool;registry.contractService=new ProviderContractService({pool});h['generation:text']=createGenerationJobHandler({pool,storage:createStorageFromEnv(),providerRegistry:registry});}
+  return h['generation:text'](payload,job);
+}
+module.exports={handlers:{'workflow:assets':(payload,job)=>getHandlers()['workflow:assets'](payload,job),'generation:image':(payload,job)=>getHandlers()['generation:image'](payload,job),'generation:video':(payload,job)=>getHandlers()['generation:video'](payload,job),'generation:text':generationText}};
