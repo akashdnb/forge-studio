@@ -60,6 +60,7 @@ extended.createExtendedApiServer=function createExtendedApiServerWithSearchAndEv
   }; return result;
 };
 installHttpVersioning();
+require('./storage/artifact-integrity-bootstrap');
 require('./server');
 // Loaded after server construction so the idempotency boundary wraps the final evidence-aware transaction implementation.
 require('./persistence/idempotency-bootstrap');
