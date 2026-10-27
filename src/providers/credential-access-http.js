@@ -2,7 +2,6 @@
 
 const { URL } = require('node:url');
 const { authenticate, hasRole } = require('../security/http-security');
-const { CredentialAccessService } = require('./credential-access-service');
 
 function send(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); }
 async function readJson(req) { const chunks=[]; let size=0; for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw Object.assign(new Error('Request body exceeds 1 MiB'), { code:'REQUEST_TOO_LARGE', statusCode:413 }); chunks.push(chunk); } if (!chunks.length) return {}; try { const body=JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(); return body; } catch { throw Object.assign(new Error('Malformed JSON'), { code:'INVALID_JSON', statusCode:400 }); } }
@@ -16,7 +15,7 @@ async function handleCredentialAccessRequest(req, res, { service, auth = null, h
     if (!service) throw Object.assign(new Error('credential access boundary unavailable'), { code:'SERVICE_UNAVAILABLE', statusCode:503 });
     if (url.pathname === '/internal/providers/credential-access/execute' && req.method === 'POST') {
       const grant = runnerOnly(req); const body = await readJson(req);
-      const result = await service.execute({ grant, request:{ url:body.url, method:body.method || 'POST', body:body.body }, expected:{ tenantId:body.tenantId, projectId:body.projectId || null, provider:body.provider, model:body.model || '', purpose:body.purpose, region:body.region, executionEpoch:body.executionEpoch }, requestId, timeoutMs:body.timeoutMs });
+      const result = await service.execute({ grant, request:{ url:body.url, method:body.method || 'POST', body:body.body }, expected:{ provider:body.provider, model:body.model || '', purpose:body.purpose, region:body.region, executionEpoch:body.executionEpoch }, requestId, timeoutMs:body.timeoutMs });
       return send(res, result.status || 200, { ok:result.ok, body:result.body, provider:result.provider, credentialVersion:result.credentialVersion, attestation:result.attestation });
     }
     const tenantId = url.searchParams.get('tenantId'); if (!tenantId) throw Object.assign(new Error('tenantId is required'), { code:'INVALID_REQUEST', statusCode:400 }); ownerOnly(auth, roleCheck, tenantId);
