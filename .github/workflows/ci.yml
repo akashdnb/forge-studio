@@ -29,6 +29,8 @@ jobs:
     env:
       DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
       FORGE_RUN_RECOVERY_INTEGRATION: "true"
+      FORGE_CREDENTIAL_INTEGRATION: "true"
+      FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,5 +41,6 @@ jobs:
       - run: npm run migrate
       - run: npm run check
       - run: node --test test/recovery-postgres.integration.test.js
+      - run: node --test test/provider-credential-registry.test.js
       - run: npm test
       - run: npm run demo -- "Why volcanoes erupt"
