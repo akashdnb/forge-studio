@@ -21,8 +21,12 @@ async function runSafeMigrations({ pool, migrationsDir = path.join(__dirname, '.
         const current = await client.query('SELECT checksum,status FROM forge_schema_migrations WHERE version=$1 FOR UPDATE', [migration.name]);
         if (current.rows[0]?.checksum && current.rows[0].checksum !== checksum(raw)) throw new Error(`Applied migration checksum differs from file: ${migration.name}`);
         if (current.rows[0]?.status === 'APPLIED') continue;
-        if (hasTopLevelTransaction(raw)) await client.query(raw);
-        else { await client.query('BEGIN'); try { await client.query(raw); await client.query('COMMIT'); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } }
+        if (hasTopLevelTransaction(raw)) {
+          try { await client.query(raw); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
+        } else {
+          await client.query('BEGIN');
+          try { await client.query(raw); await client.query('COMMIT'); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
+        }
         await client.query('BEGIN');
         try { await client.query(`INSERT INTO forge_schema_migrations(version,checksum,applied_by,status) VALUES($1,$2,$3,'APPLIED') ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum,applied_by=EXCLUDED.applied_by,status='APPLIED',applied_at=now()`, [migration.name, migration.checksum, actor]); await client.query('COMMIT'); }
         catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
