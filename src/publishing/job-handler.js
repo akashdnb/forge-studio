@@ -8,14 +8,14 @@ const { pipeline } = require('node:stream/promises');
 const { randomUUID } = require('node:crypto');
 const { createStorageFromEnv } = require('../storage');
 const { createDefaultDestinationRegistry } = require('./destination-contract');
-const { PublishService } = require('./publish-service');
+const { RuntimePublishService } = require('./publish-service-runtime');
 
 function createPublishingHandlers({ pool, storage = null, publisher = null, logger = console, now = () => new Date(), observability = null, registry = null } = {}) {
   if (!pool || typeof pool.query !== 'function') throw new TypeError('pool is required');
   const backend = storage || createStorageFromEnv();
   if (!backend || typeof backend.download !== 'function') throw new TypeError('storage backend is required');
   const destinationRegistry = registry || createDefaultDestinationRegistry({ pool, publisher, logger });
-  const service = new PublishService({ pool, storage: backend, registry: destinationRegistry, logger, now, observability });
+  const service = new RuntimePublishService({ pool, storage: backend, registry: destinationRegistry, logger, now, observability });
   const publish = async (payload, job = {}) => withPublishLease({ pool, service, runId: payload?.publishRunId, job, now, logger }, () => service.publish({ runId: payload?.publishRunId, job, actor: payload?.actor || job.actor || 'worker' }));
   return {
     'publish:youtube': publish,
@@ -35,11 +35,11 @@ async function withPublishLease({ pool, runId, job, now, logger }, operation) {
     await pool.query(`INSERT INTO forge_concurrency_events(event_type,episode_id,actor,details) SELECT 'PUBLISH_RACE',episode_id,$2,$3::jsonb FROM publish_runs WHERE id=$1`, [runId, job.worker_id || 'worker', JSON.stringify({ publishRunId: runId })]).catch(() => {});
     throw Object.assign(new Error('Publish run is already owned by another worker'), { retryable: true, code: 'PUBLISH_RACE' });
   }
-  let renewal = setInterval(() => pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {}), 30000);
+  const renewal = setInterval(() => pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {}), 30000);
   renewal.unref?.();
   try {
     const result = await operation();
-    const verified = await pool.query(`SELECT status,lease_token FROM publish_runs WHERE id=$1`, [runId]);
+    const verified = await pool.query('SELECT status,lease_token FROM publish_runs WHERE id=$1', [runId]);
     if (verified.rows[0]?.status === 'PUBLISHED' && verified.rows[0]?.lease_token !== leaseToken) throw Object.assign(new Error('Publish run lease was lost after provider success'), { retryable: false, code: 'PUBLISH_RACE', terminalState: 'RECONCILIATION_REQUIRED' });
     return result;
   } catch (error) {
@@ -47,7 +47,7 @@ async function withPublishLease({ pool, runId, job, now, logger }, operation) {
     throw error;
   } finally {
     clearInterval(renewal);
-    await pool.query(`UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2`, [runId, leaseToken]).catch(() => {});
+    await pool.query('UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2', [runId, leaseToken]).catch(() => {});
   }
 }
 
