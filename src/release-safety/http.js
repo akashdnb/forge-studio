@@ -3,7 +3,7 @@ const http = require('node:http');
 const { URL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { authenticate, hasRole } = require('../security/http-security');
-const { DeploymentSafetyService } = require('./deployment-safety');
+const { DeploymentSafetyService, sha256 } = require('./deployment-safety');
 const { migrationPreflight, schemaSnapshot } = require('./release-safety');
 const { installPublicRunnerEpochGuards } = require('./runtime-guards');
 installPublicRunnerEpochGuards();
@@ -23,8 +23,8 @@ if (!DeploymentSafetyService.prototype.__forgeManifestV2) {
     manifest.schemaSnapshotHash = schema.hash;
     manifest.rolloutPolicy = input.rolloutPolicy || { allowPreviousEpoch: false, maxUnavailableWorkers: 0, requireDrainForUnsafeMigration: true };
     manifest.healthPolicy = input.healthPolicy || { requireSchemaMatch: true, requireWorkerAdmission: true, maxStaleRunnerExecutions: 0 };
-    manifest.migrationSetHash = require('./deployment-safety').sha256(manifest.migrationManifest);
-    manifest.manifestHash = require('./deployment-safety').sha256(manifest);
+    manifest.migrationSetHash = sha256(manifest.migrationManifest);
+    manifest.manifestHash = sha256(manifest);
     return manifest;
   };
 }
@@ -54,7 +54,18 @@ function installReleaseDeploymentSafety({ pg=null, authSecret=process.env.FORGE_
     const parts=url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
     if(req.method==='GET'&&parts[2]==='health')return reply(res,200,await service.health(url.searchParams.get('releaseId')),requestId);
     if(req.method==='GET'&&parts[2]==='diagnostics')return reply(res,200,await service.diagnostics(),requestId);
-    if(parts[2]&&parts[2]!=='health'&&parts[2]!=='diagnostics'){
+    if(req.method==='GET'&&parts[2]==='metrics'){
+      const [state,checks,jobs,workers,executions]=await Promise.all([
+        p.query('SELECT state,epoch FROM forge_release_state WHERE id=true'),
+        p.query("SELECT status,count(*)::int AS count FROM forge_release_deployment_checks GROUP BY status ORDER BY status"),
+        p.query("SELECT status,count(*)::int AS count FROM forge_jobs WHERE status IN ('QUEUED','RUNNING','FAILED') GROUP BY status ORDER BY status"),
+        p.query("SELECT status,count(*)::int AS count FROM forge_worker_fences GROUP BY status ORDER BY status"),
+        p.query("SELECT status,count(*)::int AS count FROM forge_execution_runs WHERE backend='public-github-actions' GROUP BY status ORDER BY status")
+      ]);
+      const body={activeReleaseState:state.rows[0]||null,deploymentChecks:checks.rows,jobs:jobs.rows,workers:workers.rows,publicRunnerExecutions:executions.rows};
+      return reply(res,200,body,requestId);
+    }
+    if(parts[2]&&parts[2]!=='health'&&parts[2]!=='diagnostics'&&parts[2]!=='metrics'){
       const releaseId=parts[2];
       if(req.method==='GET'&&parts.length===4&&parts[3]==='health')return reply(res,200,await service.health(releaseId),requestId);
       if(req.method==='POST'&&parts.length===4&&parts[3]==='preflight')return reply(res,200,await service.preflight(releaseId,{},auth.actor),requestId);
