@@ -34,14 +34,16 @@ function verify(payload, record) {
   const expectedHash = sha256(canonical);
   if (expectedHash !== record.payload_sha256) return { ok: false, code: 'RECOVERY_EVIDENCE_PAYLOAD_DRIFT' };
   const expected = crypto.createHmac('sha256', key).update(canonical).digest('base64url');
-  const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(record.signature));
+  const actual = String(record.signature);
+  if (expected.length !== actual.length) return { ok: false, code: 'RECOVERY_EVIDENCE_SIGNATURE_INVALID' };
+  const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
   return { ok, code: ok ? undefined : 'RECOVERY_EVIDENCE_SIGNATURE_INVALID' };
 }
 
 function targetHash(targetDatabaseUrl) { return sha256(String(targetDatabaseUrl)); }
 
 async function allocateGeneration(pool, tenantId) {
-  const result = await pool.query(`INSERT INTO forge_recovery_generation_state(tenant_id,next_generation) VALUES($1,2) ON CONFLICT(tenant_id) DO UPDATE SET next_generation=forge_recovery_generation_state.next_generation+1 RETURNING next_generation-1 AS generation`, [tenantId]);
+  const result = await pool.query(`INSERT INTO forge_recovery_generation_state(tenant_id,next_generation) VALUES($1,2) ON CONFLICT(tenant_id) DO UPDATE SET next_generation=forge_recovery_generation_state.next_generation+1,updated_at=now() RETURNING next_generation-1 AS generation`, [tenantId]);
   return Number(result.rows[0].generation);
 }
 
@@ -63,8 +65,8 @@ async function coverage(pool) {
 }
 
 async function rpo(pool, snapshotAt) {
-  const result = await pool.query("SELECT COALESCE(MAX(created_at), $1) AS latest FROM forge_backup_records WHERE status='SUCCEEDED'", [snapshotAt]);
-  return Math.max(0, Math.round((new Date(result.rows[0].latest).getTime() - new Date(snapshotAt).getTime()) / 1000));
+  const result = await pool.query('SELECT GREATEST(0, EXTRACT(EPOCH FROM (now() - $1::timestamptz)))::bigint AS age', [snapshotAt]);
+  return Number(result.rows[0]?.age || 0);
 }
 
 module.exports = { SIGNING_ALGORITHM, sign, verify, targetHash, allocateGeneration, recordIntegrity, coverage, rpo };
