@@ -1,0 +1,49 @@
+BEGIN;
+
+CREATE OR REPLACE FUNCTION forge_event_subscription_tenant_guard() RETURNS trigger AS $$
+DECLARE project_tenant text;
+BEGIN
+  IF NEW.project_id IS NULL THEN RETURN NEW; END IF;
+  SELECT tenant_id INTO project_tenant FROM projects WHERE id=NEW.project_id;
+  IF project_tenant IS NULL OR project_tenant <> NEW.tenant_id THEN RAISE EXCEPTION 'subscription tenant does not match project' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_event_subscription_tenant_guard ON forge_event_subscriptions;
+CREATE TRIGGER forge_event_subscription_tenant_guard BEFORE INSERT OR UPDATE OF project_id,tenant_id ON forge_event_subscriptions FOR EACH ROW EXECUTE FUNCTION forge_event_subscription_tenant_guard();
+
+CREATE OR REPLACE FUNCTION forge_event_delivery_tenant_guard() RETURNS trigger AS $$
+DECLARE event_tenant text; sub_tenant text; project_tenant text;
+BEGIN
+  SELECT tenant_id INTO event_tenant FROM forge_events WHERE id=NEW.event_id;
+  SELECT tenant_id INTO sub_tenant FROM forge_event_subscriptions WHERE id=NEW.subscription_id;
+  SELECT tenant_id INTO project_tenant FROM projects WHERE id=NEW.project_id;
+  IF event_tenant IS NULL OR sub_tenant IS NULL OR project_tenant IS NULL OR NEW.tenant_id <> event_tenant OR NEW.tenant_id <> sub_tenant OR NEW.tenant_id <> project_tenant THEN
+    RAISE EXCEPTION 'delivery tenant/project ownership mismatch' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_event_delivery_tenant_guard ON forge_event_deliveries;
+CREATE TRIGGER forge_event_delivery_tenant_guard BEFORE INSERT OR UPDATE OF event_id,subscription_id,project_id,tenant_id ON forge_event_deliveries FOR EACH ROW EXECUTE FUNCTION forge_event_delivery_tenant_guard();
+
+CREATE OR REPLACE FUNCTION forge_event_immutable_guard() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'forge events are immutable' USING ERRCODE='55000';
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_event_immutable_guard ON forge_events;
+CREATE TRIGGER forge_event_immutable_guard BEFORE UPDATE OR DELETE ON forge_events FOR EACH ROW EXECUTE FUNCTION forge_event_immutable_guard();
+
+CREATE OR REPLACE FUNCTION forge_delivery_sequence_guard() RETURNS trigger AS $$
+DECLARE event_sequence bigint;
+BEGIN
+  SELECT sequence_no INTO event_sequence FROM forge_events WHERE id=NEW.event_id;
+  IF event_sequence IS NULL OR NEW.sequence_no <> event_sequence THEN RAISE EXCEPTION 'delivery sequence must match event sequence' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_delivery_sequence_guard ON forge_event_deliveries;
+CREATE TRIGGER forge_delivery_sequence_guard BEFORE INSERT OR UPDATE OF event_id,sequence_no ON forge_event_deliveries FOR EACH ROW EXECUTE FUNCTION forge_delivery_sequence_guard();
+
+COMMIT;
