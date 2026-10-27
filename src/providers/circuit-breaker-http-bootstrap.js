@@ -1,4 +1,5 @@
 'use strict';
+require('../fairness/http-auto');
 
 const extended = require('../extended-http-api');
 const { authenticate, applySecurityHeaders, safeError, hasRole } = require('../security/http-security');
