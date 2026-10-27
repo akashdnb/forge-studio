@@ -1,5 +1,7 @@
 'use strict';
 
+require('../crypto/bootstrap');
+
 const http = require('node:http');
 const { Pool } = require('pg');
 const { authenticate, hasRole } = require('../security/http-security');
@@ -19,7 +21,7 @@ if (!http.Server.prototype[installed] && process.env.DATABASE_URL) {
       const pathname = new URL(request.url || '/', 'http://localhost').pathname;
       if (!pathname.startsWith('/internal/providers/credentials')) return listener(request, response);
       const auth = authenticate(request, { apiToken: process.env.API_BEARER_TOKEN || null, authSecret: process.env.FORGE_AUTH_SIGNING_SECRET || null, staticActor: process.env.FORGE_STATIC_ACTOR_ID || null, staticTenant: process.env.FORGE_STATIC_TENANT_ID || null });
-      if (!auth) { response.statusCode=401; response.setHeader('content-type','application/json; charset=utf-8'); return response.end(JSON.stringify({error:{code:'UNAUTHORIZED'}})); }
+      if (!auth) { response.statusCode = 401; response.setHeader('content-type', 'application/json; charset=utf-8'); return response.end(JSON.stringify({ error: { code: 'UNAUTHORIZED' } })); }
       const requestId = request.headers['x-request-id'] || require('node:crypto').randomUUID();
       const handled = await handleCredentialRequest(request, response, { registry, auth, hasRole: (actor, role) => hasRole(auth, role), pool, requestId });
       if (handled === false) return listener(request, response);
