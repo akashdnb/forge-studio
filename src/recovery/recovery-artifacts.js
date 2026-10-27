@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
-const { Writable, Readable } = require('node:stream');
+const { Writable } = require('node:stream');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
@@ -58,6 +58,13 @@ class RecoveryArtifactArchive {
       while (true) { if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' }); const index = cursor++; if (index >= rows.length) return; const item = rows[index]; const file = path.join(extracted.root, item.file); const actual = await fileSha256(file); if (actual !== item.contentHash) throw Object.assign(new Error(`artifact ${item.id} checksum mismatch during restore`), { code: 'CHECKSUM_MISMATCH' }); const result = await targetStorage.upload({ stream: fs.createReadStream(file), tenantId: item.tenantId, projectId: item.projectId, kind: item.kind, contentType: item.mediaType, expectedSha256: item.contentHash, metadata: { recoveryBackup: extracted.manifest.backupId, immutableContentHash: item.contentHash } }); if (result.sha256 !== item.contentHash) throw Object.assign(new Error(`artifact ${item.id} restored under a different content identity`), { code: 'CHECKSUM_MISMATCH' }); }
     };
     try { await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker)); return { restored: rows.length, root: extracted.manifest.root }; }
+    finally { await fsp.rm(extracted.root, { recursive: true, force: true }).catch(() => {}); }
+  }
+  async verifyRestored({ archive, targetStorage, tenantId, signal }) {
+    const extracted = await this.extract(archive); let cursor = 0; const rows = extracted.manifest.artifacts.filter((item) => item.tenantId === tenantId); const worker = async () => {
+      while (true) { if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' }); const index = cursor++; if (index >= rows.length) return; const item = rows[index]; const object = await targetStorage.download({ key: item.storageKey, expectedSha256: item.contentHash, maxBytes: this.maxBytes }); await pipeline(object.stream, new Writable({ write(_chunk, _encoding, cb) { cb(); } })); }
+    };
+    try { await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker)); return { verified: rows.length, root: extracted.manifest.root }; }
     finally { await fsp.rm(extracted.root, { recursive: true, force: true }).catch(() => {}); }
   }
 }
