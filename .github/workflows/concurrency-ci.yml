@@ -1,0 +1,50 @@
+name: Forge Concurrency CI
+
+on:
+  pull_request:
+    paths:
+      - 'migrations/012_episode_version_concurrency.sql'
+      - 'src/persistence/concurrency.js'
+      - 'src/persistence/concurrency-postgres-repository.js'
+      - 'src/persistence/production-repository.js'
+      - 'src/publishing/job-handler.js'
+      - 'test/concurrency-postgres.test.js'
+      - 'test/publishing/job-handler.test.js'
+      - '.github/workflows/concurrency-ci.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  concurrency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d forge_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/forge_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: node --check src/persistence/concurrency.js
+      - run: node --check src/persistence/concurrency-postgres-repository.js
+      - run: node --check src/persistence/production-repository.js
+      - run: node --check src/publishing/job-handler.js
+      - run: node --test test/concurrency-postgres.test.js test/publishing/job-handler.test.js
