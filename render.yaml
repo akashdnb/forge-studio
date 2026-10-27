@@ -120,6 +120,8 @@ services:
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
       - key: FORGE_WORKER_HANDLERS
+        value: src/recovery/combined-worker-handlers.js
+      - key: FORGE_GENERATION_HANDLER_MODULE
         value: src/generation/worker-handlers.js
       - key: FORGE_GENERATION_TIMEOUT_MS
         value: "600000"
