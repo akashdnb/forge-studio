@@ -18,5 +18,6 @@ module.exports = {
   ...require('./persistence/postgres-repository'),
   ...require('./persistence/production-repository'),
   ...require('./persistence/job-queue'),
+  ...require('./persistence/transaction-runner'),
   ...require('./publishing/youtube-publisher'),
 };
