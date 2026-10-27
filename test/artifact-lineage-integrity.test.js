@@ -44,14 +44,14 @@ test('local storage rejects same-size corruption during verified read', async ()
   }
 });
 
-test('verified repair refuses a checksum mismatch before ledger mutation', async () => {
+test('verified repair refuses a checksum/size mismatch before ledger mutation', async () => {
   let mutated = false;
   const service = {
-    pool: { query: async () => ({ rows: [{ id: 'a', content_hash: 'a'.repeat(64), storage_key: 'k', size_bytes: 3, status: 'READY', project_id: 'p', tenant_id: 't' }] }) },
+    pool: { query: async () => ({ rows: [{ id: 'a', content_hash: 'a'.repeat(64), storage_key: 'k', size_bytes: 4, status: 'READY', project_id: 'p', tenant_id: 't' }] }) },
     storage: { download: async () => ({ stream: require('node:stream').Readable.from(Buffer.from('bad')) }) },
     rebuildContentReference: async () => { mutated = true; },
   };
-  await assert.rejects(() => verifyAndRebuildContentReference(service, { tenantId: 't', artifactId: 'a' }), error => error.code === 'CHECKSUM_MISMATCH' || error.code === 'SIZE_MISMATCH');
+  await assert.rejects(() => verifyAndRebuildContentReference(service, { tenantId: 't', artifactId: 'a' }), error => error.code === 'SIZE_MISMATCH');
   assert.equal(mutated, false);
 });
 
