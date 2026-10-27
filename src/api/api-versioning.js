@@ -7,41 +7,21 @@ const V1_SUNSET = process.env.FORGE_API_V1_SUNSET || '2027-04-27T00:00:00Z';
 const JSON_LIMIT_BYTES = 1024 * 1024;
 const MAX_ID_LENGTH = 256;
 const MAX_PAGE_SIZE = 200;
-
-const VERSION_MEDIA_TYPES = Object.freeze({
-  '1': 'application/vnd.forge.v1+json',
-  '2': 'application/vnd.forge.v2+json',
-});
-
-const VERSION_ALIASES = Object.freeze({
-  '/v2': '/v1',
-});
-
+const VERSION_MEDIA_TYPES = Object.freeze({ '1': 'application/vnd.forge.v1+json', '2': 'application/vnd.forge.v2+json' });
+const VERSION_ALIASES = Object.freeze({ '/v2': '/v1' });
 const ENUMS = Object.freeze({
   episodeState: new Set(['DRAFT', 'RESEARCHING', 'SCRIPTING', 'SCENE_PLANNING', 'NARRATING', 'TRANSCRIBING', 'ASSETS', 'TIMELINE', 'CAPTIONS', 'RENDERING', 'QA', 'APPROVED', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'CANCELLED']),
   approvalDecision: new Set(['APPROVED', 'REJECTED', 'REQUEST_CHANGES']),
   approvalStage: new Set(['SCRIPT', 'SCENE_PLAN', 'NARRATION', 'TIMELINE', 'FINAL_RENDER']),
-  qaStatus: new Set(['PASS', 'FAIL', 'BLOCKED', 'WARNING']),
 });
 
 function parseVersion(request) {
   const pathname = new URL(request.url || '/', 'http://localhost').pathname;
   const pathMatch = /^\/v(\d+)(?:\/|$)/.exec(pathname);
-  const accept = String(request.headers.accept || '');
-  const mediaMatch = /application\/vnd\.forge\.v(\d+)\+json/i.exec(accept);
+  const mediaMatch = /application\/vnd\.forge\.v(\d+)\+json/i.exec(String(request.headers.accept || ''));
   const requested = pathMatch?.[1] || mediaMatch?.[1] || DEFAULT_VERSION;
-  if (!SUPPORTED_VERSIONS.includes(requested)) {
-    const error = new Error(`Unsupported API version: v${requested}`);
-    error.statusCode = 406;
-    error.code = 'UNSUPPORTED_API_VERSION';
-    throw error;
-  }
-  if (pathMatch && mediaMatch && pathMatch[1] !== mediaMatch[1]) {
-    const error = new Error('URL API version and Accept API version must match');
-    error.statusCode = 406;
-    error.code = 'API_VERSION_MISMATCH';
-    throw error;
-  }
+  if (!SUPPORTED_VERSIONS.includes(requested)) throw Object.assign(new Error(`Unsupported API version: v${requested}`), { statusCode: 406, code: 'UNSUPPORTED_API_VERSION' });
+  if (pathMatch && mediaMatch && pathMatch[1] !== mediaMatch[1]) throw Object.assign(new Error('URL API version and Accept API version must match'), { statusCode: 406, code: 'API_VERSION_MISMATCH' });
   return requested;
 }
 
@@ -55,12 +35,7 @@ function normalizePath(request, version) {
 
 function validateId(value, field = 'id') {
   if (value === undefined || value === null) return;
-  if (typeof value !== 'string' || value.length < 1 || value.length > MAX_ID_LENGTH || /[\u0000\r\n]/.test(value)) {
-    const error = new Error(`${field} must be a non-empty string of at most ${MAX_ID_LENGTH} characters`);
-    error.statusCode = 400;
-    error.code = 'INVALID_ID';
-    throw error;
-  }
+  if (typeof value !== 'string' || value.length < 1 || value.length > MAX_ID_LENGTH || /[\u0000\r\n]/.test(value)) throw Object.assign(new Error(`${field} must be a non-empty string of at most ${MAX_ID_LENGTH} characters`), { statusCode: 400, code: 'INVALID_ID' });
 }
 
 function validatePagination(url) {
@@ -69,17 +44,13 @@ function validatePagination(url) {
     const raw = url.searchParams.get(name);
     if (!/^\d+$/.test(raw)) throw Object.assign(new Error(`${name} must be a non-negative integer`), { statusCode: 400, code: 'INVALID_PAGINATION' });
     const value = Number(raw);
-    if (!Number.isSafeInteger(value) || (name === 'limit' && (value < 1 || value > MAX_PAGE_SIZE)) || (name === 'offset' && value > Number.MAX_SAFE_INTEGER)) {
-      throw Object.assign(new Error(`${name} is outside the supported range`), { statusCode: 400, code: 'INVALID_PAGINATION' });
-    }
+    if (!Number.isSafeInteger(value) || (name === 'limit' && (value < 1 || value > MAX_PAGE_SIZE))) throw Object.assign(new Error(`${name} is outside the supported range`), { statusCode: 400, code: 'INVALID_PAGINATION' });
   }
 }
 
 function validateIdempotencyKey(request, body) {
   const key = request.headers['idempotency-key'] || body?.idempotencyKey;
-  if (key !== undefined && (typeof key !== 'string' || key.length < 8 || key.length > 255 || !/^[A-Za-z0-9._:-]+$/.test(key))) {
-    throw Object.assign(new Error('Idempotency-Key must be 8-255 characters using A-Z, a-z, 0-9, dot, underscore, colon or hyphen'), { statusCode: 400, code: 'INVALID_IDEMPOTENCY_KEY' });
-  }
+  if (key !== undefined && (typeof key !== 'string' || key.length < 8 || key.length > 255 || !/^[A-Za-z0-9._:-]+$/.test(key))) throw Object.assign(new Error('Idempotency-Key must be 8-255 characters using A-Z, a-z, 0-9, dot, underscore, colon or hyphen'), { statusCode: 400, code: 'INVALID_IDEMPOTENCY_KEY' });
 }
 
 function validateCommonBody(request, body, version) {
@@ -94,8 +65,7 @@ function validateCommonBody(request, body, version) {
 
 function readBodyForValidation(request) {
   if (!['POST', 'PUT', 'PATCH'].includes(request.method)) return null;
-  const contentType = String(request.headers['content-type'] || '').toLowerCase();
-  if (!contentType.includes('application/json')) return null;
+  if (!String(request.headers['content-type'] || '').toLowerCase().includes('application/json')) return null;
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -106,13 +76,8 @@ function readBodyForValidation(request) {
     });
     request.on('end', () => {
       if (!size) return resolve({ body: {}, raw: Buffer.alloc(0) });
-      try {
-        const raw = Buffer.concat(chunks);
-        const body = JSON.parse(raw.toString('utf8'));
-        resolve({ body, raw });
-      } catch (cause) {
-        reject(Object.assign(new Error('Malformed JSON request body'), { statusCode: 400, code: 'MALFORMED_JSON', cause }));
-      }
+      try { const raw = Buffer.concat(chunks); resolve({ body: JSON.parse(raw.toString('utf8')), raw }); }
+      catch (cause) { reject(Object.assign(new Error('Malformed JSON request body'), { statusCode: 400, code: 'MALFORMED_JSON', cause })); }
     });
     request.on('error', reject);
   });
@@ -120,9 +85,7 @@ function readBodyForValidation(request) {
 
 function replayBody(request, raw) {
   if (!raw) return;
-  request[Symbol.asyncIterator] = async function* asyncIterator() {
-    if (raw.length) yield raw;
-  };
+  request[Symbol.asyncIterator] = async function* asyncIterator() { if (raw.length) yield raw; };
 }
 
 function versionHeaders(response, version, deprecated = false) {
@@ -139,54 +102,54 @@ function versionHeaders(response, version, deprecated = false) {
 
 function auditEvent(request, version, statusCode, logger = console) {
   const route = new URL(request.url || '/', 'http://localhost').pathname.replace(/^\/v2(?=\/|$)/, '/v1');
-  logger.info?.(JSON.stringify({
-    event: 'api.version.request',
-    apiVersion: `v${version}`,
-    deprecated: version === '1',
-    method: request.method,
-    route,
-    statusCode,
-    requestId: request.headers['x-request-id'] || null,
-  }));
+  logger.info?.(JSON.stringify({ event: 'api.version.request', apiVersion: `v${version}`, deprecated: version === '1', method: request.method, route, statusCode, requestId: request.headers['x-request-id'] || null }));
 }
 
 function createVersioningMiddleware({ logger = console, rateLimitPerMinute = Number(process.env.FORGE_API_VERSION_RATE_LIMIT_PER_MINUTE || 300) } = {}) {
   const buckets = new Map();
   const limit = Number.isSafeInteger(rateLimitPerMinute) && rateLimitPerMinute > 0 ? rateLimitPerMinute : 300;
   return async function versioningMiddleware(request, response, next) {
-    const version = parseVersion(request);
-    const parsed = new URL(request.url || '/', 'http://localhost');
-    if (/^\/v\d+(?:\/|$)/.test(parsed.pathname)) validatePagination(parsed);
-    const tokenFingerprint = createHash('sha256').update(String(request.headers.authorization || 'anonymous')).digest('hex').slice(0, 16);
-    const key = `${version}:${tokenFingerprint}:${request.socket?.remoteAddress || 'unknown'}`;
-    const now = Date.now();
-    const bucket = buckets.get(key) || { count: 0, resetAt: now + 60_000 };
-    if (now >= bucket.resetAt) { bucket.count = 0; bucket.resetAt = now + 60_000; }
-    bucket.count += 1; buckets.set(key, bucket);
-    response.setHeader('x-api-rate-limit', String(limit));
-    response.setHeader('x-api-rate-remaining', String(Math.max(0, limit - bucket.count)));
-    response.setHeader('x-api-rate-reset', String(Math.ceil(bucket.resetAt / 1000)));
-    if (bucket.count > limit) {
+    let version = DEFAULT_VERSION;
+    try {
+      version = parseVersion(request);
+      const parsed = new URL(request.url || '/', 'http://localhost');
+      if (/^\/v\d+(?:\/|$)/.test(parsed.pathname)) validatePagination(parsed);
+      const tokenFingerprint = createHash('sha256').update(String(request.headers.authorization || 'anonymous')).digest('hex').slice(0, 16);
+      const key = `${version}:${tokenFingerprint}:${request.socket?.remoteAddress || 'unknown'}`;
+      const now = Date.now();
+      const bucket = buckets.get(key) || { count: 0, resetAt: now + 60_000 };
+      if (now >= bucket.resetAt) { bucket.count = 0; bucket.resetAt = now + 60_000; }
+      bucket.count += 1; buckets.set(key, bucket);
+      response.setHeader('x-api-rate-limit', String(limit));
+      response.setHeader('x-api-rate-remaining', String(Math.max(0, limit - bucket.count)));
+      response.setHeader('x-api-rate-reset', String(Math.ceil(bucket.resetAt / 1000)));
+      if (bucket.count > limit) {
+        versionHeaders(response, version, version === '1');
+        auditEvent(request, version, 429, logger);
+        response.writeHead(429, { 'content-type': 'application/json; charset=utf-8' });
+        return response.end(JSON.stringify({ error: { code: 'API_VERSION_RATE_LIMITED', message: 'API version rate limit exceeded' }, requestId: request.headers['x-request-id'] || null }));
+      }
+      const body = await readBodyForValidation(request);
+      if (body) { validateCommonBody(request, body.body, version); replayBody(request, body.raw); }
+      request.headers['x-api-version'] = `v${version}`;
+      request._forgeApiVersion = version;
+      normalizePath(request, version);
       versionHeaders(response, version, version === '1');
-      auditEvent(request, version, 429, logger);
-      response.writeHead(429, { 'content-type': 'application/json; charset=utf-8' });
-      response.end(JSON.stringify({ error: { code: 'API_VERSION_RATE_LIMITED', message: 'API version rate limit exceeded' }, requestId: request.headers['x-request-id'] || null }));
-      return;
-    }
-    const body = await readBodyForValidation(request);
-    if (body) { validateCommonBody(request, body.body, version); replayBody(request, body.raw); }
-    request.headers['x-api-version'] = `v${version}`;
-    request._forgeApiVersion = version;
-    normalizePath(request, version);
-    versionHeaders(response, version, version === '1');
-    const originalEnd = response.end;
-    let statusCode = 200;
-    const originalWriteHead = response.writeHead;
-    response.writeHead = function patchedWriteHead(status, ...args) { statusCode = status; versionHeaders(response, version, version === '1'); return originalWriteHead.call(this, status, ...args); };
-    response.end = function patchedEnd(...args) { auditEvent(request, version, statusCode, logger); return originalEnd.apply(this, args); };
-    try { await next(); } catch (error) {
-      auditEvent(request, version, error.statusCode || 500, logger);
-      throw error;
+      const originalEnd = response.end;
+      let statusCode = 200;
+      const originalWriteHead = response.writeHead;
+      response.writeHead = function patchedWriteHead(status, ...args) { statusCode = status; versionHeaders(response, version, version === '1'); return originalWriteHead.call(this, status, ...args); };
+      response.end = function patchedEnd(...args) { auditEvent(request, version, statusCode, logger); return originalEnd.apply(this, args); };
+      await next();
+    } catch (error) {
+      const status = Number.isInteger(error.statusCode) ? error.statusCode : 400;
+      const code = error.code || 'INVALID_REQUEST';
+      auditEvent(request, version, status, logger);
+      if (!response.headersSent) {
+        versionHeaders(response, version, version === '1');
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ error: { code, message: error.message }, requestId: request.headers['x-request-id'] || null }));
+      }
     }
   };
 }
@@ -200,7 +163,7 @@ function installHttpVersioning(options = {}) {
     const server = originalCreateServer.call(this);
     const originalOn = server.on.bind(server);
     const originalAddListener = server.addListener.bind(server);
-    const wrap = (listener) => listener ? async (request, response) => middleware(request, response, () => listener(request, response)) : listener;
+    const wrap = (listener) => listener ? (request, response) => middleware(request, response, () => listener(request, response)) : listener;
     server.on = (event, listener) => originalOn(event, event === 'request' ? wrap(listener) : listener);
     server.addListener = (event, listener) => originalAddListener(event, event === 'request' ? wrap(listener) : listener);
     if (requestListener) server.on('request', requestListener);
@@ -224,7 +187,7 @@ function apiVersionContract() {
       durableSemantics: 'version-adapters-must-not-change-job-artifact-workflow-approval-budget-or-security-identity',
       ids: `non-empty strings <= ${MAX_ID_LENGTH} characters`,
       pagination: `limit 1-${MAX_PAGE_SIZE}; offset non-negative integer`,
-      errors: 'stable {error:{code,message},requestId} envelope',
+      errors: 'stable {error:{code,message},requestId}',
       idempotency: 'Idempotency-Key or idempotencyKey is validated and preserved',
     },
     mediaTypes: VERSION_MEDIA_TYPES,
