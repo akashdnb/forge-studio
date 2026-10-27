@@ -6,14 +6,13 @@ let Pool; try { ({ Pool } = require('pg')); } catch { Pool = null; }
 const { parseRange } = require('../src/storage/artifact-access-gateway');
 const { ArtifactDeliveryGrantService } = require('../src/storage/artifact-delivery-grants');
 const { PersistentProductionRepository } = require('../src/persistence/production-repository');
-
 const maybe = Pool && (process.env.TEST_DATABASE_URL || process.env.DATABASE_URL) ? test : test.skip;
 
 test('range grants reject oversized and malformed requests', () => {
   assert.deepEqual(parseRange('bytes=10-19', 100, 20), { start: 10, end: 19, length: 10 });
   assert.throws(() => parseRange('bytes=10-40', 100, 20), /exceeds/);
   assert.throws(() => parseRange('bytes=100-100', 100, 20), /not satisfiable/);
-  assert.throws(() => parseRange('bytes=1-2,4-5', 100, 20), /Multiple/);
+  assert.throws(() => parseRange('bytes=1-2,4-5', 100, 20), /Malformed/);
 });
 
 test('legacy signed grant tokens are tamper evident', async () => {
@@ -22,7 +21,9 @@ test('legacy signed grant tokens are tamper evident', async () => {
   const payload = { v: 1, grantId: crypto.randomUUID(), artifactId: 'a', versionId: 'v', contentHash: 'a'.repeat(64), tenantId: 't', projectId: 'p', actor: 'u', purpose: 'user', audience: 'browser', action: 'download', nonce: crypto.randomUUID(), keyEpoch: 0, iat: 1, nbf: 1, exp: 9999999999, maxUses: 1, maxBytes: null, rangeStart: null, rangeEnd: null };
   const token = await service._sign(payload, 0);
   assert.equal(token.split('.').length, 3);
-  await assert.rejects(() => service._verify(`${token.slice(0, -1)}x`, payload, token.split('.')[2]), /invalid signed artifact token/);
+  const signature = token.split('.')[2];
+  const tamperedSignature = `${signature.slice(0, -1)}${signature.endsWith('a') ? 'b' : 'a'}`;
+  await assert.rejects(() => service._verify(`${token.split('.')[0]}.${token.split('.')[1]}.${tamperedSignature}`, payload, tamperedSignature), /invalid signed artifact token/);
 });
 
 maybe('PostgreSQL grants enforce one-time replay and revocation under concurrency', async () => {
@@ -43,8 +44,5 @@ maybe('PostgreSQL grants enforce one-time replay and revocation under concurrenc
   const issued2 = await service.issue({ artifactId: row.id, tenantId: row.tenant_id, projectId: row.project_id, actor, maxUses: 2, audience: 'browser', action: 'download' });
   await service.revoke({ grantId: issued2.grantId, actor, reason: 'test' });
   await assert.rejects(() => service.authorize({ token: issued2.token, artifactId: row.id, actor, tenantId: row.tenant_id, action: 'download', audience: 'browser' }), error => error.code === 'ACCESS_GRANT_REVOKED');
-  await pool.query('DELETE FROM artifact_delivery_authorization_evidence WHERE grant_id IN ($1,$2)', [issued.grantId, issued2.grantId]).catch(() => {});
-  await pool.query('DELETE FROM artifact_delivery_grant_uses WHERE grant_id IN ($1,$2)', [issued.grantId, issued2.grantId]).catch(() => {});
-  await pool.query('DELETE FROM artifact_delivery_grants WHERE id IN ($1,$2)', [issued.grantId, issued2.grantId]).catch(() => {});
   await pool.end();
 });
