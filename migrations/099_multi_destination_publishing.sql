@@ -8,7 +8,6 @@ ALTER TABLE publish_runs
   ADD COLUMN IF NOT EXISTS package_hash char(64),
   ADD COLUMN IF NOT EXISTS gate_fingerprint char(64),
   ADD COLUMN IF NOT EXISTS quarantine_reason text;
-
 UPDATE publish_runs p SET project_id=e.project_id, tenant_id=pr.tenant_id FROM episodes e JOIN projects pr ON pr.id=e.project_id WHERE p.episode_id=e.id AND (p.project_id IS NULL OR p.tenant_id IS NULL);
 CREATE INDEX IF NOT EXISTS publish_runs_tenant_project_idx ON publish_runs(tenant_id,project_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS publish_runs_request_idx ON publish_runs(publish_request_id);
@@ -83,5 +82,21 @@ END;
 $$;
 DROP TRIGGER IF EXISTS publish_receipt_identity_guard ON publish_receipts;
 CREATE TRIGGER publish_receipt_identity_guard BEFORE UPDATE ON publish_receipts FOR EACH ROW EXECUTE FUNCTION forge_publish_receipt_identity_guard();
+
+CREATE OR REPLACE FUNCTION forge_publish_duplicate_package_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE duplicate_request text;
+BEGIN
+  IF NEW.status='UPLOADING' AND (OLD.status IS DISTINCT FROM 'UPLOADING' OR OLD.status IS NULL) AND NEW.package_hash IS NOT NULL AND NEW.destination IS NOT NULL THEN
+    SELECT pr.id INTO duplicate_request
+    FROM publish_receipts r JOIN publish_requests pr ON pr.id=r.request_id
+    WHERE r.destination=NEW.destination AND r.package_hash=NEW.package_hash AND r.receipt_state='PUBLISHED' AND pr.id IS DISTINCT FROM NEW.publish_request_id
+    LIMIT 1;
+    IF duplicate_request IS NOT NULL THEN RAISE EXCEPTION 'package is already published for destination by request %',duplicate_request USING ERRCODE='23514'; END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS publish_duplicate_package_guard ON publish_runs;
+CREATE TRIGGER publish_duplicate_package_guard BEFORE UPDATE OF status ON publish_runs FOR EACH ROW EXECUTE FUNCTION forge_publish_duplicate_package_guard();
 
 COMMIT;
