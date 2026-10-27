@@ -1,4 +1,4 @@
-const { ArtifactAccessGateway } = require('./artifact-access-gateway');
+const { ArtifactAccessGateway, verifyToken } = require('./artifact-access-gateway');
 
 class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
   async _reachable(artifact) {
@@ -12,6 +12,17 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
         SELECT d.depends_on_version_id FROM version_dependencies d JOIN reachable r ON r.version_id=d.version_id WHERE d.episode_id=$1
       ) SELECT 1 FROM reachable WHERE version_id=$2 LIMIT 1`, [artifact.episode_id, artifact.version_id]);
     return Boolean(result.rows[0]);
+  }
+
+  async resolve({ artifactId, actor, action = 'metadata', token = null, purpose = 'user', recovery = false }) {
+    if (token) {
+      const payload = verifyToken(token, this.signingSecret, this.clock());
+      if (payload.artifactId !== artifactId || payload.actor !== actor) throw Object.assign(new Error('Access token does not match requested artifact'), { code: 'TOKEN_BINDING_MISMATCH', statusCode: 403 });
+      if (payload.action !== action && !(payload.action === 'download' && action === 'stream')) throw Object.assign(new Error('Access token does not permit requested delivery mode'), { code: 'TOKEN_BINDING_MISMATCH', statusCode: 403 });
+      purpose = payload.purpose || purpose; recovery = Boolean(payload.recovery);
+      return this._authorize(artifactId, { actor, action: payload.action === 'download' ? 'download' : action, purpose, recovery });
+    }
+    return this._authorize(artifactId, { actor, action, purpose, recovery });
   }
 }
 
