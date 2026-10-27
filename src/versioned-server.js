@@ -9,12 +9,15 @@ const { installOperationsControlPlane } = require('./operations/control-plane');
 const { installIncidentControlPlane } = require('./incidents/http-extension');
 const { installIncidentEventSubscriptionBridge } = require('./incidents/event-subscription-bridge');
 const { installIncidentHealthEndpoint } = require('./incidents/health-extension');
-const { installReleaseDeploymentSafety } = require('./release-safety/http');
+const { PersistentProductionRepository } = require('./persistence/production-repository');
+const { installProvenance } = require('./provenance/install');
+const { installProvenanceHttp } = require('./provenance/http');
+installProvenance(PersistentProductionRepository);
+installProvenanceHttp(extended);
 installOperationsControlPlane();
 installIncidentControlPlane();
 installIncidentEventSubscriptionBridge();
 installIncidentHealthEndpoint();
-installReleaseDeploymentSafety();
 
 // server.js removes the initial extended-api listener and captures it as apiHandler.
 // Wrap that listener here so search routes use the verified production identity and
