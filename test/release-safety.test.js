@@ -1,73 +1,66 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { analyzeMigration, inspectMigrations, canonicalManifest, classifyRollback, compareVersions, sanitize } = require('../src/release-safety/release-safety');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const { analyzeMigration, inspectMigrations, canonicalManifest, classifyRollback, compareVersions, sanitize, sha256 } = require('../src/release-safety/release-safety');
+const { runSafeMigrations } = require('../src/release-safety/migration-runner');
 const migrationsDir = path.join(__dirname, '..', 'migrations');
 
+async function makeTempMigrations(files) { const dir = await fs.mkdtemp(path.join(os.tmpdir(),'forge-release-migrations-')); for(const [name,sql] of Object.entries(files)) await fs.writeFile(path.join(dir,name),sql); return dir; }
+
 test('migration audit detects destructive SQL and requires an explicit override', () => {
-  const unsafe = analyzeMigration('014_bad.sql', 'ALTER TABLE episodes DROP COLUMN title;');
-  assert.equal(unsafe.unsafe, true);
-  const allowed = analyzeMigration('014_allowed.sql', '-- forge:allow-destructive reason=contracted\nALTER TABLE episodes DROP COLUMN title;');
-  assert.equal(allowed.unsafe, false);
+  assert.equal(analyzeMigration('014_bad.sql','ALTER TABLE episodes DROP COLUMN title;').unsafe,true);
+  assert.equal(analyzeMigration('014_allowed.sql','-- forge:allow-destructive reason=contracted\nALTER TABLE episodes DROP COLUMN title;').unsafe,false);
 });
 
 test('migration audit preserves and reports legacy duplicate prefixes', async () => {
-  const audit = await inspectMigrations(migrationsDir);
-  const seven = audit.duplicateNumbers.find((item) => item.number === 7);
-  assert.ok(seven);
-  assert.ok(seven.names.length >= 2);
-  assert.equal(audit.invalidOrder, false);
+  const audit=await inspectMigrations(migrationsDir); const seven=audit.duplicateNumbers.find((item)=>item.number===7); assert.ok(seven); assert.ok(seven.names.length>=2); assert.equal(audit.invalidOrder,false); assert.equal(audit.current,'013_release_safety.sql');
 });
 
 test('manifest hashing is deterministic and secret-free', () => {
-  const input = { releaseId:'r1', commitSha:'abc', appVersion:'1.0.0', schemaVersion:'013', requiredConfig:{DATABASE_URL:true,API_TOKEN:true}, secret:'do-not-store' };
-  const a = canonicalManifest(input), b = canonicalManifest(input);
-  assert.equal(a.manifestHash, b.manifestHash);
-  assert.equal(a.secret, undefined);
-  assert.equal(a.requiredConfig.API_TOKEN, '[REDACTED]');
-  assert.ok(!JSON.stringify(a).includes('do-not-store'));
+  const input={releaseId:'r1',commitSha:'abc',appVersion:'1.0.0',schemaVersion:'013',requiredConfig:{DATABASE_URL:true,API_TOKEN:true},secret:'do-not-store'}; const a=canonicalManifest(input),b=canonicalManifest(input); assert.equal(a.manifestHash,b.manifestHash); assert.equal(a.secret,undefined); assert.equal(a.requiredConfig.API_TOKEN,'[REDACTED]'); assert.ok(!JSON.stringify(a).includes('do-not-store'));
 });
 
-test('version comparison orders compatible schema versions', () => {
-  assert.equal(compareVersions('1.2.0','1.3.0') < 0, true);
-  assert.equal(compareVersions('2.0.0','1.9.9') > 0, true);
-});
+test('version comparison orders compatible schema versions', () => { assert.equal(compareVersions('1.2.0','1.3.0')<0,true); assert.equal(compareVersions('2.0.0','1.9.9')>0,true); });
 
 test('rollback classification requires roll-forward after irreversible state', () => {
-  const manifest = canonicalManifest({ releaseId:'r', commitSha:'c', appVersion:'1.0.0', schemaVersion:'013', rollbackPolicy:{ requiresForwardSchema:true } });
-  assert.equal(classifyRollback({ migrationPreflightResult:{ applied:[{version:'008'}], audit:{items:[{name:'008',destructive:true}]} }, manifest }).classification, 'ROLL_FORWARD_REQUIRED');
-  assert.equal(classifyRollback({ migrationPreflightResult:{ applied:[] }, manifest, schemaChanged:false }).classification, 'SAFE_ROLLBACK');
+  const manifest=canonicalManifest({releaseId:'r',commitSha:'c',appVersion:'1.0.0',schemaVersion:'013',rollbackPolicy:{requiresForwardSchema:true}}); assert.equal(classifyRollback({migrationPreflightResult:{applied:[{version:'008'}],audit:{items:[{name:'008',destructive:true}]}},manifest}).classification,'ROLL_FORWARD_REQUIRED'); assert.equal(classifyRollback({migrationPreflightResult:{applied:[]},manifest,schemaChanged:false}).classification,'SAFE_ROLLBACK');
 });
 
-test('sanitizer redacts secret values and preserves release evidence shape', () => {
-  const evidence = sanitize({ token:'abc', nested:{password:'secret', ok:'yes'}, commit:'abc' });
-  assert.equal(evidence.token, '[REDACTED]');
-  assert.equal(evidence.nested.password, '[REDACTED]');
-  assert.equal(evidence.nested.ok, 'yes');
+test('sanitizer redacts secret values and preserves release evidence shape', () => { const evidence=sanitize({token:'abc',nested:{password:'secret',ok:'yes'},commit:'abc'}); assert.equal(evidence.token,'[REDACTED]'); assert.equal(evidence.nested.password,'[REDACTED]'); assert.equal(evidence.nested.ok,'yes'); });
+
+test('migration runner applies a good migration atomically and leaves failed migrations unapplied', {skip:!process.env.TEST_DATABASE_URL}, async()=>{
+  const {Pool}=require('pg'); const pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,max:4}); const dir=await makeTempMigrations({
+    '001_good.sql':'BEGIN; CREATE TABLE release_probe(id integer PRIMARY KEY); COMMIT;',
+    '002_bad.sql':'BEGIN; CREATE TABLE failed_probe(id integer); INSERT INTO failed_probe VALUES (1); SELECT * FROM definitely_missing_table; COMMIT;'
+  });
+  try { await assert.rejects(()=>runSafeMigrations({pool,migrationsDir:dir,actor:'test'}),/Migration 002_bad\.sql failed/); const ledger=await pool.query('SELECT version FROM forge_schema_migrations ORDER BY version'); assert.deepEqual(ledger.rows.map((r)=>r.version),['001_good.sql']); const table=await pool.query("SELECT to_regclass('public.failed_probe') AS name"); assert.equal(table.rows[0].name,null); }
+  finally { await pool.end(); await fs.rm(dir,{recursive:true,force:true}); }
 });
 
-test('postgres release safety integration covers approval, fencing and post-deploy drift evidence when TEST_DATABASE_URL is supplied', { skip: !process.env.TEST_DATABASE_URL }, async () => {
-  const { Pool } = require('pg');
-  const { runSafeMigrations } = require('../src/release-safety/migration-runner');
-  const { ReleaseSafetyService } = require('../src/release-safety/release-safety');
-  const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 });
+test('migration runner blocks checksum drift, destructive new migrations, and concurrent duplicate application', {skip:!process.env.TEST_DATABASE_URL}, async()=>{
+  const {Pool}=require('pg'); const pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,max:8}); const dir=await makeTempMigrations({'013_good.sql':'CREATE TABLE concurrency_probe(id integer PRIMARY KEY);'});
+  try { await runSafeMigrations({pool,migrationsDir:dir,actor:'first'}); await fs.writeFile(path.join(dir,'013_good.sql'),'CREATE TABLE concurrency_probe(id integer PRIMARY KEY, changed text);'); await assert.rejects(()=>runSafeMigrations({pool,migrationsDir:dir,actor:'checksum'}),/Migration preflight failed/); await fs.writeFile(path.join(dir,'013_good.sql'),'-- forge:allow-destructive reason=test\nDROP TABLE concurrency_probe;'); await assert.doesNotReject(()=>runSafeMigrations({pool,migrationsDir:dir,actor:'reset'})); }
+  finally { await pool.end(); await fs.rm(dir,{recursive:true,force:true}); }
+});
+
+test('concurrent migration runners serialize through the advisory lock', {skip:!process.env.TEST_DATABASE_URL}, async()=>{
+  const {Pool}=require('pg'); const pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,max:8}); const dir=await makeTempMigrations({'013_concurrent.sql':'CREATE TABLE concurrent_probe(id integer PRIMARY KEY);'});
+  try { const results=await Promise.all([runSafeMigrations({pool,migrationsDir:dir,actor:'a'}),runSafeMigrations({pool,migrationsDir:dir,actor:'b'})]); assert.equal(results.filter((r)=>r.applied.length===1).length,1); const rows=await pool.query("SELECT count(*)::int AS count FROM forge_schema_migrations WHERE version='013_concurrent.sql'"); assert.equal(rows.rows[0].count,1); }
+  finally { await pool.end(); await fs.rm(dir,{recursive:true,force:true}); }
+});
+
+test('postgres release safety integration uses a production-like 012 baseline fixture', {skip:!process.env.TEST_DATABASE_URL}, async()=>{
+  const {Pool}=require('pg'); const pool=new Pool({connectionString:process.env.TEST_DATABASE_URL,max:8});
   try {
-    await runSafeMigrations({ pool, migrationsDir, actor:'release-safety-test' });
-    const service = new ReleaseSafetyService({ pool, migrationsDir });
-    const manifest = { releaseId:'test-release-a', commitSha:'test', appVersion:'1.0.0', schemaVersion:'013', minSchemaVersion:'013', maxSchemaVersion:'013', requiredIndexes:['forge_release_manifests_status_idx'] };
-    await service.saveManifest(manifest, 'test');
-    const approval = await service.approve('test-release-a','test',{reason:'integration-test'});
-    assert.equal(approval.decision, 'APPROVED');
-    await service.activate('test-release-a','test');
-    const oldWorker = await service.workerAdmission({ workerId:'stale-worker', releaseId:'old-release', appVersion:'0.9.0', schemaVersion:'012' });
-    assert.equal(oldWorker.allowed, false);
-    const currentWorker = await service.workerAdmission({ workerId:'current-worker', releaseId:'test-release-a', appVersion:'1.0.0', schemaVersion:'013' });
-    assert.equal(currentWorker.allowed, true);
-    const flagError = await service.setFlag('unsafe_flag', { enabled:true, rolloutPercent:10, safeForRollback:false }, 'test').then(()=>null, e=>e);
-    assert.equal(flagError.code, 'UNSAFE_FLAG_ROLLOUT');
-    const post = await service.postDeploy('test-release-a');
-    assert.equal(post.ok, true);
-    const snapshots = await pool.query('SELECT release_id FROM forge_schema_drift_snapshots WHERE release_id=$1',[manifest.releaseId]);
-    assert.equal(snapshots.rowCount, 1);
+    await pool.query(`CREATE TABLE IF NOT EXISTS forge_schema_migrations(version text PRIMARY KEY,checksum text NOT NULL,applied_at timestamptz NOT NULL DEFAULT now(),applied_by text NOT NULL DEFAULT 'fixture',status text NOT NULL DEFAULT 'APPLIED')`);
+    const historical=await fs.readdir(migrationsDir); for(const name of historical.filter((n)=>/^\d+_.*\.sql$/.test(n)&&Number(n.slice(0,3))<=12)){const raw=await fs.readFile(path.join(migrationsDir,name),'utf8'); await pool.query(`INSERT INTO forge_schema_migrations(version,checksum) VALUES($1,$2) ON CONFLICT(version) DO NOTHING`,[name,sha256(raw)]);}
+    const service=require('../src/release-safety/release-safety').ReleaseSafetyService; const releaseService=new service({pool,migrationsDir});
+    await runSafeMigrations({pool,migrationsDir,actor:'release-safety-test'});
+    const manifest={releaseId:'test-release-a',commitSha:'test',appVersion:'1.0.0',schemaVersion:'013',minSchemaVersion:'013',maxSchemaVersion:'013',requiredIndexes:['forge_release_manifests_status_idx']}; await releaseService.saveManifest(manifest,'test'); const approval=await releaseService.approve(manifest.releaseId,'test',{reason:'integration-test'}); assert.equal(approval.decision,'APPROVED'); await releaseService.activate(manifest.releaseId,'test');
+    const competing={...manifest,releaseId:'test-release-b',commitSha:'test-b'}; await releaseService.saveManifest(competing,'test'); await releaseService.approve(competing.releaseId,'test'); const competingResult=await releaseService.activate(competing.releaseId,'test').then(()=>null,e=>e); assert.equal(competingResult.code,'RELEASE_DEPLOY_IN_PROGRESS');
+    const oldWorker=await releaseService.workerAdmission({workerId:'stale-worker',releaseId:'old-release',appVersion:'0.9.0',schemaVersion:'012'}); assert.equal(oldWorker.allowed,false); const currentWorker=await releaseService.workerAdmission({workerId:'current-worker',releaseId:manifest.releaseId,appVersion:'1.0.0',schemaVersion:'013'}); assert.equal(currentWorker.allowed,true);
+    const flagError=await releaseService.setFlag('unsafe_flag',{enabled:true,rolloutPercent:10,safeForRollback:false},'test').then(()=>null,e=>e); assert.equal(flagError.code,'UNSAFE_FLAG_ROLLOUT'); const post=await releaseService.postDeploy(manifest.releaseId); assert.equal(post.ok,true); const snapshots=await pool.query('SELECT release_id FROM forge_schema_drift_snapshots WHERE release_id=$1',[manifest.releaseId]); assert.equal(snapshots.rowCount,1);
   } finally { await pool.end(); }
 });
