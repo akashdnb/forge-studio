@@ -1,0 +1,36 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { merkleRoot, canonicalize, verifyDatabaseInvariants } = require('../src/recovery/recovery-verifier');
+const { isolatedTarget } = require('../src/recovery/recovery-control');
+
+test('recovery manifest root is deterministic regardless of input order', () => {
+  const a = [{ id: 'b', hash: '2' }, { id: 'a', hash: '1' }];
+  const b = [{ id: 'a', hash: '1' }, { id: 'b', hash: '2' }];
+  assert.equal(merkleRoot(a), merkleRoot(b));
+  assert.equal(canonicalize({ b: 2, a: 1 }), '{"a":1,"b":2}');
+});
+
+test('restore target is rejected unless explicitly isolated', () => {
+  const old = process.env.FORGE_RECOVERY_TARGET_PREFIX;
+  process.env.FORGE_RECOVERY_TARGET_PREFIX = 'postgres://forge:forge@localhost:5432/forge_restore_';
+  assert.equal(isolatedTarget('postgres://forge:forge@localhost:5432/forge', 'postgres://forge:forge@localhost:5432/forge_restore_123'), true);
+  assert.equal(isolatedTarget('postgres://forge:forge@localhost:5432/forge', 'postgres://forge:forge@localhost:5432/forge'), false);
+  assert.equal(isolatedTarget('postgres://forge:forge@localhost:5432/forge', 'postgres://forge:forge@localhost:5432/production'), false);
+  if (old == null) delete process.env.FORGE_RECOVERY_TARGET_PREFIX; else process.env.FORGE_RECOVERY_TARGET_PREFIX = old;
+});
+
+test('verification fails closed on orphaned provenance and invalid running leases', async () => {
+  const queries = [];
+  const pool = { async query(sql) {
+    queries.push(sql);
+    if (sql.includes('to_regclass')) return { rows: [{ name: null }] };
+    if (sql.includes('information_schema.columns')) return { rows: [] };
+    if (sql.includes('projects WHERE tenant_id')) return { rows: [] };
+    if (sql.includes('FROM artifacts a LEFT JOIN storage_objects')) return { rows: [{ id: 'a1', episode_id: 'e1', version_id: 'v1', content_hash: 'a'.repeat(64), input_version_ids: [], storage_key: 'k', stored_hash: 'a'.repeat(64), size_bytes: 1 }] , rowCount: 1 };
+    if (sql.includes('count(*)')) return { rows: [{ value: sql.includes("status='RUNNING'") ? 1 : 0 }] };
+    return { rows: [] };
+  } };
+  const result = await verifyDatabaseInvariants(pool);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((item) => item.check === 'invalidRunningJobs'));
+});
