@@ -5,11 +5,6 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { DestinationRegistry, BoundaryDestinationAdapter, YouTubeDestinationAdapter, PublishRequest, fingerprint } = require('../src/publishing/destination-contract');
 
-function fakePool() {
-  const calls = [];
-  return { calls, async query(sql, params) { calls.push({ sql, params }); return { rows: [], rowCount: 0 }; }, async connect() { return { query: this.query.bind(this), release() {}, }; } };
-}
-
 test('destination registry exposes capabilities and never fakes an unconfigured destination', async () => {
   const registry = new DestinationRegistry();
   registry.register(new BoundaryDestinationAdapter());
@@ -55,6 +50,7 @@ test('postgres publishing invariants and concurrent idempotency', { skip: !proce
   const packageArtifactId = `publish-test-package-artifact:${suffix}`;
   const renderArtifactId = `publish-test-render-artifact:${suffix}`;
   const requestId = `publish-test-request:${suffix}`;
+  const idempotencyKey = `publish-test-idem:${suffix}`;
   try {
     const c = await pool.connect();
     try {
@@ -64,16 +60,14 @@ test('postgres publishing invariants and concurrent idempotency', { skip: !proce
       await c.query("INSERT INTO episodes(id,project_id,title,created_by,state,current_render_id,approved_render_id) VALUES($1,$2,'publish test','test','APPROVED',$3,$3)", [episodeId, projectId, renderArtifactId]);
       await c.query("INSERT INTO version_records(id,episode_id,kind,created_by) VALUES($1,$2,'render','test'),($3,$2,'package','test')", [renderVersionId, episodeId, packageVersionId]);
       await c.query("INSERT INTO artifacts(id,episode_id,kind,version_id,content_hash,media_type,created_by) VALUES($1,$2,'render',$3,$4,'video/mp4','test'),($5,$2,'package',$6,$7,'application/json','test')", [renderArtifactId, episodeId, renderVersionId, 'b'.repeat(64), packageArtifactId, packageVersionId, 'a'.repeat(64)]);
-      await c.query("INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by) VALUES($1,$2,$3,$4,'youtube','idem:$1',$5,$6,$7,$8,$9,$10,$11,'test')", [requestId, tenantId, projectId, episodeId, packageArtifactId, packageVersionId, 'a'.repeat(64), renderArtifactId, renderVersionId, 'b'.repeat(64), 'c'.repeat(64)]);
+      await c.query("INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test')", [requestId, tenantId, projectId, episodeId, idempotencyKey, packageArtifactId, packageVersionId, 'a'.repeat(64), renderArtifactId, renderVersionId, 'b'.repeat(64), 'c'.repeat(64)]);
       await c.query('COMMIT');
     } finally { c.release(); }
-
     const [first, second] = await Promise.all([
       pool.query("INSERT INTO publish_attempts(id,request_id,attempt_no,status,operation_key,provider_request_key) VALUES($1,$2,1,'UPLOADING',$3,$4) ON CONFLICT(request_id,attempt_no) DO NOTHING", [`a:${suffix}`, requestId, `op:${suffix}`, `provider:${suffix}`]),
       pool.query("INSERT INTO publish_attempts(id,request_id,attempt_no,status,operation_key,provider_request_key) VALUES($1,$2,1,'UPLOADING',$3,$4) ON CONFLICT(request_id,attempt_no) DO NOTHING", [`b:${suffix}`, requestId, `op:${suffix}`, `provider:${suffix}`]),
     ]);
     assert.equal(first.rowCount + second.rowCount, 1);
-
     const duplicate = await pool.query("INSERT INTO publish_receipts(id,tenant_id,project_id,request_id,destination,external_id,package_hash,receipt_state) VALUES($1,$2,$3,$4,'youtube',$5,$6,'PUBLISHED')", [`receipt:${suffix}`, tenantId, projectId, requestId, `external:${suffix}`, 'a'.repeat(64)]);
     assert.equal(duplicate.rowCount, 1);
   } finally {
