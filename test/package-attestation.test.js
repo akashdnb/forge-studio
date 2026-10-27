@@ -18,7 +18,7 @@ test('attestation signatures verify and fail closed after payload mutation', () 
   const secret = 'test-only-signing-secret';
   const attestation = buildAttestation({ inputs: { source: ['v1'], toolchain: toolchainFingerprint({ ffmpeg: 'ffmpeg 7.0' }) }, packageManifestHash: 'a'.repeat(64), packageArtifactHash: 'b'.repeat(64) }, secret);
   assert.equal(verifyAttestationSignature(attestation, secret), true);
-  const mutated = { ...attestation, inputs: { source: ['v2'], toolchain: attestation.inputs.toolchain } };
+  const mutated = { ...attestation, payload: { ...attestation.payload, inputs: { source: ['v2'], toolchain: attestation.inputs.toolchain } } };
   assert.equal(verifyAttestationSignature(mutated, secret), false);
 });
 
