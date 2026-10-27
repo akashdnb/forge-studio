@@ -1,3 +1,4 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 BEGIN;
 CREATE TABLE IF NOT EXISTS forge_event_schema_families(id text PRIMARY KEY,tenant_id text REFERENCES tenants(id) ON DELETE RESTRICT,event_family text NOT NULL,compatibility_mode text NOT NULL DEFAULT 'BACKWARD' CHECK(compatibility_mode IN('BACKWARD','FORWARD','FULL','NONE')),unknown_field_policy text NOT NULL DEFAULT 'REJECT' CHECK(unknown_field_policy IN('REJECT','ALLOW')),producer_owner text NOT NULL,description text,created_by text NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS forge_event_schema_family_scope_uq ON forge_event_schema_families(coalesce(tenant_id,'__GLOBAL__'),event_family);
