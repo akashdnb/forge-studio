@@ -1,5 +1,7 @@
 const { authenticate, applySecurityHeaders, safeError, hasRole } = require('../security/http-security');
 const { randomUUID } = require('node:crypto');
+require('../attestation/http');
+const { installAttestationHttp } = require('../attestation/http');
 
 function json(response, status, body, requestId) {
   applySecurityHeaders(response);
@@ -19,6 +21,7 @@ function readJson(request) {
 }
 
 function installProvenanceHttp(extended) {
+  installAttestationHttp(extended);
   const original = extended.createExtendedApiServer;
   extended.createExtendedApiServer = function createExtendedApiServerWithProvenance(options = {}) {
     const result = original(options);
