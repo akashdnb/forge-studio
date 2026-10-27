@@ -2,4 +2,5 @@
 const extended=require('../extended-http-api');
 require('./http').installWorkflowTemplateHttp(extended);
 require('./approval-http').installWorkflowTemplateApprovalHttp(extended);
+require('./queued-migration-http').installWorkflowTemplateQueuedMigrationHttp(extended);
 require('./metrics-hook').installWorkflowTemplateMetrics();
