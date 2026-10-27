@@ -21,6 +21,7 @@ on:
       FORGE_WHISPER_COMMAND: { required: false }
       FORGE_WHISPER_MODEL: { required: false }
       FORGE_WHISPER_ARGS: { required: false }
+      FORGE_ATTESTATION_SIGNING_SECRET: { required: false }
 permissions: { contents: read }
 concurrency: { group: forge-${{ inputs.worker_type }}-${{ inputs.job_id }}, cancel-in-progress: false }
 jobs:
@@ -40,6 +41,7 @@ jobs:
       FORGE_WHISPER_COMMAND: ${{ secrets.FORGE_WHISPER_COMMAND }}
       FORGE_WHISPER_MODEL: ${{ secrets.FORGE_WHISPER_MODEL }}
       FORGE_WHISPER_ARGS: ${{ secrets.FORGE_WHISPER_ARGS }}
+      FORGE_ATTESTATION_SIGNING_SECRET: ${{ secrets.FORGE_ATTESTATION_SIGNING_SECRET }}
       FORGE_STORAGE_S3_FORCE_PATH_STYLE: ${{ vars.FORGE_STORAGE_S3_FORCE_PATH_STYLE || 'false' }}
       FORGE_QA_TIMEOUT_MS: ${{ vars.FORGE_QA_TIMEOUT_MS || '600000' }}
       FORGE_QA_MAX_BYTES: ${{ vars.FORGE_QA_MAX_BYTES || '5368709120' }}
