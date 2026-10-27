@@ -1,11 +1,10 @@
 BEGIN;
 
 CREATE OR REPLACE FUNCTION forge_artifact_event_trigger() RETURNS trigger AS $$
-DECLARE project_id text; tenant_id text;
+DECLARE project_id text;
 BEGIN
   SELECT e.project_id INTO project_id FROM episodes e WHERE e.id=NEW.episode_id;
   IF project_id IS NULL THEN RETURN NEW; END IF;
-  SELECT p.tenant_id INTO tenant_id FROM projects p WHERE p.id=project_id;
   PERFORM forge_capture_event('artifact.created',project_id,NEW.episode_id,'artifact',NEW.id,jsonb_build_object('artifactId',NEW.id,'episodeId',NEW.episode_id,'kind',NEW.kind,'versionId',NEW.version_id,'contentHash',NEW.content_hash),NEW.provider_run_id,NULL,NULL,NULL);
   RETURN NEW;
 END;
@@ -15,6 +14,7 @@ CREATE TRIGGER forge_artifact_event_capture AFTER INSERT ON artifacts FOR EACH R
 
 CREATE OR REPLACE FUNCTION forge_incident_event_trigger() RETURNS trigger AS $$
 BEGIN
+  IF NEW.project_id IS NULL THEN RETURN NEW; END IF;
   PERFORM forge_capture_event('incident.state.changed',NEW.project_id,(
     SELECT e.id FROM episodes e WHERE e.project_id=NEW.project_id ORDER BY e.updated_at DESC LIMIT 1
   ),'incident',NEW.id,jsonb_build_object('incidentId',NEW.id,'tenantId',NEW.tenant_id,'status',NEW.status,'severity',NEW.severity,'ruleKey',NEW.rule_key,'sourceType',NEW.source_type,'sourceId',NEW.source_id),NULL,NULL,NULL,NULL);
