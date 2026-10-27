@@ -26,14 +26,9 @@ CREATE TABLE IF NOT EXISTS forge_crypto_key_epochs (
   CHECK (length(wrap_nonce) = 12),
   CHECK (length(wrap_auth_tag) = 16)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS forge_crypto_active_epoch_uq
-  ON forge_crypto_key_epochs(tenant_id, project_id, purpose)
-  WHERE status='ACTIVE';
-CREATE INDEX IF NOT EXISTS forge_crypto_epoch_lookup_idx
-  ON forge_crypto_key_epochs(tenant_id, project_id, purpose, epoch DESC);
-CREATE INDEX IF NOT EXISTS forge_crypto_status_idx
-  ON forge_crypto_key_epochs(status, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS forge_crypto_active_epoch_uq ON forge_crypto_key_epochs(tenant_id, project_id, purpose) WHERE status='ACTIVE';
+CREATE INDEX IF NOT EXISTS forge_crypto_epoch_lookup_idx ON forge_crypto_key_epochs(tenant_id, project_id, purpose, epoch DESC);
+CREATE INDEX IF NOT EXISTS forge_crypto_status_idx ON forge_crypto_key_epochs(status, updated_at);
 
 CREATE TABLE IF NOT EXISTS forge_crypto_key_audit (
   id bigserial PRIMARY KEY,
@@ -46,8 +41,7 @@ CREATE TABLE IF NOT EXISTS forge_crypto_key_audit (
   details jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS forge_crypto_key_audit_scope_idx
-  ON forge_crypto_key_audit(tenant_id, project_id, purpose, created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_crypto_key_audit_scope_idx ON forge_crypto_key_audit(tenant_id, project_id, purpose, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS forge_crypto_reencryption_jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -75,10 +69,13 @@ CREATE TABLE IF NOT EXISTS forge_crypto_reencryption_jobs (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, project_id, purpose, source_epoch, target_epoch, target_type, status)
 );
-CREATE INDEX IF NOT EXISTS forge_crypto_reencrypt_claim_idx
-  ON forge_crypto_reencryption_jobs(status, next_attempt_at, locked_until);
-CREATE INDEX IF NOT EXISTS forge_crypto_reencrypt_scope_idx
-  ON forge_crypto_reencryption_jobs(tenant_id, project_id, purpose, created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_crypto_reencrypt_claim_idx ON forge_crypto_reencryption_jobs(status, next_attempt_at, locked_until);
+CREATE INDEX IF NOT EXISTS forge_crypto_reencrypt_scope_idx ON forge_crypto_reencryption_jobs(tenant_id, project_id, purpose, created_at DESC);
+
+ALTER TABLE forge_provider_credentials ADD COLUMN IF NOT EXISTS key_epoch bigint;
+ALTER TABLE runtime_secrets ADD COLUMN IF NOT EXISTS key_epoch bigint;
+CREATE INDEX IF NOT EXISTS forge_provider_credentials_key_epoch_idx ON forge_provider_credentials(tenant_id, project_id, key_id, key_epoch);
+CREATE INDEX IF NOT EXISTS runtime_secrets_key_epoch_idx ON runtime_secrets(tenant_id, project_id, provider, key_id, key_epoch);
 
 CREATE OR REPLACE FUNCTION forge_crypto_epoch_immutable_guard() RETURNS trigger AS $$
 BEGIN
@@ -92,7 +89,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS forge_crypto_epoch_immutable ON forge_crypto_key_epochs;
-CREATE TRIGGER forge_crypto_epoch_immutable BEFORE UPDATE ON forge_crypto_key_epochs
-FOR EACH ROW EXECUTE FUNCTION forge_crypto_epoch_immutable_guard();
+CREATE TRIGGER forge_crypto_epoch_immutable BEFORE UPDATE ON forge_crypto_key_epochs FOR EACH ROW EXECUTE FUNCTION forge_crypto_epoch_immutable_guard();
 
 COMMIT;
