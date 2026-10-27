@@ -15,9 +15,10 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
   async createBackup(options = {}) {
     const result = await super.createBackup(options);
     if (result.dryRun) return result;
+    const snapshotRow = await this.pool.query('SELECT snapshot_at FROM forge_backup_records WHERE id=$1', [result.id]);
     const generation = await allocateGeneration(this.pool, options.tenantId);
     const cover = await coverage(this.pool);
-    const rpoSeconds = await rpo(this.pool, result.snapshotAt || new Date().toISOString());
+    const rpoSeconds = await rpo(this.pool, snapshotRow.rows[0]?.snapshot_at || new Date().toISOString());
     const keyVersion = process.env.FORGE_BACKUP_ENCRYPTION_KEY_ID || 'default';
     await this.pool.query(`UPDATE forge_backup_records SET backup_generation=$2,coverage_status=$3,dependency_complete=$4,encryption_algorithm=$5,key_version=$6,last_known_good=true,rpo_seconds=$7 WHERE id=$1`, [result.id, generation, cover.status, cover.dependencyComplete, 'AES-256-GCM', keyVersion, rpoSeconds]);
     await this.pool.query(`UPDATE forge_backup_records SET last_known_good=false WHERE tenant_id=$1 AND id<>$2 AND status='SUCCEEDED'`, [options.tenantId, result.id]);
