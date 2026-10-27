@@ -32,8 +32,9 @@ BEGIN
   SELECT eps.runner_manifest INTO v_stage_manifest FROM forge_execution_plan_stages eps WHERE eps.plan_id=v_plan_id AND eps.id=v_stage_id;
   NEW.execution_plan_id:=v_plan_id; NEW.plan_stage_id:=v_stage_id; NEW.template_version_id:=NULLIF(NEW.payload->>'templateVersionId','');
   IF v_stage_manifest IS NOT NULL AND v_stage_manifest<>'{}'::jsonb THEN NEW.payload:=jsonb_set(NEW.payload,'{publicRunner}',v_stage_manifest,true); END IF;
+  IF NEW.status='RUNNING' THEN UPDATE forge_execution_plan_stages SET status='RUNNING',updated_at=now() WHERE plan_id=v_plan_id AND id=v_stage_id AND status='QUEUED'; END IF;
   RETURN NEW;
 END; $$;
 DROP TRIGGER IF EXISTS forge_execution_plan_job_metadata ON forge_jobs;
-CREATE TRIGGER forge_execution_plan_job_metadata BEFORE INSERT OR UPDATE OF payload ON forge_jobs FOR EACH ROW EXECUTE FUNCTION forge_apply_execution_plan_job_metadata();
+CREATE TRIGGER forge_execution_plan_job_metadata BEFORE INSERT OR UPDATE OF payload,status ON forge_jobs FOR EACH ROW EXECUTE FUNCTION forge_apply_execution_plan_job_metadata();
 COMMIT;
