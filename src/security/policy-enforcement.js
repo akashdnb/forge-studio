@@ -1,0 +1,102 @@
+'use strict';
+
+const { redactForAudit } = require('./secret-boundary');
+
+const ROLE_RANK = Object.freeze({ VIEWER: 1, EDITOR: 2, OWNER: 3 });
+const DEFAULT_POLICY = Object.freeze({
+  version: 1,
+  defaultRole: 'VIEWER',
+  operations: {
+    read: 'VIEWER', write: 'EDITOR', workflow: 'EDITOR', approval: 'OWNER', publish: 'OWNER', credentials: 'OWNER', operator: 'OWNER', export: 'OWNER', diagnostics: 'OWNER', webhook_manage: 'OWNER', artifact_delete: 'OWNER', recovery: 'OWNER'
+  },
+  capabilityAudiences: ['provider-adapter', 'internal-runner'],
+});
+
+function requiredRole(action, policy = DEFAULT_POLICY) { return policy.operations?.[action] || DEFAULT_POLICY.operations[action] || 'OWNER'; }
+function hasRole(auth, required) { return Boolean(auth?.roles?.some((role) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[required] || 99))); }
+function inferAction(method, pathname) {
+  if (/^\/internal\//.test(pathname) || /operator|diagnostic|recovery|override/.test(pathname)) return 'operator';
+  if (/credentials|provider-credentials/.test(pathname)) return 'credentials';
+  if (/webhooks?/.test(pathname) && method !== 'POST') return 'webhook_manage';
+  if (/publish|shorts\/handoff/.test(pathname)) return 'publish';
+  if (/approvals|transitions/.test(pathname)) return 'approval';
+  if (/export|backup|restore/.test(pathname)) return 'export';
+  if (/artifact/.test(pathname) && method === 'DELETE') return 'artifact_delete';
+  if (method === 'GET' || method === 'HEAD') return 'read';
+  if (/workflow|research|timeline|qa|render|provider-runs|episodes|versions|artifacts/.test(pathname)) return 'workflow';
+  return 'write';
+}
+
+class SecurityPolicyService {
+  constructor({ pool, logger = console, metrics = null } = {}) {
+    if (!pool || typeof pool.query !== 'function') throw new TypeError('pool is required');
+    this.pool = pool; this.logger = logger; this.metrics = metrics || { inc() {} };
+  }
+
+  async latestPolicy(tenantId) {
+    if (!tenantId) throw Object.assign(new Error('tenant scope is required'), { code: 'TENANT_SCOPE_REQUIRED', statusCode: 403 });
+    const row = (await this.pool.query('SELECT version,policy FROM security_policy_versions WHERE tenant_id=$1 ORDER BY version DESC LIMIT 1', [tenantId])).rows[0];
+    if (!row) throw Object.assign(new Error('security policy is not configured'), { code: 'SECURITY_POLICY_MISSING', statusCode: 503 });
+    return { version: Number(row.version), ...(row.policy || {}) };
+  }
+
+  async projectTenant(projectId) {
+    if (!projectId) return null;
+    return (await this.pool.query('SELECT id,tenant_id,created_by FROM projects WHERE id=$1', [projectId])).rows[0] || null;
+  }
+
+  async resolveResource({ resourceType, resourceId }) {
+    if (!resourceType || !resourceId) return null;
+    const queries = {
+      project: ['SELECT id AS resource_id,id AS project_id,tenant_id FROM projects WHERE id=$1', [resourceId]],
+      episode: ['SELECT e.id AS resource_id,e.project_id,p.tenant_id FROM episodes e JOIN projects p ON p.id=e.project_id WHERE e.id=$1', [resourceId]],
+      artifact: ['SELECT a.id AS resource_id,e.project_id,p.tenant_id FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE a.id=$1', [resourceId]],
+      provider_run: ['SELECT r.id AS resource_id,e.project_id,p.tenant_id FROM provider_runs r JOIN episodes e ON e.id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE r.id=$1', [resourceId]],
+      job: ['SELECT j.id AS resource_id,COALESCE(j.project_id,e.project_id) project_id,p.tenant_id FROM forge_jobs j LEFT JOIN episodes e ON e.id=j.episode_id JOIN projects p ON p.id=COALESCE(j.project_id,e.project_id) WHERE j.id=$1', [resourceId]],
+      execution: ['SELECT x.id AS resource_id,j.project_id,p.tenant_id FROM forge_execution_runs x JOIN forge_jobs j ON j.id=x.job_id JOIN projects p ON p.id=j.project_id WHERE x.id=$1', [resourceId]],
+    };
+    const query = queries[resourceType]; if (!query) return null;
+    return (await this.pool.query(query[0], query[1])).rows[0] || null;
+  }
+
+  async authorize({ auth, action, projectId = null, resourceType = null, resourceId = null, requestId = null, method = 'GET', pathname = '/' } = {}) {
+    const tenantId = auth?.tenantId;
+    const policy = await this.latestPolicy(tenantId);
+    const required = requiredRole(action || inferAction(method, pathname), policy);
+    let resolvedProjectId = projectId;
+    let resource = null;
+    if (resourceType && resourceId) {
+      resource = await this.resolveResource({ resourceType, resourceId });
+      if (!resource) return this.#deny({ tenantId, projectId: projectId || null, auth, action, requestId, resourceType, resourceId, reason: 'RESOURCE_NOT_FOUND' });
+      if (resource.tenant_id !== tenantId) return this.#deny({ tenantId, projectId: resource.project_id, auth, action, requestId, resourceType, resourceId, reason: 'TENANT_MISMATCH' });
+      resolvedProjectId = resource.project_id || resolvedProjectId;
+    }
+    if (resolvedProjectId) {
+      const project = await this.projectTenant(resolvedProjectId);
+      if (!project || project.tenant_id !== tenantId) return this.#deny({ tenantId, projectId: resolvedProjectId, auth, action, requestId, resourceType, resourceId, reason: 'PROJECT_TENANT_MISMATCH' });
+      const membership = (await this.pool.query('SELECT role FROM project_members WHERE project_id=$1 AND actor_id=$2 AND tenant_id=$3', [resolvedProjectId, auth.actor, tenantId])).rows[0];
+      const role = membership?.role || (project.created_by === auth.actor ? 'OWNER' : null);
+      if (!role || !hasRole({ roles: [role] }, required)) return this.#deny({ tenantId, projectId: resolvedProjectId, auth, action, requestId, resourceType, resourceId, reason: 'ROLE_DENIED' });
+    } else if (!hasRole(auth, required)) return this.#deny({ tenantId, projectId: null, auth, action, requestId, resourceType, resourceId, reason: 'ROLE_DENIED' });
+    await this.#record({ tenantId, projectId: resolvedProjectId, auth, action, requestId, resourceType, resourceId, outcome: 'ALLOWED', reason: 'POLICY_ALLOW', policyVersion: policy.version });
+    this.metrics.inc('forge_security_policy_decisions_total', { outcome: 'allowed', action: action || 'unknown' });
+    return { allowed: true, policyVersion: policy.version, projectId: resolvedProjectId, resource };
+  }
+
+  async #deny(event) {
+    await this.#record({ ...event, outcome: 'DENIED' }).catch(() => {});
+    this.metrics.inc('forge_security_policy_decisions_total', { outcome: 'denied', action: event.action || 'unknown' });
+    throw Object.assign(new Error('Access denied by security policy'), { code: 'POLICY_DENIED', statusCode: 403 });
+  }
+
+  async #record({ tenantId, projectId, auth, action, requestId, resourceType, resourceId, outcome, reason, policyVersion = null }) {
+    await this.pool.query(`INSERT INTO security_policy_decisions(tenant_id,project_id,actor,action,target_type,target_id,outcome,reason,policy_version,request_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`, [tenantId || null, projectId || null, auth?.actor || 'unknown', action || 'unknown', resourceType || 'route', resourceId || null, outcome, reason, policyVersion, requestId || null, JSON.stringify(redactForAudit({ role: auth?.roles, authKind: auth?.kind }))]);
+  }
+
+  async health() {
+    const rows = (await this.pool.query(`SELECT tenant_id,max(version)::bigint AS policy_version,count(*)::bigint AS versions FROM security_policy_versions GROUP BY tenant_id ORDER BY tenant_id LIMIT 100`)).rows;
+    return { status: 'ok', tenantPolicies: rows.length, policies: rows };
+  }
+}
+
+module.exports = { ROLE_RANK, DEFAULT_POLICY, SecurityPolicyService, requiredRole, inferAction, hasRole };
