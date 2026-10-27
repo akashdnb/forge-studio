@@ -1,0 +1,33 @@
+name: Forge Production Acceptance
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge_acceptance
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge_acceptance"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run acceptance
+        env:
+          DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
+          FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}
+          FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-acceptance
