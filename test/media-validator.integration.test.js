@@ -7,8 +7,11 @@ const { spawnSync } = require('node:child_process');
 const { compileDeliveryProfile } = require('../src/publishing/delivery-profiles');
 const { validateMp4 } = require('../src/packaging/media-validator');
 
+const ffmpegPath = process.env.FORGE_FFMPEG_COMMAND || require('ffmpeg-static');
+const ffprobePath = process.env.FORGE_FFPROBE_COMMAND || require('@ffprobe-installer/ffprobe').path;
+
 function ffmpeg(args) {
-  const result = spawnSync(process.env.FORGE_FFMPEG_COMMAND || 'ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args], { encoding: 'utf8' });
+  const result = spawnSync(ffmpegPath, ['-hide_banner', '-loglevel', 'error', ...args], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 }
 
@@ -24,7 +27,7 @@ test('validates a real downloadable MP4 for ffprobe metadata and full decode', a
       '-c:v', 'libx264', '-profile:v', 'high', '-level:v', '4.2', '-pix_fmt', 'yuv420p', '-r', '30',
       '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-y', output,
     ]);
-    const result = await validateMp4({ file: output, profile });
+    const result = await validateMp4({ file: output, profile, ffmpegPath, ffprobePath });
     assert.equal(result.video.codec, 'h264');
     assert.equal(result.video.width, 1920);
     assert.equal(result.video.height, 1080);
@@ -44,7 +47,7 @@ test('rejects a non-media artifact before it can be published', async () => {
   try {
     await fs.writeFile(output, Buffer.from('not an mp4'));
     const profile = compileDeliveryProfile('downloadable_mp4', { title: 'fixture' });
-    await assert.rejects(() => validateMp4({ file: output, profile }), (error) => error.code === 'MEDIA_VALIDATION_FAILED');
+    await assert.rejects(() => validateMp4({ file: output, profile, ffmpegPath, ffprobePath }), (error) => error.code === 'MEDIA_VALIDATION_FAILED');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
