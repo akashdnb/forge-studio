@@ -1,0 +1,10 @@
+BEGIN;
+ALTER TABLE forge_release_plans ADD CONSTRAINT forge_release_plans_candidate_fk FOREIGN KEY (candidate_id) REFERENCES forge_release_candidates(candidate_id) ON DELETE RESTRICT;
+CREATE OR REPLACE FUNCTION forge_release_append_only_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Release evidence is append-only' USING ERRCODE='P0001'; END; $$;
+DROP TRIGGER IF EXISTS forge_release_approval_append_only ON forge_release_progressive_approvals;
+CREATE TRIGGER forge_release_approval_append_only BEFORE UPDATE OR DELETE ON forge_release_progressive_approvals FOR EACH ROW EXECUTE FUNCTION forge_release_append_only_guard();
+DROP TRIGGER IF EXISTS forge_release_health_append_only ON forge_release_health_samples;
+CREATE TRIGGER forge_release_health_append_only BEFORE UPDATE OR DELETE ON forge_release_health_samples FOR EACH ROW EXECUTE FUNCTION forge_release_append_only_guard();
+DROP TRIGGER IF EXISTS forge_release_event_append_only ON forge_release_events;
+CREATE TRIGGER forge_release_event_append_only BEFORE UPDATE OR DELETE ON forge_release_events FOR EACH ROW EXECUTE FUNCTION forge_release_append_only_guard();
+COMMIT;
