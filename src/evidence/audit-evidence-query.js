@@ -24,7 +24,7 @@ class AuditEvidenceQueryService {
     this.logger = logger;
   }
 
-  async search({ tenantId, projectId = null, actor = null, serviceIdentity = null, eventClass = null, sourceTable = null, operation = null, targetType = null, targetId = null, requestId = null, correlationId = null, causationId = null, eventId = null, from = null, to = null, includeArchived = false, privileged = false, limit = 100, cursor = null } = {}) {
+  async search({ tenantId, requestActor = null, projectId = null, actor = null, serviceIdentity = null, eventClass = null, sourceTable = null, operation = null, targetType = null, targetId = null, requestId = null, correlationId = null, causationId = null, eventId = null, from = null, to = null, includeArchived = false, privileged = false, limit = 100, cursor = null } = {}) {
     if (!tenantId) throw Object.assign(new Error('tenantId is required'), { code: 'TENANT_REQUIRED', statusCode: 403 });
     const size = boundedInteger(limit, 100, 1, MAX_LIMIT);
     const decoded = decodeCursor(cursor);
@@ -45,6 +45,11 @@ class AuditEvidenceQueryService {
     if (eventId) add('e.event_id = ?', eventId);
     if (from) add('e.occurred_at >= ?', from);
     if (to) add('e.occurred_at < ?', to);
+    if (!privileged && requestActor) {
+      values.push(requestActor);
+      const actorParam = values.length;
+      where.push(`(e.project_id IS NULL OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=e.project_id AND pm.actor_id=$${actorParam}) OR EXISTS (SELECT 1 FROM projects pp WHERE pp.id=e.project_id AND pp.tenant_id=e.tenant_id AND pp.created_by=$${actorParam}))`);
+    }
     if (!includeArchived) where.push("e.retention_state NOT IN ('ARCHIVED','EXPIRED','QUARANTINED')");
     where.push("NOT EXISTS (SELECT 1 FROM privacy_retention_items ri WHERE ri.tenant_id=e.tenant_id AND ri.resource_type='audit_evidence' AND ri.resource_id=e.event_id AND ri.state IN ('ELIGIBLE','APPROVED','DESTROYED') AND ri.eligible_at <= now())");
     where.push("NOT EXISTS (SELECT 1 FROM privacy_quarantine pq WHERE pq.tenant_id=e.tenant_id AND pq.resource_type='audit_evidence' AND pq.resource_id=e.event_id AND pq.state='PURGED')");
@@ -75,9 +80,9 @@ class AuditEvidenceQueryService {
     return item;
   }
 
-  async inspect({ tenantId, eventId, privileged = false } = {}) {
+  async inspect({ tenantId, requestActor = null, eventId, privileged = false } = {}) {
     if (!tenantId || !eventId) throw Object.assign(new Error('tenantId and eventId are required'), { code: 'INVALID_REQUEST', statusCode: 400 });
-    const result = await this.search({ tenantId, eventId, privileged, limit: 1, includeArchived: false });
+    const result = await this.search({ tenantId, requestActor, eventId, privileged, limit: 1, includeArchived: false });
     return result.items[0] || null;
   }
 
@@ -131,7 +136,7 @@ class AuditEvidenceQueryService {
   }
 
   async controlledExport({ tenantId, actor, privileged = false, projectId = null, from = null, to = null, limit = 5000 } = {}) {
-    const result = await this.search({ tenantId, projectId, from, to, privileged, includeArchived: false, limit: Math.min(limit, 500) });
+    const result = await this.search({ tenantId, requestActor: actor, projectId, from, to, privileged, includeArchived: false, limit: Math.min(limit, 500) });
     const body = result.items.map((row) => JSON.stringify(row)).join('\n') + (result.items.length ? '\n' : '');
     const exportHash = sha256(body);
     await this.pool.query('INSERT INTO evidence_export_audit(tenant_id,project_id,actor,privileged,from_seq,to_seq,event_count,export_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [tenantId, projectId, actor || 'system', privileged, result.items[0]?.ledger_seq || null, result.items.at(-1)?.ledger_seq || null, result.items.length, exportHash]);
