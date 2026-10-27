@@ -8,8 +8,8 @@ const {
   isPrivateIp,
   signOutbound,
   verifyOutboundSignature,
-  requestPinned,
 } = require('../src/events/outbound-webhook-reliability');
+const { requestPinned } = require('../src/events/outbound-webhook-http');
 
 test('outbound response semantics do not follow redirects', () => {
   assert.equal(classifyOutboundResponse(200).status, 'SUCCEEDED');
