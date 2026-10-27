@@ -1,5 +1,7 @@
 BEGIN;
 
+ALTER TABLE episode_packages ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 CREATE TABLE IF NOT EXISTS forge_release_calendar_controls (
   id bigserial PRIMARY KEY,
   tenant_id text NOT NULL,
@@ -124,15 +126,13 @@ INSERT INTO forge_release_state(id) VALUES(true) ON CONFLICT(id) DO NOTHING;
 CREATE OR REPLACE FUNCTION forge_fill_scheduled_publish_package() RETURNS trigger AS $$
 BEGIN
   IF COALESCE((NEW.metadata->>'scheduledRelease')::boolean, false) AND NEW.package_artifact_id IS NULL THEN
-    SELECT ep.id, ep.version_id
-      INTO NEW.package_artifact_id, NEW.package_version_id
+    SELECT ep.id, ep.version_id INTO NEW.package_artifact_id, NEW.package_version_id
       FROM episode_packages ep
      WHERE ep.episode_id = NEW.episode_id
        AND ep.final_media_artifact_id = NEW.render_artifact_id
        AND ep.final_media_version_id = NEW.render_version_id
        AND ep.status = 'READY'
-     ORDER BY ep.created_at DESC
-     LIMIT 1;
+     ORDER BY ep.created_at DESC LIMIT 1;
   END IF;
   RETURN NEW;
 END;
