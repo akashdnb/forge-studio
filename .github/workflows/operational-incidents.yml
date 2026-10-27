@@ -6,7 +6,7 @@ on:
       - 'src/incidents/**'
       - 'src/runtime/worker-entry.js'
       - 'src/versioned-server.js'
-      - 'migrations/022_operational_incidents.sql'
+      - 'migrations/023_operational_incidents.sql'
       - 'test/operational-incidents.integration.test.js'
       - 'docs/OPERATIONAL_INCIDENTS.md'
 
