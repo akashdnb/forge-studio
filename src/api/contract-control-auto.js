@@ -1,0 +1,1 @@
+const{installApiContractControls}=require('./contract-control');let pool=null;if(process.env.DATABASE_URL){try{const{Pool}=require('pg');pool=new Pool({connectionString:process.env.DATABASE_URL,max:2,idleTimeoutMillis:30000,connectionTimeoutMillis:5000});}catch{}}installApiContractControls({pool});
