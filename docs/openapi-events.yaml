@@ -1,0 +1,32 @@
+openapi: 3.0.3
+info:
+  title: Forge Studio Durable Event Delivery API
+  version: 1.0.0
+paths:
+  /v1/event-schemas: { get: { summary: List event contracts, responses: { '200': { description: OK } } } }
+  /v1/event-subscriptions:
+    get: { summary: List tenant/project subscriptions, responses: { '200': { description: OK } } }
+    post:
+      summary: Create a signed webhook subscription
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SubscriptionCreate' } } } }
+      responses: { '201': { description: Created } }
+  /v1/event-subscriptions/{id}:
+    patch: { summary: Update subscription controls, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: Updated } } }
+    delete: { summary: Disable subscription, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '204': { description: Disabled } } }
+  /v1/event-deliveries: { get: { summary: Inspect deliveries, responses: { '200': { description: OK } } } }
+  /v1/event-deliveries/{id}/cancel: { post: { summary: Cancel delivery, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: Cancelled } } } }
+  /v1/event-deliveries/{id}/replay: { post: { summary: Replay with same delivery identity, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: Requeued } } } }
+  /v1/event-delivery/metrics: { get: { summary: Backlog and DLQ health, responses: { '200': { description: OK } } } }
+components:
+  schemas:
+    SubscriptionCreate:
+      type: object
+      required: [endpointUrl, secret]
+      properties:
+        projectId: { type: string, nullable: true }
+        endpointUrl: { type: string, format: uri }
+        secret: { type: string, minLength: 16, writeOnly: true }
+        eventTypes: { type: array, items: { type: string } }
+        ordered: { type: boolean }
+        rateLimitPerSecond: { type: integer, minimum: 1, maximum: 1000 }
+        maxConcurrency: { type: integer, minimum: 1, maximum: 100 }
