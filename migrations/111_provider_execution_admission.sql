@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS provider_execution_policies (
   half_open_max_calls integer NOT NULL DEFAULT 1 CHECK (half_open_max_calls > 0 AND half_open_max_calls <= 100),
   spend_limit_usd numeric(20,8) CHECK (spend_limit_usd IS NULL OR spend_limit_usd >= 0),
   epoch bigint NOT NULL CHECK (epoch > 0),
+  enabled boolean NOT NULL DEFAULT true,
   active boolean NOT NULL DEFAULT true,
   updated_by text NOT NULL,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
