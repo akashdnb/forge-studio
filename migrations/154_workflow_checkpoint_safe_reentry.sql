@@ -16,12 +16,11 @@ ALTER TABLE forge_workflow_checkpoints
   ADD COLUMN IF NOT EXISTS invalid_reason text,
   ADD COLUMN IF NOT EXISTS validated_at timestamptz,
   ADD COLUMN IF NOT EXISTS validated_by text,
-  ADD COLUMN IF NOT EXISTS validation_hash char(64);
+  ADD COLUMN IF NOT EXISTS validation_hash char(64),
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 UPDATE forge_workflow_checkpoints SET checkpoint_epoch=execution_epoch WHERE checkpoint_epoch IS NULL;
-
-ALTER TABLE forge_workflow_checkpoints
-  ALTER COLUMN checkpoint_epoch SET NOT NULL;
+ALTER TABLE forge_workflow_checkpoints ALTER COLUMN checkpoint_epoch SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS forge_workflow_checkpoints_validity_idx
   ON forge_workflow_checkpoints(tenant_id,plan_id,validity,checkpoint_version DESC);
