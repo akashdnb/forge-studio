@@ -1,0 +1,43 @@
+groups:
+  - name: forge-recovery
+    rules:
+      - alert: ForgeRecoveryBackupIntegrityFailed
+        expr: forge_recovery_backup_integrity_failed_total > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Forge recovery backup integrity failure
+          description: A recovery backup failed immutable integrity verification.
+      - alert: ForgeRecoveryCoverageIncomplete
+        expr: forge_recovery_backup_coverage_incomplete > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Forge recovery coverage is incomplete
+          description: The latest recovery point is missing required control-plane dependencies.
+      - alert: ForgeRecoveryLastKnownGoodStale
+        expr: forge_recovery_last_known_good_age_seconds > 86400
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Forge last-known-good recovery point is stale
+          description: No recent verified recovery point is available within the expected interval.
+      - alert: ForgeRecoveryRestoreVerificationFailed
+        expr: forge_recovery_restore_verification_failed_total > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Forge restore drill verification failed
+          description: A restore drill detected schema, artifact, provenance, lease or invariant divergence.
+      - alert: ForgeRecoveryRtoBudgetExceeded
+        expr: forge_recovery_last_verified_rto_ms > forge_recovery_rto_budget_ms
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Forge recovery RTO budget exceeded
+          description: The most recent verified restore exceeded the configured recovery time objective.
