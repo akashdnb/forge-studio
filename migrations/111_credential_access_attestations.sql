@@ -3,7 +3,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS forge_credential_access_leases (
   id text PRIMARY KEY,
   credential_id text NOT NULL REFERENCES forge_provider_credentials(id) ON DELETE RESTRICT,
-  credential_version bigint NOT NULL CHECK (credential_version > 0),
+  credential_version bigint NOT NULL DEFAULT 1 CHECK (credential_version > 0),
   tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   purpose text NOT NULL,
@@ -25,6 +25,15 @@ CREATE TABLE IF NOT EXISTS forge_credential_access_leases (
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(tenant_id, project_id, purpose, provider, workflow_id, job_id, attempt_id)
 );
+CREATE OR REPLACE FUNCTION forge_set_credential_access_lease_version() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  SELECT version INTO NEW.credential_version FROM forge_provider_credentials WHERE id=NEW.credential_id AND tenant_id=NEW.tenant_id AND project_id IS NOT DISTINCT FROM NEW.project_id;
+  IF NEW.credential_version IS NULL THEN RAISE EXCEPTION 'credential version not found'; END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS forge_credential_access_lease_version_trg ON forge_credential_access_leases;
+CREATE TRIGGER forge_credential_access_lease_version_trg BEFORE INSERT ON forge_credential_access_leases FOR EACH ROW EXECUTE FUNCTION forge_set_credential_access_lease_version();
 CREATE INDEX IF NOT EXISTS forge_credential_access_leases_active_idx ON forge_credential_access_leases(tenant_id, project_id, state, expires_at);
 CREATE INDEX IF NOT EXISTS forge_credential_access_leases_expiry_idx ON forge_credential_access_leases(state, expires_at);
 CREATE INDEX IF NOT EXISTS forge_credential_access_leases_credential_idx ON forge_credential_access_leases(credential_id, credential_version, state, expires_at);
