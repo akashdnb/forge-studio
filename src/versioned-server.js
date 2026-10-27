@@ -9,10 +9,12 @@ const { installOperationsControlPlane } = require('./operations/control-plane');
 const { installIncidentControlPlane } = require('./incidents/http-extension');
 const { installIncidentEventSubscriptionBridge } = require('./incidents/event-subscription-bridge');
 const { installIncidentHealthEndpoint } = require('./incidents/health-extension');
+const { installReleaseDeploymentSafety } = require('./release-safety/http');
 installOperationsControlPlane();
 installIncidentControlPlane();
 installIncidentEventSubscriptionBridge();
 installIncidentHealthEndpoint();
+installReleaseDeploymentSafety();
 
 // server.js removes the initial extended-api listener and captures it as apiHandler.
 // Wrap that listener here so search routes use the verified production identity and
@@ -27,7 +29,7 @@ ProductionSearchService.prototype.reconcile = async function reconcileWithMissin
       UNION ALL SELECT e.project_id,'version',v.id FROM version_records v JOIN episodes e ON e.id=v.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
       UNION ALL SELECT e.project_id,'artifact',a.id FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
       UNION ALL SELECT coalesce(j.project_id,e.project_id),'job',j.id FROM forge_jobs j LEFT JOIN episodes e ON e.id=j.episode_id JOIN projects p ON p.id=coalesce(j.project_id,e.project_id) WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
-      UNION ALL SELECT e.project_id,'provider_run',r.id FROM provider_runs r JOIN episodes e ON e.id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'provider_run',r.id FROM provider_runs r JOIN episodes e ON e.episode_id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
       UNION ALL SELECT e.project_id,'approval',a.id::text FROM approvals a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
       UNION ALL SELECT e.project_id,'qa',q.id FROM qa_results q JOIN episodes e ON e.id=q.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
       UNION ALL SELECT e.project_id,'publish_run',r.id FROM publish_runs r JOIN episodes e ON e.id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
