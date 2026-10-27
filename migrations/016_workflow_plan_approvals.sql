@@ -16,13 +16,13 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS approvals_episode_stage_idx ON approvals(tenant_id,episode_id,stage,created_at DESC);
 CREATE OR REPLACE FUNCTION forge_apply_execution_plan_job_metadata() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE plan_id text; stage_id text; stage_manifest jsonb;
+DECLARE v_plan_id text; v_stage_id text; v_stage_manifest jsonb;
 BEGIN
-  plan_id:=NEW.payload->>'executionPlanId'; stage_id:=NEW.payload->>'planStageId';
-  IF plan_id IS NULL OR stage_id IS NULL THEN RETURN NEW; END IF;
-  SELECT runner_manifest INTO stage_manifest FROM forge_execution_plan_stages WHERE plan_id=plan_id AND id=stage_id;
-  NEW.execution_plan_id:=plan_id; NEW.plan_stage_id:=stage_id; NEW.template_version_id:=NULLIF(NEW.payload->>'templateVersionId','');
-  IF stage_manifest IS NOT NULL AND stage_manifest<>'{}'::jsonb THEN NEW.payload:=jsonb_set(NEW.payload,'{publicRunner}',stage_manifest,true); END IF;
+  v_plan_id:=NEW.payload->>'executionPlanId'; v_stage_id:=NEW.payload->>'planStageId';
+  IF v_plan_id IS NULL OR v_stage_id IS NULL THEN RETURN NEW; END IF;
+  SELECT eps.runner_manifest INTO v_stage_manifest FROM forge_execution_plan_stages eps WHERE eps.plan_id=v_plan_id AND eps.id=v_stage_id;
+  NEW.execution_plan_id:=v_plan_id; NEW.plan_stage_id:=v_stage_id; NEW.template_version_id:=NULLIF(NEW.payload->>'templateVersionId','');
+  IF v_stage_manifest IS NOT NULL AND v_stage_manifest<>'{}'::jsonb THEN NEW.payload:=jsonb_set(NEW.payload,'{publicRunner}',v_stage_manifest,true); END IF;
   RETURN NEW;
 END; $$;
 DROP TRIGGER IF EXISTS forge_execution_plan_job_metadata ON forge_jobs;
