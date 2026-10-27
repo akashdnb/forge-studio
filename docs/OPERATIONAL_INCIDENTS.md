@@ -84,12 +84,13 @@ A window can be tenant-wide (`projectId` omitted) or rule-specific (`ruleKey` om
 - `POST /v1/ops/maintenance-windows`
 - `DELETE /v1/ops/maintenance-windows/:id`
 - `GET /v1/ops/incident-metrics`
+- `GET /v1/ops/incident-health`
 
 All endpoints require the OWNER role. Incident actions require a reason of 8–1000 characters. Use an idempotency key for clients that may retry commands.
 
 ## Metrics and health
 
-The operations metrics endpoint reports active incidents by severity, notification backlog/dead-letter counts, suppressed occurrences and escalation lag. Worker observability additionally exposes `forge_incident_detection_runs_total` and `forge_incident_detection_events_total`.
+The operations metrics endpoint reports active incidents by severity, notification backlog/dead-letter counts, suppressed occurrences and escalation lag. `GET /v1/ops/incident-health` adds detection and notification latency and returns a readiness status. Worker observability additionally exposes `forge_incident_detection_runs_total` and `forge_incident_detection_events_total`.
 
 Alert on:
 
