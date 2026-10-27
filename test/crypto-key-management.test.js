@@ -15,19 +15,19 @@ test('tenant context is mandatory for scoped envelope operations', async () => {
   assert.equal(result, 'ok');
 });
 
-test('synchronous persistence cipher round-trips and authenticates tenant/project AAD', async () => {
+test('synchronous persistence cipher round-trips and authenticates tenant/project AAD', () => {
   const rootKey = crypto.randomBytes(32).toString('base64');
   const kms = new KeyManagementService({ pool: { connect() {} }, rootKey });
   const scopedKey = crypto.randomBytes(32);
-  const record = await KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => {
+  const record = KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => {
     const encrypted = kms.encryptSync('credential-material');
     assert.equal(typeof encrypted.then, 'undefined');
     return encrypted;
   });
-  await assert.rejects(
+  assert.throws(
     () => KeyManagementService.withContext({ tenantId: 'tenant-b', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record)),
     (error) => error.code === 'CIPHERTEXT_INVALID'
   );
-  const plaintext = await KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record));
+  const plaintext = KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: Buffer.from(scopedKey), epoch: 7 }, () => kms.decryptSync(record));
   assert.equal(plaintext, 'credential-material');
 });
