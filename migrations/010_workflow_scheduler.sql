@@ -1,0 +1,16 @@
+BEGIN;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS dispatch_token text;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS dispatch_generation integer NOT NULL DEFAULT 0;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS scheduled_at timestamptz;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS timeout_at timestamptz;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS last_schedule_reason text;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS blocked_reason text;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS cancellation_requested_at timestamptz;
+CREATE INDEX IF NOT EXISTS forge_jobs_scheduler_runnable_idx ON forge_jobs(status,available_at,priority,created_at,project_id,episode_id) WHERE status='QUEUED';
+CREATE INDEX IF NOT EXISTS forge_jobs_scheduler_lease_idx ON forge_jobs(status,leased_until) WHERE status='RUNNING';
+CREATE UNIQUE INDEX IF NOT EXISTS forge_jobs_active_dispatch_token_idx ON forge_jobs(dispatch_token) WHERE dispatch_token IS NOT NULL AND status='RUNNING';
+CREATE TABLE IF NOT EXISTS forge_scheduler_events(id bigserial PRIMARY KEY,job_id text REFERENCES forge_jobs(id) ON DELETE RESTRICT,event_type text NOT NULL CHECK(event_type IN ('DISPATCH_CLAIMED','DEPENDENCY_WAKE','DEPENDENCY_FAILED','LEASE_EXPIRED','CANCELLED','TIMEOUT','BACKPRESSURE','STARVATION_BOOST','DISPATCH_REJECTED')),scheduler_id text NOT NULL,details jsonb NOT NULL DEFAULT '{}'::jsonb,created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS forge_scheduler_events_job_idx ON forge_scheduler_events(job_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_scheduler_events_type_idx ON forge_scheduler_events(event_type,created_at DESC);
+CREATE TABLE IF NOT EXISTS forge_scheduler_state(scheduler_key text PRIMARY KEY,scheduler_id text NOT NULL,heartbeat_at timestamptz NOT NULL DEFAULT now(),metadata jsonb NOT NULL DEFAULT '{}'::jsonb);
+COMMIT;
