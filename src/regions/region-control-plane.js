@@ -1,8 +1,6 @@
 const { randomUUID } = require('node:crypto');
-
 const LEASE_MS = 30_000;
 const FAILOVER_MODES = new Set(['PLANNED_FAILOVER', 'EMERGENCY_FAILOVER', 'RECOVERY']);
-
 function requireOperator(auth) { const roles = new Set(auth?.roles || []); if (!auth?.actor || !(roles.has('OWNER') || roles.has('ADMIN') || roles.has('OPERATOR') || roles.has('PLATFORM_OPERATOR'))) throw Object.assign(new Error('operator role required'), { statusCode: 403, code: 'OPERATOR_REQUIRED' }); }
 async function withTransaction(pool, fn) { const client = await pool.connect(); try { await client.query('BEGIN'); const result = await fn(client); await client.query('COMMIT'); return result; } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); } }
 async function validateFailover(client, { targetRegionId, tenantIds = [], mode = 'PLANNED_FAILOVER', expectedEpoch = null }) {
@@ -11,6 +9,7 @@ async function validateFailover(client, { targetRegionId, tenantIds = [], mode =
   const region = (await client.query('SELECT * FROM forge_regions WHERE region_id=$1 FOR UPDATE', [targetRegionId])).rows[0];
   if (!region) throw Object.assign(new Error('target region is unknown'), { code: 'TARGET_REGION_UNKNOWN', statusCode: 409 });
   if (region.status !== 'READY' || region.health_score < 50) throw Object.assign(new Error('target region is not healthy enough for failover'), { code: 'TARGET_REGION_UNHEALTHY', statusCode: 409 });
+  if (region.capacity_state?.admission === 'BLOCKED' || region.capacity_state?.available === false) throw Object.assign(new Error('target region capacity admission is blocked'), { code: 'TARGET_REGION_CAPACITY_BLOCKED', statusCode: 409 });
   if (expectedEpoch != null && Number(state.routing_epoch) !== Number(expectedEpoch)) throw Object.assign(new Error('routing epoch changed concurrently'), { code: 'STALE_ROUTING_EPOCH', statusCode: 409 });
   const ids = tenantIds.length ? tenantIds : (await client.query('SELECT tenant_id FROM forge_tenant_residency_policies WHERE active_region_id=$1', [state.active_region_id])).rows.map(r => r.tenant_id);
   if (tenantIds.length) { const active = (await client.query('SELECT tenant_id FROM forge_tenant_residency_policies WHERE active_region_id=$1 AND tenant_id<>ALL($2::text[])', [state.active_region_id, tenantIds])).rows; if (active.length) throw Object.assign(new Error('partial tenant failover is unsafe while the control plane is globally fenced'), { code: 'PARTIAL_GLOBAL_FAILOVER_UNSAFE', statusCode: 409, tenants: active.map(r => r.tenant_id) }); }
@@ -19,6 +18,8 @@ async function validateFailover(client, { targetRegionId, tenantIds = [], mode =
   if (missing.length) throw Object.assign(new Error(`residency policies missing for tenants: ${missing.join(',')}`), { code: 'RESIDENCY_POLICY_MISSING', statusCode: 409, tenants: missing });
   const blocked = policies.filter(p => !((p.allowed_region_ids || []).includes(targetRegionId) || p.home_region_id === targetRegionId));
   if (blocked.length) throw Object.assign(new Error('target region is not allowed by one or more tenant residency policies'), { code: 'RESIDENCY_REGION_NOT_ALLOWED', statusCode: 409, tenants: blocked.map(p => p.tenant_id) });
+  const providerBlocked = policies.filter(p => p.provider_region_requirements && p.provider_region_requirements[targetRegionId] === false);
+  if (providerBlocked.length) throw Object.assign(new Error('provider-region requirements cannot be satisfied in the target region'), { code: 'PROVIDER_REGION_UNAVAILABLE', statusCode: 409, tenants: providerBlocked.map(p => p.tenant_id) });
   const blockedDataClasses = (await client.query("SELECT data_class FROM forge_data_movement_rules WHERE data_class IN ('CREDENTIAL_SECRET','ARTIFACT_BYTES') AND cross_region_allowed=false")).rows.map(r => r.data_class);
   return { state, region, tenantIds: ids, policies, blockedDataClasses };
 }
