@@ -35,7 +35,6 @@ if (process.env.DATABASE_URL && !http.Server.prototype.__forgeEvidenceQueryPatch
     return current.count <= Number(process.env.FORGE_EVIDENCE_RATE_LIMIT_PER_MINUTE || 60);
   };
   const evidencePath = (pathname) => pathname.startsWith('/v1/evidence/') || pathname.startsWith('/internal/evidence/');
-
   const originalEmit = http.Server.prototype.emit;
   http.Server.prototype.emit = function forgeEvidenceEmit(event, request, response) {
     if (event !== 'request' || !request || !evidencePath(new URL(request.url || '/', 'http://localhost').pathname)) return originalEmit.apply(this, arguments);
@@ -43,12 +42,7 @@ if (process.env.DATABASE_URL && !http.Server.prototype.__forgeEvidenceQueryPatch
     const url = new URL(request.url || '/', 'http://localhost');
     Promise.resolve().then(async () => {
       try {
-        const auth = authenticate(request, {
-          apiToken: process.env.API_BEARER_TOKEN || null,
-          authSecret: process.env.FORGE_AUTH_SIGNING_SECRET || null,
-          staticActor: process.env.FORGE_STATIC_ACTOR_ID || null,
-          staticTenant: process.env.FORGE_STATIC_TENANT_ID || null,
-        });
+        const auth = authenticate(request, { apiToken: process.env.API_BEARER_TOKEN || null, authSecret: process.env.FORGE_AUTH_SIGNING_SECRET || null, staticActor: process.env.FORGE_STATIC_ACTOR_ID || null, staticTenant: process.env.FORGE_STATIC_TENANT_ID || null });
         if (!auth || !auth.tenantId || !hasRole(auth, 'VIEWER')) return send(response, 403, { error: { code: 'FORBIDDEN' } }, requestId);
         const origins = new Set((process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || '').split(',').map((v) => v.trim()).filter(Boolean));
         if (!csrfAllowed(request, origins)) return send(response, 403, { error: { code: 'CSRF_BLOCKED' } }, requestId);
@@ -57,11 +51,11 @@ if (process.env.DATABASE_URL && !http.Server.prototype.__forgeEvidenceQueryPatch
         const privileged = hasRole(auth, 'OWNER');
         const p = url.pathname;
         if (p === '/v1/evidence/search' && request.method === 'GET') {
-          const item = await service.search({ tenantId: auth.tenantId, projectId: url.searchParams.get('projectId') || null, actor: url.searchParams.get('actor') || null, serviceIdentity: url.searchParams.get('serviceIdentity') || null, eventClass: url.searchParams.get('eventClass') || null, sourceTable: url.searchParams.get('sourceTable') || null, operation: url.searchParams.get('operation') || null, targetType: url.searchParams.get('targetType') || null, targetId: url.searchParams.get('targetId') || null, requestId: url.searchParams.get('requestId') || null, correlationId: url.searchParams.get('correlationId') || null, causationId: url.searchParams.get('causationId') || null, eventId: url.searchParams.get('eventId') || null, from: url.searchParams.get('from') || null, to: url.searchParams.get('to') || null, cursor: url.searchParams.get('cursor') || null, limit: boundedInteger(url.searchParams.get('limit'), 100, 1, 500), privileged });
+          const item = await service.search({ tenantId: auth.tenantId, requestActor: auth.actor, projectId: url.searchParams.get('projectId') || null, actor: url.searchParams.get('actor') || null, serviceIdentity: url.searchParams.get('serviceIdentity') || null, eventClass: url.searchParams.get('eventClass') || null, sourceTable: url.searchParams.get('sourceTable') || null, operation: url.searchParams.get('operation') || null, targetType: url.searchParams.get('targetType') || null, targetId: url.searchParams.get('targetId') || null, requestId: url.searchParams.get('requestId') || null, correlationId: url.searchParams.get('correlationId') || null, causationId: url.searchParams.get('causationId') || null, eventId: url.searchParams.get('eventId') || null, from: url.searchParams.get('from') || null, to: url.searchParams.get('to') || null, cursor: url.searchParams.get('cursor') || null, limit: boundedInteger(url.searchParams.get('limit'), 100, 1, 500), privileged });
           return send(response, 200, item, requestId);
         }
         const eventMatch = /^\/v1\/evidence\/events\/([^/]+)$/.exec(p);
-        if (eventMatch && request.method === 'GET') return send(response, 200, { item: await service.inspect({ tenantId: auth.tenantId, eventId: decodeURIComponent(eventMatch[1]), privileged }) }, requestId);
+        if (eventMatch && request.method === 'GET') return send(response, 200, { item: await service.inspect({ tenantId: auth.tenantId, requestActor: auth.actor, eventId: decodeURIComponent(eventMatch[1]), privileged }) }, requestId);
         if (p === '/v1/evidence/verify' && request.method === 'GET') {
           if (!privileged) return send(response, 403, { error: { code: 'OWNER_REQUIRED' } }, requestId);
           const result = await service.verify({ tenantId: auth.tenantId, fromSeq: url.searchParams.get('fromSeq'), toSeq: url.searchParams.get('toSeq'), fullChain: url.searchParams.get('fullChain') === 'true', maxEvents: boundedInteger(url.searchParams.get('maxEvents'), 10000, 1, 100000) });
@@ -87,11 +81,7 @@ if (process.env.DATABASE_URL && !http.Server.prototype.__forgeEvidenceQueryPatch
         }
         if (p === '/internal/evidence/metrics' && request.method === 'GET') {
           if (!privileged) return send(response, 403, { error: { code: 'OWNER_REQUIRED' } }, requestId);
-          const [ledger, head, failures] = await Promise.all([
-            service.pool.query('SELECT COUNT(*)::bigint AS count,COALESCE(MAX(ledger_seq),0)::bigint AS max_seq FROM evidence_ledger WHERE tenant_id=$1', [auth.tenantId]),
-            service.pool.query('SELECT chain_head_seq,chain_head_hash,updated_at FROM forge_evidence_chain_state WHERE id=1'),
-            service.pool.query("SELECT COUNT(*)::bigint AS count FROM evidence_integrity_runs WHERE tenant_id=$1 AND status='FAILED'", [auth.tenantId]),
-          ]);
+          const [ledger, head, failures] = await Promise.all([service.pool.query('SELECT COUNT(*)::bigint AS count,COALESCE(MAX(ledger_seq),0)::bigint AS max_seq FROM evidence_ledger WHERE tenant_id=$1', [auth.tenantId]), service.pool.query('SELECT chain_head_seq,chain_head_hash,updated_at FROM forge_evidence_chain_state WHERE id=1'), service.pool.query("SELECT COUNT(*)::bigint AS count FROM evidence_integrity_runs WHERE tenant_id=$1 AND status='FAILED'", [auth.tenantId])]);
           return send(response, 200, { metrics: { evidence_events_total: Number(ledger.rows[0].count), evidence_tenant_max_seq: Number(ledger.rows[0].max_seq), evidence_chain_head_seq: Number(head.rows[0]?.chain_head_seq || 0), evidence_chain_head_hash: head.rows[0]?.chain_head_hash || null, evidence_integrity_failures_total: Number(failures.rows[0].count) } }, requestId);
         }
         if (p === '/internal/evidence/hold-status' && request.method === 'GET') {
