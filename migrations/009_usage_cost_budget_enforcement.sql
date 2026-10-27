@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS usage_pricing (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(provider_type, provider, model, operation, config_version)
 );
-CREATE INDEX IF NOT EXISTS usage_pricing_lookup_idx
-  ON usage_pricing(provider_type, provider, model, operation, active, effective_at DESC);
+CREATE INDEX IF NOT EXISTS usage_pricing_lookup_idx ON usage_pricing(provider_type, provider, model, operation, active, effective_at DESC);
 
 CREATE TABLE IF NOT EXISTS usage_budgets (
   id bigserial PRIMARY KEY,
@@ -57,10 +56,9 @@ CREATE TABLE IF NOT EXISTS usage_reservations (
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   settled_at timestamptz,
-  UNIQUE(job_id)
+  UNIQUE(job_id, attempt)
 );
-CREATE INDEX IF NOT EXISTS usage_reservations_active_idx
-  ON usage_reservations(status, expires_at) WHERE status = 'HELD';
+CREATE INDEX IF NOT EXISTS usage_reservations_active_idx ON usage_reservations(status, expires_at) WHERE status = 'HELD';
 CREATE INDEX IF NOT EXISTS usage_reservations_episode_idx ON usage_reservations(episode_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -98,18 +96,14 @@ CREATE INDEX IF NOT EXISTS usage_events_provider_idx ON usage_events(provider, m
 CREATE INDEX IF NOT EXISTS usage_events_job_idx ON usage_events(job_id, execution_attempt);
 
 CREATE OR REPLACE FUNCTION forge_usage_events_immutable() RETURNS trigger AS $$
-BEGIN
-  RAISE EXCEPTION 'usage events are immutable';
-END;
+BEGIN RAISE EXCEPTION 'usage events are immutable'; END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS usage_events_no_update ON usage_events;
 CREATE TRIGGER usage_events_no_update BEFORE UPDATE OR DELETE ON usage_events FOR EACH ROW EXECUTE FUNCTION forge_usage_events_immutable();
 
 CREATE OR REPLACE FUNCTION forge_usage_reservation_consistency() RETURNS trigger AS $$
 BEGIN
-  IF NEW.episode_id IS NOT NULL AND NEW.project_id IS NULL THEN
-    RAISE EXCEPTION 'usage reservation with episode requires project';
-  END IF;
+  IF NEW.episode_id IS NOT NULL AND NEW.project_id IS NULL THEN RAISE EXCEPTION 'usage reservation with episode requires project'; END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
