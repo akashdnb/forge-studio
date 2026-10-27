@@ -30,14 +30,14 @@ function createArtifactRetentionHandlers({ pool, storage, observability = null, 
     if (action === 'compact') {
       const plan = (await pool.query('SELECT * FROM artifact_gc_plans WHERE id=$1 AND tenant_id=$2', [payload.planId, tenantId])).rows[0];
       if (!plan || plan.mode !== 'ENFORCE' || !plan.operator_approved) throw Object.assign(new Error('approved ENFORCE plan required'), { code: 'APPROVAL_REQUIRED' });
-      let budget = Number(plan.max_delete_bytes);
+      const duplicates = await duplicateCompactor.compact({ tenantId, maxObjects: payload.maxDuplicates || 25, maxBytes: Number(plan.max_delete_bytes) });
+      let budget = Math.max(0, Number(plan.max_delete_bytes) - Number(duplicates.bytesReclaimed || 0));
       const budgetItems = await pool.query(`SELECT object_id,size_bytes FROM artifact_gc_items WHERE plan_id=$1 AND decision='QUARANTINE' ORDER BY object_id`, [plan.id]);
       for (const item of budgetItems.rows) {
         const size = Number(item.size_bytes);
         if (size > budget) await pool.query(`UPDATE artifact_gc_items SET decision='SKIP',reason='DELETE_BUDGET_EXCEEDED' WHERE plan_id=$1 AND object_id=$2 AND decision='QUARANTINE'`, [plan.id, item.object_id]);
         else budget -= size;
       }
-      const duplicates = await duplicateCompactor.compact({ tenantId, maxObjects: payload.maxDuplicates || 25 });
       const result = await optimizer.compactApprovedPlan({ tenantId, planId: payload.planId, maxDeletes: payload.maxDeletes });
       return { result, duplicates, usageAccounting: { storageBytesReclaimed: Number(duplicates.bytesReclaimed || 0) + Number(result.deletedBytes || 0) } };
     }
