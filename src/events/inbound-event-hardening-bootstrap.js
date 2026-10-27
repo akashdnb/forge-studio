@@ -40,8 +40,13 @@ if (!inboundHttp.__eventHardeningApiInstalled) {
             await service.releaseReplay({ eventId, routeKind, claimEpoch: claim.claimEpoch });
             return send(res, 404, { error: { code: 'NOT_FOUND' } }, requestId);
           }
-          const jobId = `injob_replay_${randomUUID().replace(/-/g, '')}`;
-          await service.queue.enqueue({ id: jobId, projectId: event.project_id, episodeId: event.envelope?.data?.episodeId || null, kind: `inbound:${routeKind}`, payload: { eventId, routeKind, eventType: event.event_type, version: event.version, payload: event.envelope?.data || {} }, priority: 10, maxAttempts: 6, idempotencyKey: `inbound:replay:${eventId}:${routeKind}:${claim.claimEpoch}`, createdBy: auth.actor, correlationId: event.envelope?.correlationId || null });
+          try {
+            const jobId = `injob_replay_${randomUUID().replace(/-/g, '')}`;
+            await service.queue.enqueue({ id: jobId, projectId: event.project_id, episodeId: event.envelope?.data?.episodeId || null, kind: `inbound:${routeKind}`, payload: { eventId, routeKind, eventType: event.event_type, version: event.version, payload: event.envelope?.data || {} }, priority: 10, maxAttempts: 6, idempotencyKey: `inbound:replay:${eventId}:${routeKind}:${claim.claimEpoch}`, createdBy: auth.actor, correlationId: event.envelope?.correlationId || null });
+          } catch (enqueueError) {
+            await service.releaseReplay({ eventId, routeKind, claimEpoch: claim.claimEpoch });
+            throw enqueueError;
+          }
           return send(res, 202, { status: 'REPLAY_QUEUED', eventId, routeKind, claimEpoch: claim.claimEpoch }, requestId);
         }
         return originalListener(req, res);
