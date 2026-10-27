@@ -6,6 +6,8 @@ const { installIncidentControlPlane } = require('./incidents/http-extension');
 installIncidentControlPlane();
 const { installIncidentEventSubscriptionBridge } = require('./incidents/event-subscription-bridge');
 installIncidentEventSubscriptionBridge();
+const { installIncidentHealthEndpoint } = require('./incidents/health-extension');
+installIncidentHealthEndpoint();
 
 installHttpVersioning();
 require('./server');
