@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { migrationPreflight } = require('./release-safety');
 function checksum(sql) { return crypto.createHash('sha256').update(sql).digest('hex'); }
-function hasTopLevelTransaction(sql) { return /^\s*BEGIN\s*;[\s\S]*\n\s*COMMIT\s*;?\s*$/im.test(sql); }
+function hasTopLevelTransaction(sql) { const withoutLeadingComments=sql.replace(/^\s*(?:(?:--[^\n]*\n)|(?:\/\*[\s\S]*?\*\/\s*))*/,''); return /^BEGIN\s*;[\s\S]*\n\s*COMMIT\s*;?\s*$/i.test(withoutLeadingComments); }
 async function runSafeMigrations({ pool, migrationsDir = path.join(__dirname, '..', '..', 'migrations'), actor = 'migration-runner' } = {}) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A pg-compatible pool is required');
   await pool.query(`CREATE TABLE IF NOT EXISTS forge_schema_migrations (version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
@@ -21,24 +21,15 @@ async function runSafeMigrations({ pool, migrationsDir = path.join(__dirname, '.
         const current = await client.query('SELECT checksum,status FROM forge_schema_migrations WHERE version=$1 FOR UPDATE', [migration.name]);
         if (current.rows[0]?.checksum && current.rows[0].checksum !== checksum(raw)) throw new Error(`Applied migration checksum differs from file: ${migration.name}`);
         if (current.rows[0]?.status === 'APPLIED') continue;
-        if (hasTopLevelTransaction(raw)) {
-          await client.query(raw);
-        } else {
-          await client.query('BEGIN');
-          try { await client.query(raw); await client.query('COMMIT'); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
-        }
+        if (hasTopLevelTransaction(raw)) await client.query(raw);
+        else { await client.query('BEGIN'); try { await client.query(raw); await client.query('COMMIT'); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } }
         await client.query('BEGIN');
-        try {
-          await client.query(`INSERT INTO forge_schema_migrations(version,checksum,applied_by,status) VALUES($1,$2,$3,'APPLIED') ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum,applied_by=EXCLUDED.applied_by,status='APPLIED',applied_at=now()`, [migration.name, migration.checksum, actor]);
-          await client.query('COMMIT');
-        } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
+        try { await client.query(`INSERT INTO forge_schema_migrations(version,checksum,applied_by,status) VALUES($1,$2,$3,'APPLIED') ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum,applied_by=EXCLUDED.applied_by,status='APPLIED',applied_at=now()`, [migration.name, migration.checksum, actor]); await client.query('COMMIT'); }
+        catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; }
         applied.push(migration.name);
       } catch (error) { throw Object.assign(new Error(`Migration ${migration.name} failed: ${error.message}`), { code: 'MIGRATION_FAILED', migration: migration.name, cause: error }); }
     }
-  } finally {
-    try { await client.query("SELECT pg_advisory_unlock(hashtext('forge-migration-apply'))"); } catch {}
-    client.release();
-  }
+  } finally { try { await client.query("SELECT pg_advisory_unlock(hashtext('forge-migration-apply'))"); } catch {} client.release(); }
   return { status: 'ok', applied, current: preflight.audit.current };
 }
-module.exports = { runSafeMigrations };
+module.exports = { runSafeMigrations, hasTopLevelTransaction };
