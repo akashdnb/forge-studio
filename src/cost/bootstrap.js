@@ -1,4 +1,5 @@
 'use strict';
+require('../storage/artifact-lifecycle-bootstrap');
 const { UsageAccountingService } = require('../usage/usage-accounting');
 const { WorkflowScheduler } = require('../scheduling/workflow-scheduler');
 const { CostGovernanceService, CostBudgetRejectedError } = require('./cost-governance');
