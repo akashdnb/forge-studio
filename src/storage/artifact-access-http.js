@@ -25,7 +25,8 @@ async function handleArtifactAccess(request, response, { gateway, apiToken }) {
     if (!actor && tokenPayload) { actor = tokenPayload.actor; if (tenantId === null) tenantId = tokenPayload.tenantId; }
     if (!actor) return sendJson(response, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid bearer token or signed artifact access token is required' }, requestId }, requestId);
     if (route.action === 'metadata') { const item = await gateway.metadata({ artifactId: route.artifactId, actor, tenantId, token }); return sendJson(response, 200, { item }, requestId); }
-    const delivery = await gateway.open({ artifactId: route.artifactId, actor, tenantId, rangeHeader: request.headers.range || null, token });
+    const abortController = new AbortController(); const cancel = () => abortController.abort(); request.once('aborted', cancel); request.once('close', cancel); response.once('close', cancel);
+    const delivery = await gateway.open({ artifactId: route.artifactId, actor, tenantId, rangeHeader: request.headers.range || null, token, signal: abortController.signal });
     response.writeHead(delivery.statusCode, { 'content-type': delivery.contentType, 'content-length': String(delivery.contentLength), 'content-disposition': delivery.contentDisposition, 'cache-control': 'private, max-age=60, must-revalidate', 'referrer-policy': 'no-referrer', etag: delivery.etag, 'accept-ranges': delivery.acceptRanges, 'x-content-type-options': 'nosniff', ...(delivery.contentRange ? { 'content-range': delivery.contentRange } : {}), 'x-request-id': requestId });
     delivery.stream.on('error', () => response.destroy()); delivery.stream.pipe(response); return true;
   } catch (error) { const mapped = mapError(error); return sendJson(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, requestId }, requestId); }
