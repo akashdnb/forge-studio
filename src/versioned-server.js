@@ -1,5 +1,6 @@
 const { installHttpVersioning } = require('./api/api-versioning');
 require('./runtime/runtime-http-hook');
+require('./diff/http');
 const extended = require('./extended-http-api');
 const { ProductionSearchService, handleSearchRequest } = require('./search/production-search');
 const { authenticate, applySecurityHeaders, safeError } = require('./security/http-security');
