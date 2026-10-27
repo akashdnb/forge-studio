@@ -49,9 +49,9 @@ CREATE TABLE IF NOT EXISTS forge_event_replay_claims (
   released_at timestamptz,
   completed_at timestamptz,
   reason text NOT NULL,
-  PRIMARY KEY(event_id, route_kind)
+  PRIMARY KEY(event_id, route_kind, claim_epoch)
 );
-
+CREATE UNIQUE INDEX IF NOT EXISTS forge_event_replay_active_uk ON forge_event_replay_claims(event_id, route_kind) WHERE state='CLAIMED';
 CREATE INDEX IF NOT EXISTS forge_event_replay_claim_state_idx ON forge_event_replay_claims(state, claimed_at);
 
 CREATE TABLE IF NOT EXISTS forge_event_order_watermarks (
@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS forge_event_order_watermarks (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(endpoint_id, stream_key)
 );
-
 CREATE INDEX IF NOT EXISTS forge_event_order_gap_idx ON forge_event_order_watermarks(endpoint_id, gap_detected) WHERE gap_detected;
 
 CREATE OR REPLACE FUNCTION forge_event_intake_immutable_guard() RETURNS trigger AS $$
@@ -85,11 +84,8 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
 DROP TRIGGER IF EXISTS forge_event_intake_immutable ON forge_event_intake;
-CREATE TRIGGER forge_event_intake_immutable
-BEFORE UPDATE ON forge_event_intake
-FOR EACH ROW EXECUTE FUNCTION forge_event_intake_immutable_guard();
+CREATE TRIGGER forge_event_intake_immutable BEFORE UPDATE ON forge_event_intake FOR EACH ROW EXECUTE FUNCTION forge_event_intake_immutable_guard();
 
 CREATE OR REPLACE FUNCTION forge_event_intake_scope_guard() RETURNS trigger AS $$
 DECLARE project_tenant text;
@@ -103,11 +99,8 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
 DROP TRIGGER IF EXISTS forge_event_intake_scope ON forge_event_intake;
-CREATE TRIGGER forge_event_intake_scope
-BEFORE INSERT OR UPDATE OF tenant_id,project_id ON forge_event_intake
-FOR EACH ROW EXECUTE FUNCTION forge_event_intake_scope_guard();
+CREATE TRIGGER forge_event_intake_scope BEFORE INSERT OR UPDATE OF tenant_id,project_id ON forge_event_intake FOR EACH ROW EXECUTE FUNCTION forge_event_intake_scope_guard();
 
 CREATE OR REPLACE FUNCTION forge_event_replay_claim_immutable_guard() RETURNS trigger AS $$
 BEGIN
@@ -117,10 +110,7 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
 DROP TRIGGER IF EXISTS forge_event_replay_claim_immutable ON forge_event_replay_claims;
-CREATE TRIGGER forge_event_replay_claim_immutable
-BEFORE UPDATE ON forge_event_replay_claims
-FOR EACH ROW EXECUTE FUNCTION forge_event_replay_claim_immutable_guard();
+CREATE TRIGGER forge_event_replay_claim_immutable BEFORE UPDATE ON forge_event_replay_claims FOR EACH ROW EXECUTE FUNCTION forge_event_replay_claim_immutable_guard();
 
 COMMIT;
