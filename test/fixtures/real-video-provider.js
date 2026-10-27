@@ -1,7 +1,7 @@
 'use strict';
 const {spawn}=require('node:child_process');
 const fs=require('node:fs/promises');
-const [, , input, output]=process.argv;
+const argv=process.argv.slice(2);const positional=argv.filter(arg=>!arg.startsWith('--'));const inputFlag=argv.indexOf('--input'),outputFlag=argv.indexOf('--output');const input=inputFlag>=0?argv[inputFlag+1]:positional[0],output=outputFlag>=0?argv[outputFlag+1]:positional[1];
 if(!input||!output)throw new Error('input and output paths are required');
 const request=JSON.parse(require('node:fs').readFileSync(input,'utf8'));
 const duration=Math.max(1,Math.min(10,Number(request.parameters?.durationSeconds||1)));
