@@ -15,13 +15,13 @@ const basePolicy = {
   ]
 };
 
-async function assertValidationError(document, code) {
-  await assert.rejects(() => validatePolicyDocument(document), (error) => error.code === code);
+function assertValidationError(document, code) {
+  assert.throws(() => validatePolicyDocument(document), (error) => error.code === code);
 }
 
-test('policy schema rejects unknown fields and malformed actions', async () => {
-  await assertValidationError({ ...basePolicy, surprise: true }, 'POLICY_UNKNOWN_FIELD');
-  await assertValidationError({ ...basePolicy, protectedActions: ['bad action'] }, 'POLICY_SCHEMA_INVALID');
+test('policy schema rejects unknown fields and malformed actions', () => {
+  assertValidationError({ ...basePolicy, surprise: true }, 'POLICY_UNKNOWN_FIELD');
+  assertValidationError({ ...basePolicy, protectedActions: ['bad action'] }, 'POLICY_SCHEMA_INVALID');
 });
 
 test('canonical representation and hash are order independent', () => {
@@ -31,14 +31,14 @@ test('canonical representation and hash are order independent', () => {
   assert.equal(hash(a), hash(b));
 });
 
-test('policy document validates deterministically', async () => {
-  const normalized = await validatePolicyDocument(basePolicy);
+test('policy document validates deterministically', () => {
+  const normalized = validatePolicyDocument(basePolicy);
   assert.equal(normalized.rules.length, 2);
   assert.equal(hash(normalized).length, 64);
 });
 
-test('strict matcher fields reject cross-tenant identity drift', async () => {
-  await assertValidationError({
+test('strict matcher fields reject cross-tenant identity drift', () => {
+  assertValidationError({
     ...basePolicy,
     rules: [{ id: 'x', effect: 'ALLOW', priority: 1, actions: ['release.publish'], subject: { type: 'user', tenantId: 'other', unknown: true } }]
   }, 'POLICY_UNKNOWN_FIELD');
