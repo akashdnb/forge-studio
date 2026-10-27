@@ -1,0 +1,181 @@
+const crypto = require('node:crypto');
+const { setTimeout: sleep } = require('node:timers/promises');
+
+const DEFAULT_POLICY = Object.freeze({
+  timeoutMs: 120000,
+  maxAttempts: 3,
+  baseBackoffMs: 250,
+  maxBackoffMs: 10000,
+  jitterRatio: 0.25,
+  failureThreshold: 5,
+  recoveryMs: 30000,
+  halfOpenMaxCalls: 1,
+  maxConcurrency: 8,
+  rateLimitPerSecond: 0,
+  retryStatuses: [408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524],
+  retryCodes: ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'PROVIDER_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'UPSTREAM_5XX', 'RATE_LIMITED'],
+});
+
+const SAFE_RETRY_CODES = new Set(DEFAULT_POLICY.retryCodes);
+const TERMINAL_CODES = new Set(['CANCELLED', 'ABORT_ERR', 'AUTH_FAILED', 'INVALID_CONFIG', 'PROVIDER_NOT_CONFIGURED', 'MALFORMED_PROVIDER_RESPONSE', 'INVALID_OUTPUT', 'APPROVAL_BLOCKED', 'APPROVAL_REQUIRED', 'STALE_INPUT', 'INVALID_PROVENANCE', 'SECURITY_BLOCKED', 'BUDGET_EXCEEDED']);
+
+function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function sleepMs(ms, signal) { if (ms <= 0) return Promise.resolve(); return sleep(ms, undefined, { signal }); }
+function safeMessage(error) { return String(error?.message || 'Provider request failed').replace(/(api[_-]?key|authorization|bearer|token|secret|password)\s*[=:]?\s*[^\s,;]+/gi, '$1=[REDACTED]'); }
+
+function retryAfterMs(value, now = Date.now()) {
+  if (value == null) return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return Math.max(0, Math.min(300000, numeric * 1000));
+  const date = Date.parse(String(value));
+  return Number.isFinite(date) ? Math.max(0, Math.min(300000, date - now)) : 0;
+}
+
+function classifyProviderError(error, policy = DEFAULT_POLICY) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status ?? 0);
+  const code = String(error?.code || error?.cause?.code || '').toUpperCase();
+  if (error?.name === 'AbortError' || code === 'ABORT_ERR' || code === 'CANCELLED') return { retryable: false, reason: 'cancelled', normalizedCode: 'CANCELLED' };
+  if (TERMINAL_CODES.has(code)) return { retryable: false, reason: 'terminal-contract-error', normalizedCode: code };
+  if (status === 401 || status === 403 || status === 407) return { retryable: false, reason: 'authentication-or-authorization', normalizedCode: 'AUTH_FAILED' };
+  if (status === 400 || status === 404 || status === 405 || status === 409 || status === 422) return { retryable: false, reason: 'non-retryable-http', normalizedCode: `HTTP_${status}` };
+  if (status === 429 || code === 'RATE_LIMITED' || code === 'TOO_MANY_REQUESTS') return { retryable: true, reason: 'rate-limit', normalizedCode: 'RATE_LIMITED', retryAfterMs: retryAfterMs(error?.retryAfterMs ?? error?.retryAfter ?? error?.headers?.['retry-after']) };
+  if (policy.retryStatuses.includes(status) || policy.retryCodes.includes(code) || SAFE_RETRY_CODES.has(code)) return { retryable: true, reason: status >= 500 ? 'provider-unavailable' : 'transient-network', normalizedCode: code || `HTTP_${status}` };
+  if (error?.retryable === true) return { retryable: true, reason: 'provider-declared-retryable', normalizedCode: code || 'PROVIDER_RETRYABLE' };
+  return { retryable: false, reason: 'unknown-terminal', normalizedCode: code || (status ? `HTTP_${status}` : 'PROVIDER_FAILED') };
+}
+
+function computeBackoffMs(attempt, policy = DEFAULT_POLICY, retryAfter = 0, random = Math.random) {
+  const exponential = Math.min(policy.maxBackoffMs, policy.baseBackoffMs * (2 ** Math.max(0, attempt - 1)));
+  const jitter = exponential * policy.jitterRatio * random();
+  return Math.min(policy.maxBackoffMs, Math.max(exponential + jitter, retryAfter || 0));
+}
+
+function normalizePolicy(policy = {}) {
+  const merged = { ...DEFAULT_POLICY, ...policy };
+  for (const key of ['timeoutMs', 'maxAttempts', 'baseBackoffMs', 'maxBackoffMs', 'failureThreshold', 'recoveryMs', 'halfOpenMaxCalls', 'maxConcurrency']) {
+    if (!Number.isInteger(merged[key]) || merged[key] < 1) throw new TypeError(`${key} must be a positive integer`);
+  }
+  if (merged.maxAttempts > 10) throw new TypeError('maxAttempts must be <= 10');
+  if (merged.jitterRatio < 0 || merged.jitterRatio > 1) throw new TypeError('jitterRatio must be 0..1');
+  if (merged.rateLimitPerSecond < 0) throw new TypeError('rateLimitPerSecond must be >= 0');
+  return Object.freeze({ ...merged, retryStatuses: [...new Set(merged.retryStatuses.map(Number))], retryCodes: [...new Set(merged.retryCodes.map((v) => String(v).toUpperCase()))] });
+}
+
+class ReliabilityMetrics {
+  constructor() { this.counters = new Map(); this.gauges = new Map(); }
+  increment(name, labels = {}, value = 1) { const key = `${name}|${JSON.stringify(labels)}`; this.counters.set(key, (this.counters.get(key) || 0) + value); }
+  gauge(name, labels, value) { this.gauges.set(`${name}|${JSON.stringify(labels)}`, value); }
+  snapshot() { return { counters: [...this.counters.entries()], gauges: [...this.gauges.entries()] }; }
+}
+
+class LocalConcurrencyLimiter {
+  constructor(limit) { this.limit = limit; this.active = 0; this.waiters = []; }
+  async acquire(signal) {
+    if (this.active < this.limit) { this.active += 1; return () => this.release(); }
+    await new Promise((resolve, reject) => {
+      const onAbort = () => { signal?.removeEventListener('abort', onAbort); reject(Object.assign(new Error('Provider concurrency wait cancelled'), { code: 'CANCELLED' })); };
+      signal?.addEventListener('abort', onAbort, { once: true }); this.waiters.push(() => { signal?.removeEventListener('abort', onAbort); resolve(); });
+    });
+    this.active += 1; return () => this.release();
+  }
+  release() { this.active = Math.max(0, this.active - 1); const next = this.waiters.shift(); if (next) next(); }
+}
+
+class RateLimiter {
+  constructor(ratePerSecond) { this.rate = ratePerSecond; this.nextAt = 0; }
+  async wait(signal, now = Date.now()) {
+    if (!this.rate) return;
+    const interval = 1000 / this.rate; const scheduled = Math.max(now, this.nextAt); this.nextAt = scheduled + interval;
+    await sleepMs(Math.max(0, scheduled - now), signal);
+  }
+}
+
+class MemoryCircuit {
+  constructor(policy) { this.policy = policy; this.state = 'CLOSED'; this.failures = 0; this.openedAt = 0; this.halfOpenCalls = 0; }
+  allow(now = Date.now()) {
+    if (this.state === 'CLOSED') return { allowed: true, state: this.state };
+    if (this.state === 'OPEN') {
+      if (now - this.openedAt < this.policy.recoveryMs) return { allowed: false, state: this.state, retryAfterMs: this.policy.recoveryMs - (now - this.openedAt) };
+      this.state = 'HALF_OPEN'; this.halfOpenCalls = 0;
+    }
+    if (this.halfOpenCalls >= this.policy.halfOpenMaxCalls) return { allowed: false, state: this.state, retryAfterMs: 100 };
+    this.halfOpenCalls += 1; return { allowed: true, state: this.state };
+  }
+  success() { this.state = 'CLOSED'; this.failures = 0; this.openedAt = 0; this.halfOpenCalls = 0; }
+  failure(now = Date.now()) { if (this.state === 'HALF_OPEN' || ++this.failures >= this.policy.failureThreshold) { this.state = 'OPEN'; this.openedAt = now; this.halfOpenCalls = 0; } }
+}
+
+class ProviderCircuitStore {
+  constructor({ pool = null, policy = DEFAULT_POLICY, metrics = new ReliabilityMetrics() } = {}) { this.pool = pool; this.policy = policy; this.metrics = metrics; this.memory = new Map(); }
+  key(provider, operation) { return `${provider}:${operation}`; }
+  async get(provider, operation) {
+    const key = this.key(provider, operation);
+    if (!this.pool) { if (!this.memory.has(key)) this.memory.set(key, new MemoryCircuit(this.policy)); return this.memory.get(key); }
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS provider_circuit_states (provider text NOT NULL, operation text NOT NULL, state text NOT NULL, consecutive_failures integer NOT NULL DEFAULT 0, opened_at timestamptz, half_open_calls integer NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(provider, operation))`);
+    const result = await this.pool.query('SELECT * FROM provider_circuit_states WHERE provider=$1 AND operation=$2',[provider,operation]);
+    const row = result.rows[0];
+    if (!row) { await this.pool.query('INSERT INTO provider_circuit_states(provider,operation,state) VALUES($1,$2,\'CLOSED\') ON CONFLICT DO NOTHING',[provider,operation]); return this.get(provider, operation); }
+    return {
+      state: row.state, failures: Number(row.consecutive_failures), openedAt: row.opened_at ? new Date(row.opened_at).getTime() : 0, halfOpenCalls: Number(row.half_open_calls),
+      allow: async (now = Date.now()) => {
+        const locked = await this.pool.query('SELECT * FROM provider_circuit_states WHERE provider=$1 AND operation=$2 FOR UPDATE',[provider,operation]); const current = locked.rows[0];
+        if (current.state === 'OPEN') { const age = now - (current.opened_at ? new Date(current.opened_at).getTime() : now); if (age < this.policy.recoveryMs) return { allowed:false,state:'OPEN',retryAfterMs:this.policy.recoveryMs-age }; await this.pool.query('UPDATE provider_circuit_states SET state=\'HALF_OPEN\',half_open_calls=0,updated_at=now() WHERE provider=$1 AND operation=$2',[provider,operation]); }
+        const state = current.state === 'OPEN' ? 'HALF_OPEN' : current.state; const calls = Number(current.half_open_calls || 0); if (state === 'HALF_OPEN' && calls >= this.policy.halfOpenMaxCalls) return { allowed:false,state,retryAfterMs:100 };
+        await this.pool.query('UPDATE provider_circuit_states SET state=$3,half_open_calls=half_open_calls+CASE WHEN $3=\'HALF_OPEN\' THEN 1 ELSE 0 END,updated_at=now() WHERE provider=$1 AND operation=$2',[provider,operation,state]); return { allowed:true,state };
+      },
+      success: async () => { await this.pool.query('UPDATE provider_circuit_states SET state=\'CLOSED\',consecutive_failures=0,opened_at=NULL,half_open_calls=0,updated_at=now() WHERE provider=$1 AND operation=$2',[provider,operation]); },
+      failure: async (now = Date.now()) => { await this.pool.query(`UPDATE provider_circuit_states SET consecutive_failures=CASE WHEN state='HALF_OPEN' OR consecutive_failures+1 >= $3 THEN $3 ELSE consecutive_failures+1 END, state=CASE WHEN state='HALF_OPEN' OR consecutive_failures+1 >= $3 THEN 'OPEN' ELSE state END, opened_at=CASE WHEN state='HALF_OPEN' OR consecutive_failures+1 >= $3 THEN now() ELSE opened_at END, half_open_calls=0, updated_at=now() WHERE provider=$1 AND operation=$2`,[provider,operation,this.policy.failureThreshold]); },
+    };
+  }
+  async diagnostics() {
+    if (!this.pool) return [...this.memory.entries()].map(([key,c]) => ({ key, state:c.state, failures:c.failures, openedAt:c.openedAt }));
+    const result = await this.pool.query('SELECT provider,operation,state,consecutive_failures,opened_at,half_open_calls,updated_at FROM provider_circuit_states ORDER BY provider,operation'); return result.rows.map((r) => ({ provider:r.provider,operation:r.operation,state:r.state,failures:Number(r.consecutive_failures),openedAt:r.opened_at,halfOpenCalls:Number(r.half_open_calls),updatedAt:r.updated_at }));
+  }
+}
+
+class ProviderReliability {
+  constructor({ pool = null, policies = {}, metrics = new ReliabilityMetrics(), logger = console, random = Math.random } = {}) {
+    this.pool = pool; this.metrics = metrics; this.logger = logger; this.random = random; this.policies = new Map(Object.entries(policies).map(([key,value]) => [key, normalizePolicy(value)])); this.circuits = new ProviderCircuitStore({ pool, policy: DEFAULT_POLICY, metrics }); this.limiters = new Map(); this.rateLimiters = new Map();
+  }
+  policyFor(provider, operation, override = {}) { return normalizePolicy({ ...(this.policies.get(`${provider}:${operation}`) || {}), ...(this.policies.get(provider) || {}), ...override }); }
+  limiterFor(key, limit) { if (!this.limiters.has(key) || this.limiters.get(key).limit !== limit) this.limiters.set(key,new LocalConcurrencyLimiter(limit)); return this.limiters.get(key); }
+  rateFor(key, rate) { if (!this.rateLimiters.has(key)) this.rateLimiters.set(key,new RateLimiter(rate)); return this.rateLimiters.get(key); }
+  attemptIdentity(idempotencyKey, provider, operation, attempt) { return `provider-attempt:${sha256(`${idempotencyKey}:${provider}:${operation}:${attempt}`).slice(0,40)}`; }
+  async execute({ provider, operation, request, context = {}, policy = {}, fallbacks = [], contract = {} }) {
+    const name = String(provider?.name || 'unnamed'); const normalizedOperation = String(operation || 'execute'); const p = this.policyFor(name, normalizedOperation, policy); const idempotencyKey = context.idempotencyKey || `request:${sha256(JSON.stringify({operation:normalizedOperation,request}))}`;
+    const deadlineAt = context.deadlineAt || (Date.now() + p.timeoutMs * p.maxAttempts + p.maxBackoffMs * Math.max(0,p.maxAttempts - 1));
+    if (context.signal?.aborted) throw Object.assign(new Error('Provider operation cancelled'),{code:'CANCELLED'});
+    const circuit = await this.circuits.get(name, normalizedOperation); const labels = { provider:name, operation:normalizedOperation };
+    const release = await this.limiterFor(`${name}:${normalizedOperation}`,p.maxConcurrency).acquire(context.signal); let lastError;
+    try {
+      for (let attempt=1; attempt<=p.maxAttempts; attempt+=1) {
+        const allowed = await circuit.allow(); if (!allowed.allowed) { this.metrics.increment('forge_provider_circuit_open_total',labels); throw Object.assign(new Error(`Provider circuit is ${allowed.state}`),{code:'PROVIDER_CIRCUIT_OPEN',retryable:true,retryAfterMs:allowed.retryAfterMs}); }
+        await this.rateFor(`${name}:${normalizedOperation}`,p.rateLimitPerSecond).wait(context.signal);
+        const remaining = Math.max(1, deadlineAt - Date.now()); const timeout = Math.min(p.timeoutMs, remaining); const controller = new AbortController(); const onAbort=()=>controller.abort(); context.signal?.addEventListener('abort',onAbort,{once:true}); const timer=setTimeout(()=>controller.abort(),timeout); timer.unref?.();
+        const attemptId=this.attemptIdentity(idempotencyKey,name,normalizedOperation,attempt); const started=Date.now();
+        this.metrics.increment('forge_provider_attempts_total',labels);
+        try {
+          const result = await provider.execute(request,{...context,provider:name,operation:normalizedOperation,attempt,attemptId,idempotencyKey,signal:controller.signal,deadlineAt});
+          if (result == null) throw Object.assign(new Error('Provider returned no response'),{code:'MALFORMED_PROVIDER_RESPONSE'});
+          await circuit.success(); this.metrics.increment('forge_provider_success_total',labels); this.metrics.gauge('forge_provider_latency_ms',labels,Date.now()-started); return { result, provider:name, attempt, attemptId, idempotencyKey };
+        } catch (error) {
+          lastError=error; const classification=classifyProviderError(error,p); this.metrics.increment('forge_provider_errors_total',{...labels,reason:classification.reason}); this.logger.warn?.({event:'provider.reliability.decision',provider:name,operation:normalizedOperation,attempt,attemptId,reason:classification.reason,retryable:classification.retryable,normalizedCode:classification.normalizedCode});
+          if (!classification.retryable || Date.now() >= deadlineAt || attempt >= p.maxAttempts) { if (classification.retryable) await circuit.failure(); break; }
+          await circuit.failure(); const backoff=computeBackoffMs(attempt,p,classification.retryAfterMs||0,this.random); this.metrics.increment('forge_provider_retries_total',labels); await sleepMs(Math.min(backoff,Math.max(0,deadlineAt-Date.now())),context.signal);
+        } finally { clearTimeout(timer); context.signal?.removeEventListener('abort',onAbort); }
+      }
+      if (fallbacks.length && contract.idempotent && contract.allowFailover && contract.contractCompatible) {
+        for (const fallback of fallbacks) {
+          try { this.metrics.increment('forge_provider_failover_total',{...labels,fallback:String(fallback.name||'unnamed')}); return await this.execute({provider:fallback,operation:normalizedOperation,request,context:{...context,idempotencyKey},policy,contract:{...contract,allowFailover:false},fallbacks:[]}); } catch (error) { lastError=error; }
+        }
+      }
+      const normalized=classifyProviderError(lastError||new Error('Provider failed'),p); throw Object.assign(new Error(safeMessage(lastError||new Error('Provider failed'))),{code:normalized.normalizedCode,retryable:false,provider:name,operation:normalizedOperation,attempts:p.maxAttempts,cause:lastError});
+    } finally { release(); }
+  }
+  async probe({ provider, operation='health', request={}, timeoutMs=5000, signal } = {}) {
+    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),timeoutMs); try { const result=await provider.execute(request,{signal:controller.signal,attempt:1,attemptId:`probe:${sha256(String(Date.now()))}`}); await (await this.circuits.get(provider.name,operation)).success(); this.metrics.increment('forge_provider_health_probe_success_total',{provider:provider.name,operation}); return {healthy:true,result}; } catch(error) { await (await this.circuits.get(provider.name,operation)).failure(); this.metrics.increment('forge_provider_health_probe_failure_total',{provider:provider.name,operation}); return {healthy:false,error:{code:classifyProviderError(error).normalizedCode,message:safeMessage(error)}}; } finally { clearTimeout(timer); }
+  }
+  async diagnostics() { return { metrics:this.metrics.snapshot(), circuits:await this.circuits.diagnostics() }; }
+}
+
+module.exports={DEFAULT_POLICY,normalizePolicy,classifyProviderError,computeBackoffMs,ProviderReliability,ReliabilityMetrics,ProviderCircuitStore};
