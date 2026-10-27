@@ -38,6 +38,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm install --no-audit --no-fund
+      - run: node scripts/client-contract.js
       - run: npm run migrate
       - run: npm run check
       - run: node --test test/recovery-postgres.integration.test.js
