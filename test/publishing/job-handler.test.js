@@ -1,92 +1,12 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { Readable } = require('node:stream');
-const { createPublishingHandlers, assertReleaseGate } = require('../../src/publishing/job-handler');
-
-function baseRun(overrides = {}) {
-  return {
-    id: 'run-1', episode_id: 'episode-1', destination: 'youtube', status: 'QUEUED', render_artifact_id: 'render-1', render_version_id: 'version-1',
-    episode_state: 'APPROVED', approved_render_id: 'render-1', current_render_id: 'render-1', artifact_kind: 'render', artifact_version_id: 'version-1',
-    content_hash: 'a'.repeat(64), media_type: 'video/mp4', storage_key: 'projects/p/render.mp4', storage_hash: 'a'.repeat(64), storage_status: 'READY',
-    qa_status: 'PASSED', approval_decision: 'APPROVED', approval_target_id: 'render-1', approval_version_id: 'version-1', metadata: { title: 'Approved episode' },
-    upload_session_uri: null, external_id: null, external_url: null, attempt: 1, ...overrides,
-  };
-}
-
-function makePool(run, { jobStatus = 'RUNNING' } = {}) {
-  const updates = [];
-  return {
-    updates,
-    async query(sql, params = []) {
-      if (sql.includes('FROM publish_runs p')) return { rows: [run] };
-      if (sql.includes('SELECT status FROM forge_jobs')) return { rows: [{ status: jobStatus }] };
-      if (sql.startsWith('UPDATE publish_runs')) { updates.push({ sql, params }); return { rows: [] }; }
-      if (sql.startsWith('UPDATE episodes')) { updates.push({ sql, params }); return { rows: [] }; }
-      throw new Error(`unexpected query: ${sql}`);
-    },
-  };
-}
-
-function makeStorage({ fail = false } = {}) {
-  return { async download() { if (fail) throw Object.assign(new Error('checksum mismatch'), { code: 'CHECKSUM_MISMATCH' }); return { stream: Readable.from([Buffer.from('valid-mp4')]) }; } };
-}
-
-test('release gate blocks stale, failed-QA, and mismatched provenance artifacts', () => {
-  assert.doesNotThrow(() => assertReleaseGate(baseRun()));
-  assert.throws(() => assertReleaseGate(baseRun({ current_render_id: 'new-render' })), /stale/);
-  assert.throws(() => assertReleaseGate(baseRun({ qa_status: 'FAILED' })), /QA/);
-  assert.throws(() => assertReleaseGate(baseRun({ artifact_version_id: 'wrong-version' })), /provenance/);
-  assert.throws(() => assertReleaseGate(baseRun({ approval_decision: 'REJECTED' })), /approval/);
-});
-
-test('successful publication persists external id/url and response metadata', async () => {
-  const run = baseRun(); const pool = makePool(run);
-  const publisher = { async publish() { return { id: 'yt-123', url: 'https://www.youtube.com/watch?v=yt-123', response: { id: 'yt-123', status: { uploadStatus: 'uploaded' } } }; } };
-  const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher, logger: { error() {} } })['publish:youtube'];
-  const result = await handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 });
-  assert.equal(result.externalId, 'yt-123');
-  assert.equal(result.externalUrl, 'https://www.youtube.com/watch?v=yt-123');
-  assert.equal(pool.updates.some((u) => u.sql.includes("status='PUBLISHED'")), true);
-});
-
-test('published run is idempotent without another provider call', async () => {
-  const run = baseRun({ status: 'PUBLISHED', external_id: 'yt-123', external_url: 'https://www.youtube.com/watch?v=yt-123' }); const pool = makePool(run); let calls = 0;
-  const publisher = { async publish() { calls += 1; return {}; } };
-  const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher })['publish:youtube'];
-  const result = await handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 });
-  assert.equal(result.alreadyPublished, true); assert.equal(calls, 0);
-});
-
-test('transient provider failure remains retryable and terminal provider error fails the run', async () => {
-  const retryRun = baseRun(); const retryPool = makePool(retryRun);
-  const retryHandler = createPublishingHandlers({ pool: retryPool, storage: makeStorage(), publisher: { async publish() { throw Object.assign(new Error('temporary network failure'), { retryable: true, code: 'NETWORK_ERROR' }); } }, logger: { error() {} } })['publish:youtube'];
-  await assert.rejects(retryHandler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /temporary/);
-  assert.equal(retryPool.updates.some((u) => u.sql.includes("status='UPLOADING'")), true);
-
-  const failedRun = baseRun(); const failedPool = makePool(failedRun);
-  const failedHandler = createPublishingHandlers({ pool: failedPool, storage: makeStorage(), publisher: { async publish() { throw Object.assign(new Error('invalid metadata'), { retryable: false, terminalState: 'FAILED', code: 'INVALID_METADATA' }); } }, logger: { error() {} } })['publish:youtube'];
-  await assert.rejects(failedHandler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /invalid metadata/);
-  assert.equal(failedPool.updates.some((u) => u.sql.includes("status='FAILED'")), true);
-});
-
-test('checksum/storage mismatch never reaches the provider', async () => {
-  const pool = makePool(baseRun()); let calls = 0;
-  const handler = createPublishingHandlers({ pool, storage: makeStorage({ fail: true }), publisher: { async publish() { calls += 1; } } })['publish:youtube'];
-  await assert.rejects(handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /checksum mismatch/);
-  assert.equal(calls, 0);
-});
-
-test('cancelled job reaches a terminal cancelled publish state', async () => {
-  const pool = makePool(baseRun(), { jobStatus: 'CANCELLED' }); let calls = 0;
-  const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher: { async publish() { calls += 1; } } })['publish:youtube'];
-  await assert.rejects(handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /cancelled/i);
-  assert.equal(calls, 0);
-  assert.equal(pool.updates.some((u) => u.sql.includes("status='CANCELLED'")), true);
-});
-
-test('uncertain provider state is persisted as reconciliation required', async () => {
-  const pool = makePool(baseRun());
-  const handler = createPublishingHandlers({ pool, storage: makeStorage(), publisher: { async publish() { throw Object.assign(new Error('upload session expired'), { retryable: false, terminalState: 'RECONCILIATION_REQUIRED', code: 'UPLOAD_SESSION_EXPIRED' }); } } })['publish:youtube'];
-  await assert.rejects(handler({ publishRunId: 'run-1' }, { id: 'job-1', attempts: 1, max_attempts: 3 }), /upload session expired/);
-  assert.equal(pool.updates.some((u) => u.sql.includes("status='RECONCILIATION_REQUIRED'")), true);
-});
+const test=require('node:test');const assert=require('node:assert/strict');const {Readable}=require('node:stream');const {createPublishingHandlers,assertReleaseGate}=require('../../src/publishing/job-handler');
+function baseRun(overrides={}){return{id:'run-1',episode_id:'episode-1',destination:'youtube',status:'QUEUED',render_artifact_id:'render-1',render_version_id:'version-1',episode_state:'APPROVED',approved_render_id:'render-1',current_render_id:'render-1',artifact_kind:'render',artifact_version_id:'version-1',content_hash:'a'.repeat(64),media_type:'video/mp4',storage_key:'projects/p/render.mp4',storage_hash:'a'.repeat(64),storage_status:'READY',qa_status:'PASSED',approval_decision:'APPROVED',approval_target_id:'render-1',approval_version_id:'version-1',metadata:{title:'Approved episode'},upload_session_uri:null,external_id:null,external_url:null,attempt:1,...overrides};}
+function makePool(run,{jobStatus='RUNNING'}={}){const updates=[];return{updates,async query(sql,params=[]){if(sql.includes('FROM publish_runs p'))return{rows:[run]};if(sql.includes('SELECT status FROM forge_jobs'))return{rows:[{status:jobStatus}]};if(sql.startsWith('UPDATE publish_runs')){updates.push({sql,params});return{rows:[run]};}if(sql.startsWith('UPDATE episodes')){updates.push({sql,params});return{rows:[]};}if(sql.includes('INSERT INTO forge_concurrency_events')){updates.push({sql,params});return{rows:[]};}throw new Error(`unexpected query: ${sql}`);}};}
+function makeStorage({fail=false}={}){return{async download(){if(fail)throw Object.assign(new Error('checksum mismatch'),{code:'CHECKSUM_MISMATCH'});return{stream:Readable.from([Buffer.from('valid-mp4')])};}};}
+test('release gate blocks stale, failed-QA, and mismatched provenance artifacts',()=>{assert.doesNotThrow(()=>assertReleaseGate(baseRun()));assert.throws(()=>assertReleaseGate(baseRun({current_render_id:'new-render'})),/stale/);assert.throws(()=>assertReleaseGate(baseRun({qa_status:'FAILED'})),/QA/);assert.throws(()=>assertReleaseGate(baseRun({artifact_version_id:'wrong-version'})),/provenance/);assert.throws(()=>assertReleaseGate(baseRun({approval_decision:'REJECTED'})),/approval/);});
+test('successful publication persists external id/url and response metadata',async()=>{const run=baseRun();const pool=makePool(run);const publisher={async publish(){return{id:'yt-123',url:'https://www.youtube.com/watch?v=yt-123',response:{id:'yt-123',status:{uploadStatus:'uploaded'}}};}};const handler=createPublishingHandlers({pool,storage:makeStorage(),publisher,logger:{error(){}}})['publish:youtube'];const result=await handler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3});assert.equal(result.externalId,'yt-123');assert.equal(result.externalUrl,'https://www.youtube.com/watch?v=yt-123');assert.equal(pool.updates.some(u=>u.sql.includes("status='PUBLISHED'")),true);});
+test('published run is idempotent without another provider call',async()=>{const run=baseRun({status:'PUBLISHED',external_id:'yt-123',external_url:'https://www.youtube.com/watch?v=yt-123'});const pool=makePool(run);let calls=0;const handler=createPublishingHandlers({pool,storage:makeStorage(),publisher:{async publish(){calls+=1;return{};}}})['publish:youtube'];const result=await handler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3});assert.equal(result.alreadyPublished,true);assert.equal(calls,0);});
+test('transient provider failure remains retryable and terminal provider error fails the run',async()=>{const retryRun=baseRun();const retryPool=makePool(retryRun);const retryHandler=createPublishingHandlers({pool:retryPool,storage:makeStorage(),publisher:{async publish(){throw Object.assign(new Error('temporary network failure'),{retryable:true,code:'NETWORK_ERROR'});}},logger:{error(){}}})['publish:youtube'];await assert.rejects(retryHandler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3}),/temporary/);assert.equal(retryPool.updates.some(u=>u.sql.includes("status='UPLOADING'")),true);const failedRun=baseRun();const failedPool=makePool(failedRun);const failedHandler=createPublishingHandlers({pool:failedPool,storage:makeStorage(),publisher:{async publish(){throw Object.assign(new Error('invalid metadata'),{retryable:false,terminalState:'FAILED',code:'INVALID_METADATA'});}},logger:{error(){}}})['publish:youtube'];await assert.rejects(failedHandler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3}),/invalid metadata/);assert.equal(failedPool.updates.some(u=>u.sql.includes("status='FAILED'")),true);});
+test('checksum/storage mismatch never reaches the provider',async()=>{const pool=makePool(baseRun());let calls=0;const handler=createPublishingHandlers({pool,storage:makeStorage({fail:true}),publisher:{async publish(){calls+=1;}}})['publish:youtube'];await assert.rejects(handler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3}),/checksum mismatch/);assert.equal(calls,0);});
+test('cancelled job reaches a terminal cancelled publish state',async()=>{const pool=makePool(baseRun(),{jobStatus:'CANCELLED'});let calls=0;const handler=createPublishingHandlers({pool,storage:makeStorage(),publisher:{async publish(){calls+=1;}}})['publish:youtube'];await assert.rejects(handler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3}),/cancelled/i);assert.equal(calls,0);assert.equal(pool.updates.some(u=>u.sql.includes("status='CANCELLED'")),true);});
+test('uncertain provider state is persisted as reconciliation required',async()=>{const pool=makePool(baseRun());const handler=createPublishingHandlers({pool,storage:makeStorage(),publisher:{async publish(){throw Object.assign(new Error('upload session expired'),{retryable:false,terminalState:'RECONCILIATION_REQUIRED',code:'UPLOAD_SESSION_EXPIRED'});}}})['publish:youtube'];await assert.rejects(handler({publishRunId:'run-1'},{id:'job-1',attempts:1,max_attempts:3}),/upload session expired/);assert.equal(pool.updates.some(u=>u.sql.includes("status='RECONCILIATION_REQUIRED'")),true);});
+test('concurrent publish attempts are fenced so only one worker can own the run',async()=>{const run=baseRun();let owner=false;const pool={async query(sql,params=[]){if(sql.includes('FROM publish_runs p'))return{rows:[run]};if(sql.includes('UPDATE publish_runs SET lease_token')){if(owner)return{rows:[]};owner=true;return{rows:[{...run,lease_token:params[1]}]};}if(sql.includes('INSERT INTO forge_concurrency_events'))return{rows:[]};if(sql.startsWith('UPDATE publish_runs'))return{rows:[{...run}]};if(sql.startsWith('UPDATE episodes'))return{rows:[]};if(sql.includes('SELECT status FROM forge_jobs'))return{rows:[{status:'RUNNING'}]};throw new Error(`unexpected query: ${sql}`);}};const publisher={async publish(){await new Promise(resolve=>setTimeout(resolve,10));return{id:'yt-1',url:'https://youtube/yt-1',response:{}};}};const handler=createPublishingHandlers({pool,storage:makeStorage(),publisher,logger:{error(){}}})['publish:youtube'];const results=await Promise.allSettled([handler({publishRunId:'run-1'},{id:'job-a',attempts:1,max_attempts:3}),handler({publishRunId:'run-1'},{id:'job-b',attempts:1,max_attempts:3})]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(results.filter(r=>r.status==='rejected'&&r.reason.code==='PUBLISH_RACE').length,1);});
