@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 let Pool; try { ({ Pool } = require('pg')); } catch { Pool = null; }
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
 const maybe = Pool && databaseUrl ? test : test.skip;
-const { nextOccurrence, resolveLocalDateTime, createReleaseScheduleService } = require('../src/scheduling/release-scheduler');
+const { createSafeReleaseScheduleService, nextOccurrence, resolveLocalDateTime } = require('../src/scheduling/release-schedule-safe-wrapper');
 const { JobQueue } = require('../src/persistence/job-queue');
 
 function ids(prefix) { const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`; return { projectId: `${prefix}-project-${suffix}`, episodeId: `${prefix}-episode-${suffix}`, tenantId: `${prefix}-tenant-${suffix}` }; }
@@ -29,8 +29,7 @@ test('weekly next-run computation is timezone based, not server-local', () => {
 
 maybe('PostgreSQL schedule versions are immutable and tenant scoped', async () => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
-  await pool.query('CREATE TEMP TABLE IF NOT EXISTS release_schedule_test_marker(x int)');
-  const service = createReleaseScheduleService({ pool, queue: new JobQueue({ pool }), now: () => new Date('2026-10-27T00:00:00.000Z'), workerId: 'release-schedule-test' });
+  const service = createSafeReleaseScheduleService({ pool, queue: new JobQueue({ pool }), now: () => new Date('2026-10-27T00:00:00.000Z'), workerId: 'release-schedule-test' });
   const { tenantId, projectId, episodeId } = ids('release-schedule');
   await pool.query('INSERT INTO projects(id,tenant_id,name,created_by) VALUES($1,$2,$3,$4)', [projectId, tenantId, 'Release test', 'test']);
   await pool.query('INSERT INTO episodes(id,project_id,title,created_by) VALUES($1,$2,$3,$4)', [episodeId, projectId, 'Release test episode', 'test']);
@@ -51,7 +50,7 @@ maybe('PostgreSQL schedule versions are immutable and tenant scoped', async () =
 
 maybe('parallel schedule mutations fence stale versions', async () => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
-  const service = createReleaseScheduleService({ pool, queue: new JobQueue({ pool }), now: () => new Date('2026-10-27T00:00:00.000Z'), workerId: 'release-schedule-race' });
+  const service = createSafeReleaseScheduleService({ pool, queue: new JobQueue({ pool }), now: () => new Date('2026-10-27T00:00:00.000Z'), workerId: 'release-schedule-race' });
   const { tenantId, projectId, episodeId } = ids('release-race');
   await pool.query('INSERT INTO projects(id,tenant_id,name,created_by) VALUES($1,$2,$3,$4)', [projectId, tenantId, 'Race', 'test']);
   await pool.query('INSERT INTO episodes(id,project_id,title,created_by) VALUES($1,$2,$3,$4)', [episodeId, projectId, 'Race', 'test']);
