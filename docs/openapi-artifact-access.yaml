@@ -1,0 +1,62 @@
+openapi: 3.0.3
+info:
+  title: Forge Studio Secure Artifact Access
+  version: 1.0.0
+paths:
+  /v1/artifacts/{artifactId}:
+    get:
+      summary: Get authorized artifact metadata
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200': { description: Authorized artifact metadata }
+        '401': { description: Unauthorized }
+        '403': { description: Project/provenance/lifecycle/gate denial }
+        '404': { description: Artifact unavailable }
+  /v1/artifacts/{artifactId}/access-token:
+    post:
+      summary: Issue a short-lived signed artifact access token
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+        - name: action
+          in: query
+          schema: { type: string, enum: [download, stream], default: download }
+      responses:
+        '201': { description: Signed access token }
+        '401': { description: Unauthorized }
+        '403': { description: Policy denial }
+  /v1/artifacts/{artifactId}/content:
+    get:
+      summary: Download or stream an authorized immutable artifact
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+        - name: access_token
+          in: query
+          schema: { type: string }
+          description: Short-lived signed token issued by the access-token endpoint.
+        - name: Range
+          in: header
+          schema: { type: string, pattern: '^bytes=\\d*-\\d*$' }
+      responses:
+        '200': { description: Complete artifact bytes }
+        '206': { description: Bounded byte range }
+        '401': { description: Unauthorized or expired token }
+        '403': { description: Access/gate denial }
+        '404': { description: Artifact unavailable }
+        '416': { description: Invalid, unsatisfiable, multi-range, or oversized range }
+        '503': { description: Provider or integrity failure }
+components:
+  parameters:
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$' }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
