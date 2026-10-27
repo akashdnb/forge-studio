@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS provider_admission_buckets (
   operation text NOT NULL,
   tokens numeric(24,8) NOT NULL CHECK (tokens >= 0),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, project_id, provider, model, operation)
+  UNIQUE NULLS NOT DISTINCT (tenant_id, project_id, provider, model, operation)
 );
 
 CREATE TABLE IF NOT EXISTS provider_admission_decisions (
