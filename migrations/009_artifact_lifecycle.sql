@@ -1,6 +1,9 @@
 -- Immutable artifact lifecycle ledger. This never mutates artifact content or provenance rows.
 BEGIN;
 
+ALTER TABLE storage_objects DROP CONSTRAINT IF EXISTS storage_objects_status_check;
+ALTER TABLE storage_objects ADD CONSTRAINT storage_objects_status_check CHECK (status IN ('READY','CORRUPT','MISSING','DELETED'));
+
 CREATE TABLE IF NOT EXISTS artifact_lifecycle_records (
   artifact_id text PRIMARY KEY REFERENCES artifacts(id) ON DELETE RESTRICT,
   project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
@@ -67,8 +70,7 @@ CREATE TABLE IF NOT EXISTS artifact_holds (
 );
 CREATE INDEX IF NOT EXISTS artifact_holds_active_idx ON artifact_holds(artifact_id, released_at, expires_at);
 
--- Once an object is deletion-pending/deleted, new artifact rows may not reuse it.
--- This prevents a late writer from racing a provider-side delete.
+-- Once an object is deletion-pending/deleted, artifact metadata itself may not be rewritten.
 CREATE OR REPLACE FUNCTION forge_guard_artifact_lifecycle() RETURNS trigger AS $$
 DECLARE lifecycle_state text;
 BEGIN
