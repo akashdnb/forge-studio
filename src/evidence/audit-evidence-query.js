@@ -50,7 +50,10 @@ class AuditEvidenceQueryService {
       const actorParam = values.length;
       where.push(`(e.project_id IS NULL OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=e.project_id AND pm.actor_id=$${actorParam}) OR EXISTS (SELECT 1 FROM projects pp WHERE pp.id=e.project_id AND pp.tenant_id=e.tenant_id AND pp.created_by=$${actorParam}))`);
     }
-    if (!includeArchived) where.push("e.retention_state NOT IN ('ARCHIVED','EXPIRED','QUARANTINED')");
+    if (!includeArchived) {
+      where.push("e.retention_state NOT IN ('ARCHIVED','EXPIRED','QUARANTINED')");
+      where.push("NOT EXISTS (SELECT 1 FROM evidence_archive_events ae WHERE ae.tenant_id=e.tenant_id AND ae.ledger_seq=e.ledger_seq)");
+    }
     where.push("NOT EXISTS (SELECT 1 FROM privacy_retention_items ri WHERE ri.tenant_id=e.tenant_id AND ri.resource_type='audit_evidence' AND ri.resource_id=e.event_id AND ri.state IN ('ELIGIBLE','APPROVED','DESTROYED') AND ri.eligible_at <= now())");
     where.push("NOT EXISTS (SELECT 1 FROM privacy_quarantine pq WHERE pq.tenant_id=e.tenant_id AND pq.resource_type='audit_evidence' AND pq.resource_id=e.event_id AND pq.state='PURGED')");
     if (!privileged) where.push("e.redaction_level <> 'RESTRICTED'");
