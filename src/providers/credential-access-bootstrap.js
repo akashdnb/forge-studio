@@ -1,0 +1,31 @@
+'use strict';
+
+const http = require('node:http');
+const { Pool } = require('pg');
+const { SecretCipher } = require('../runtime/runtime-policy');
+const { authenticate, hasRole } = require('../security/http-security');
+const { CredentialAccessService } = require('./credential-access-service');
+const { handleCredentialAccessRequest } = require('./credential-access-http');
+
+const installed = Symbol.for('forge.provider.credential-access.http.installed');
+if (!http.Server.prototype[installed] && process.env.DATABASE_URL) {
+  const pool = new Pool({ connectionString:process.env.DATABASE_URL, max:Number.parseInt(process.env.FORGE_CREDENTIAL_ACCESS_POOL_MAX || '5',10), idleTimeoutMillis:30000, connectionTimeoutMillis:5000 });
+  const service = process.env.FORGE_SECRET_ENCRYPTION_KEY && process.env.FORGE_CREDENTIAL_GRANT_SIGNING_SECRET && process.env.FORGE_REGION ? new CredentialAccessService({ pool, secretCipher:new SecretCipher(process.env.FORGE_SECRET_ENCRYPTION_KEY) }) : null;
+  const originalOn=http.Server.prototype.on;
+  http.Server.prototype.on=function credentialAccessOn(event,listener){
+    if(event!=='request'||typeof listener!=='function') return originalOn.call(this,event,listener);
+    const wrapped=async(request,response)=>{
+      const pathname=new URL(request.url||'/', 'http://localhost').pathname;
+      if(!pathname.startsWith('/internal/providers/credential-access')) return listener(request,response);
+      const isExecute=pathname==='/internal/providers/credential-access/execute';
+      const auth=isExecute?null:authenticate(request,{apiToken:process.env.API_BEARER_TOKEN||null,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});
+      if(!isExecute&&!auth){response.statusCode=401;response.setHeader('content-type','application/json');return response.end(JSON.stringify({error:{code:'UNAUTHORIZED'}}));}
+      const requestId=request.headers['x-request-id']||require('node:crypto').randomUUID();
+      const handled=await handleCredentialAccessRequest(request,response,{service,auth,hasRole:(actor,role)=>hasRole(auth,role),requestId});
+      if(handled===false)return listener(request,response);
+    };
+    return originalOn.call(this,event,wrapped);
+  };
+  http.Server.prototype[installed]={pool,service};
+}
+module.exports={installed};
