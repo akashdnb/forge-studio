@@ -3,6 +3,7 @@ BEGIN;
 -- Request-level idempotency is scoped by tenant/project + operation + caller key.
 -- The request body is never stored: only its canonical SHA-256 fingerprint is kept.
 CREATE TABLE IF NOT EXISTS forge_api_idempotency_keys (
+  id bigserial PRIMARY KEY,
   tenant_id text,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   operation text NOT NULL,
@@ -21,13 +22,13 @@ CREATE TABLE IF NOT EXISTS forge_api_idempotency_keys (
   updated_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz,
   expires_at timestamptz NOT NULL,
-  PRIMARY KEY (tenant_id, project_id, operation, idempotency_key),
   CHECK (tenant_id IS NOT NULL OR project_id IS NOT NULL),
   CHECK (char_length(operation) BETWEEN 1 AND 128),
   CHECK (char_length(idempotency_key) BETWEEN 8 AND 255),
   CHECK (status <> 'COMMITTED' OR (response_status IS NOT NULL AND response_body IS NOT NULL AND completed_at IS NOT NULL AND outcome_hash IS NOT NULL))
 );
-
+CREATE UNIQUE INDEX IF NOT EXISTS forge_api_idempotency_scope_key_idx
+  ON forge_api_idempotency_keys(coalesce(tenant_id, ''), coalesce(project_id, ''), operation, idempotency_key);
 CREATE INDEX IF NOT EXISTS forge_api_idempotency_expiry_idx
   ON forge_api_idempotency_keys(expires_at)
   WHERE status IN ('COMMITTED','EXPIRED');
@@ -57,6 +58,7 @@ CREATE INDEX IF NOT EXISTS forge_api_idempotency_events_key_idx
 -- Generic durable fences for mutable resources and one-time side effects that do not have
 -- a domain-specific revision column yet. The resource row is locked in the caller's tx.
 CREATE TABLE IF NOT EXISTS forge_resource_fences (
+  id bigserial PRIMARY KEY,
   tenant_id text,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   resource_type text NOT NULL,
@@ -64,16 +66,18 @@ CREATE TABLE IF NOT EXISTS forge_resource_fences (
   version bigint NOT NULL DEFAULT 0,
   epoch bigint NOT NULL DEFAULT 1,
   updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, project_id, resource_type, resource_id),
   CHECK (tenant_id IS NOT NULL OR project_id IS NOT NULL),
   CHECK (version >= 0),
   CHECK (epoch > 0)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS forge_resource_fences_scope_idx
+  ON forge_resource_fences(coalesce(tenant_id, ''), coalesce(project_id, ''), resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS forge_resource_fences_project_idx
   ON forge_resource_fences(project_id, resource_type, updated_at DESC);
 
 -- Callback receipts make an external event identity one-time without relying on process memory.
 CREATE TABLE IF NOT EXISTS forge_callback_receipts (
+  id bigserial PRIMARY KEY,
   tenant_id text,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
   source text NOT NULL,
@@ -85,9 +89,10 @@ CREATE TABLE IF NOT EXISTS forge_callback_receipts (
   first_seen_at timestamptz NOT NULL DEFAULT now(),
   applied_at timestamptz,
   details jsonb NOT NULL DEFAULT '{}'::jsonb,
-  PRIMARY KEY (tenant_id, project_id, source, external_event_id),
   CHECK (tenant_id IS NOT NULL OR project_id IS NOT NULL)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS forge_callback_receipts_scope_idx
+  ON forge_callback_receipts(coalesce(tenant_id, ''), coalesce(project_id, ''), source, external_event_id);
 CREATE INDEX IF NOT EXISTS forge_callback_receipts_hash_idx
   ON forge_callback_receipts(source, payload_hash, first_seen_at DESC);
 
@@ -119,7 +124,7 @@ DECLARE removed integer;
 BEGIN
   IF p_limit < 1 OR p_limit > 10000 THEN RAISE EXCEPTION 'p_limit must be between 1 and 10000'; END IF;
   WITH doomed AS (
-    SELECT tenant_id, project_id, operation, idempotency_key
+    SELECT id
     FROM forge_api_idempotency_keys
     WHERE expires_at < now()
       AND status IN ('COMMITTED','EXPIRED')
@@ -129,10 +134,7 @@ BEGIN
   )
   DELETE FROM forge_api_idempotency_keys k
   USING doomed d
-  WHERE k.tenant_id IS NOT DISTINCT FROM d.tenant_id
-    AND k.project_id IS NOT DISTINCT FROM d.project_id
-    AND k.operation=d.operation
-    AND k.idempotency_key=d.idempotency_key;
+  WHERE k.id=d.id;
   GET DIAGNOSTICS removed = ROW_COUNT;
   RETURN removed;
 END;
