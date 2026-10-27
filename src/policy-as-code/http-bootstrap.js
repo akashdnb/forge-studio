@@ -3,6 +3,7 @@
 const extended = require('../extended-http-api');
 const { authenticate, hasRole } = require('../security/http-security');
 const { handlePolicyRequest } = require('./bootstrap');
+const { diagnostics, runbook } = require('./diagnostics');
 
 if (!extended.__forgePolicyHttpPatched) {
   const original = extended.createExtendedApiServer;
@@ -24,6 +25,11 @@ if (!extended.__forgePolicyHttpPatched) {
           staticActor: process.env.FORGE_STATIC_ACTOR_ID || null,
           staticTenant: process.env.FORGE_STATIC_TENANT_ID || null
         });
+        if (pathname === '/internal/policy/health' || pathname === '/internal/policy/metrics') {
+          if (!auth || (!hasRole(auth, 'OWNER') && !hasRole(auth, 'ADMIN') && !hasRole(auth, 'OPERATOR'))) { response.writeHead(403); return response.end(JSON.stringify({ error: 'FORBIDDEN' })); }
+          const body = await diagnostics(pool, auth.tenantId); response.writeHead(body.healthy ? 200 : 503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); return response.end(JSON.stringify(body));
+        }
+        if (pathname === '/internal/policy/runbook') { response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); return response.end(JSON.stringify(runbook())); }
         return handlePolicyRequest(request, response, { pool, auth, hasRole });
       };
       return [wrapped, ...current.slice(1)];
