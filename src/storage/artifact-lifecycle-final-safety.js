@@ -1,12 +1,17 @@
 'use strict';
 const { ProductionArtifactLifecycleControlPlane } = require('./artifact-lifecycle-production');
-const { randomUUID } = require('node:crypto');
 
 class FinalArtifactLifecycleControlPlane extends ProductionArtifactLifecycleControlPlane {
   async _isProtected(client, tenantId, objectId) {
     const activeRef = await client.query(`SELECT ref_kind FROM artifact_content_refs WHERE tenant_id=$1 AND object_id=$2 AND active=true LIMIT 1`, [tenantId, objectId]);
     if (activeRef.rows[0]) return { protected: true, reason: `ACTIVE_REFERENCE:${activeRef.rows[0].ref_kind}` };
     return super._isProtected(client, tenantId, objectId);
+  }
+
+  async executeApprovedDeletes({ tenantId, generationId, actor = this.workerId, maxDeletes, maxDeleteBytes } = {}) {
+    await this.pool.query(`UPDATE artifact_deletion_intents SET state='APPROVED' WHERE tenant_id=$1 AND generation_id=$2
+      AND state='QUARANTINED' AND approval_required=false AND grace_until<=now()`, [tenantId, generationId]);
+    return super.executeApprovedDeletes({ tenantId, generationId, actor, maxDeletes, maxDeleteBytes });
   }
 
   async reconcileProvider({ tenantId, limit = 100 } = {}) {
