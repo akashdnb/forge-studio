@@ -1,4 +1,5 @@
-const { buildDiff, persistDiff, sha } = require('./version-diff');
+const { buildDiff } = require('./enriched-diff');
+const { persistDiff, sha } = require('./version-diff');
 const { getActiveObservability } = require('../observability');
 
 function createVersionDiffHandler({ pool, maxConcurrency = Number(process.env.FORGE_DIFF_MAX_CONCURRENCY || 2), timeoutMs = Number(process.env.FORGE_DIFF_TIMEOUT_MS || 600000) } = {}) {
@@ -13,8 +14,7 @@ function createVersionDiffHandler({ pool, maxConcurrency = Number(process.env.FO
     active++;
     const started = process.hrtime.bigint();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    timer.unref?.();
+    const timer = setTimeout(() => controller.abort(), timeoutMs); timer.unref?.();
     try {
       if (job?.cancellation_requested_at) throw Object.assign(new Error('Diff cancelled before execution'), { code: 'CANCELLED', retryable: false });
       const report = await buildDiff({ pool, episodeId: payload.episodeId, sourceVersionId: payload.sourceVersionId, targetVersionId: payload.targetVersionId, signal: controller.signal });
@@ -31,12 +31,8 @@ function createVersionDiffHandler({ pool, maxConcurrency = Number(process.env.FO
       const duration = Number(process.hrtime.bigint() - started) / 1e9;
       observability?.metrics.observe('forge_version_diff_latency_seconds', { outcome: finalCode.toLowerCase() }, duration);
       observability?.metrics.inc('forge_version_diff_jobs_total', { outcome: finalCode.toLowerCase() });
-      error.code = finalCode;
-      error.retryable = false;
-      throw error;
-    } finally {
-      clearTimeout(timer); active--;
-    }
+      error.code = finalCode; error.retryable = false; throw error;
+    } finally { clearTimeout(timer); active--; }
   };
 }
 function createDiffHandlers({ pool } = {}) { return { 'workflow:version-diff': createVersionDiffHandler({ pool }) }; }
