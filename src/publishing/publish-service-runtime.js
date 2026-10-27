@@ -16,9 +16,17 @@ class RuntimePublishService extends PublishService {
   }
   async loadRun(runId) { const run = await super.loadRun(runId); if (!run) return null; return { ...run, package_id: run.package_artifact_id, package_version_id: run.package_version_id }; }
   gate(run) { return super.gate(run); }
+  async assertReadyToShip(run) {
+    const result = await this.pool.query('SELECT final_ship_gate FROM episodes WHERE id=$1', [run.episode_id]);
+    const gate = result.rows[0]?.final_ship_gate || {};
+    if (gate.status !== 'READY_TO_SHIP') throw Object.assign(new Error('Publish blocked: final video finishing has not produced READY_TO_SHIP'), { code: 'READY_TO_SHIP_BLOCKED', retryable: false });
+    if (!gate.qaId || !gate.configHash || !Array.isArray(gate.artifactIds) || !gate.artifactIds.includes(run.render_artifact_id)) throw Object.assign(new Error('Publish blocked: selected render is not covered by the READY_TO_SHIP evidence'), { code: 'READY_TO_SHIP_STALE', retryable: false });
+    return gate;
+  }
   async publish({ runId, job = {}, actor = 'worker' }) {
     const run = await this.loadRun(runId);
     if (run) {
+      await this.assertReadyToShip(run);
       const quarantine = await this.pool.query(`SELECT 1 FROM forge_compensation_artifact_quarantines WHERE artifact_id=$1 AND status='QUARANTINED' AND tenant_id=$2 AND project_id=$3 LIMIT 1`, [run.render_artifact_id, run.tenant_id, run.project_id]);
       if (quarantine.rows[0]) throw Object.assign(new Error('Publish blocked: render artifact is quarantined by workflow compensation'), { code: 'ARTIFACT_QUARANTINED', retryable: false });
       await this.mediaValidator.assertPublishable({ tenantId: run.tenant_id, projectId: run.project_id, artifactId: run.render_artifact_id, versionId: run.render_version_id });
