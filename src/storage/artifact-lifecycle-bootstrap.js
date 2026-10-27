@@ -1,5 +1,5 @@
 'use strict';
-const { ProductionArtifactLifecycleControlPlane } = require('./artifact-lifecycle-production');
+const { FinalArtifactLifecycleControlPlane } = require('./artifact-lifecycle-final-safety');
 const { createStorageFromEnv } = require('./index');
 const { hasRole } = require('../security/http-security');
 const { randomUUID } = require('node:crypto');
@@ -30,7 +30,7 @@ function installArtifactLifecycleHttp() {
         const auth = req._auth;
         if (!auth || !auth.tenantId) return send(res, 403, { error: { code: 'TENANT_CONTEXT_REQUIRED' } }, requestId);
         if (!(await scopeTenant(options.repository.db.pool, auth.tenantId))) return send(res, 403, { error: { code: 'TENANT_ISOLATION' } }, requestId);
-        const service = new ProductionArtifactLifecycleControlPlane({ pool: options.repository.db.pool, storage });
+        const service = new FinalArtifactLifecycleControlPlane({ pool: options.repository.db.pool, storage });
         const actor = req.headers['x-actor-id'] || auth.actor || 'api';
         const parts = url.pathname.split('/').filter(Boolean);
         try {
