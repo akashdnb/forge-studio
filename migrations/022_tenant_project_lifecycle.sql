@@ -116,6 +116,24 @@ CREATE TABLE IF NOT EXISTS lifecycle_reconciliation (
   details jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- Preserve immutable evidence while allowing lifecycle roots to disappear. Historical audit rows are retained with a null resource pointer.
+DO $$ BEGIN
+  ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_project_id_fkey;
+  ALTER TABLE audit_events ADD CONSTRAINT audit_events_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE security_audit_events DROP CONSTRAINT IF EXISTS security_audit_events_project_id_fkey;
+  ALTER TABLE security_audit_events ADD CONSTRAINT security_audit_events_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE deletion_requests DROP CONSTRAINT IF EXISTS deletion_requests_project_id_fkey;
+  ALTER TABLE deletion_requests ADD CONSTRAINT deletion_requests_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE lifecycle_holds DROP CONSTRAINT IF EXISTS lifecycle_holds_project_id_fkey;
+  ALTER TABLE lifecycle_holds ADD CONSTRAINT lifecycle_holds_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
+
 CREATE OR REPLACE FUNCTION forge_lifecycle_guard_job() RETURNS trigger AS $$
 DECLARE s text; ts text;
 BEGIN
