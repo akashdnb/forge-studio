@@ -1,0 +1,99 @@
+'use strict';
+const { randomUUID } = require('node:crypto');
+
+const RESOURCES = Object.freeze({
+  api_requests: 'api_requests', workflow_jobs: 'workflow_jobs', provider_executions: 'provider_executions',
+  media_cpu: 'media_cpu', runner_executions: 'runner_executions', storage_operations: 'storage_operations'
+});
+const DEFAULT_RESOURCE = Object.freeze({
+  'workflow:render': 'media_cpu', 'workflow:transcription': 'media_cpu', 'workflow:media-derivative': 'media_cpu',
+  'workflow:assets': 'provider_executions', 'workflow:research': 'provider_executions', 'workflow:script': 'provider_executions',
+  'workflow:scene_plan': 'provider_executions', 'workflow:narration': 'provider_executions', 'workflow:timeline': 'provider_executions',
+  'workflow:captions': 'media_cpu', 'publish:youtube': 'provider_executions', 'workflow:media-reconcile': 'storage_operations'
+});
+const clampInt = (v, d) => Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : d;
+
+class CapacityControl {
+  constructor({ pool, workerId = `capacity-worker:${randomUUID()}`, workerType = 'forge-worker', clock = () => new Date(), logger = console, config = {} } = {}) {
+    if (!pool?.query || !pool?.connect) throw new TypeError('A pg-compatible pool is required');
+    this.pool = pool; this.workerId = workerId; this.workerType = workerType; this.clock = clock; this.logger = logger;
+    this.heartbeatTimeoutSeconds = clampInt(config.heartbeatTimeoutSeconds, 90);
+    this.claimLeaseSeconds = clampInt(config.claimLeaseSeconds, 120);
+    this.retryJitterSeconds = clampInt(config.retryJitterSeconds, 15);
+  }
+  resourceForJob(kind) { return DEFAULT_RESOURCE[kind] || 'workflow_jobs'; }
+  async registerWorker({ capacity = 1, capacityClass = 'default', metadata = {}, releaseEpoch = null } = {}) {
+    await this.pool.query(`INSERT INTO forge_capacity_workers(worker_id,worker_type,capacity_class,capacity,last_heartbeat_at,lease_until,release_epoch,metadata,updated_at)
+      VALUES($1,$2,$3,$4,now(),now()+make_interval(secs=>$5),$6,$7::jsonb,now())
+      ON CONFLICT(worker_id) DO UPDATE SET worker_type=EXCLUDED.worker_type,capacity_class=EXCLUDED.capacity_class,capacity=EXCLUDED.capacity,
+      state=CASE WHEN forge_capacity_workers.state='LOST' THEN 'READY' ELSE forge_capacity_workers.state END,last_heartbeat_at=now(),
+      lease_until=now()+make_interval(secs=>$5),release_epoch=EXCLUDED.release_epoch,metadata=EXCLUDED.metadata,updated_at=now()`,
+      [this.workerId, this.workerType, capacityClass, clampInt(capacity, 1), this.heartbeatTimeoutSeconds, releaseEpoch, JSON.stringify(metadata)]);
+  }
+  async heartbeat({ capacity, state, metadata, releaseEpoch } = {}) {
+    const sets = ['last_heartbeat_at=now()', `lease_until=now()+make_interval(secs=>${this.heartbeatTimeoutSeconds})`, 'updated_at=now()']; const args = [];
+    if (capacity != null) { args.push(clampInt(capacity, 1)); sets.push(`capacity=$${args.length}`); }
+    if (state) { args.push(state); sets.push(`state=$${args.length}`); }
+    if (metadata) { args.push(JSON.stringify(metadata)); sets.push(`metadata=$${args.length}::jsonb`); }
+    if (releaseEpoch !== undefined) { args.push(releaseEpoch); sets.push(`release_epoch=$${args.length}`); }
+    await this.pool.query(`UPDATE forge_capacity_workers SET ${sets.join(',')} WHERE worker_id=$${args.length + 1}`, [...args, this.workerId]);
+  }
+  async drain({ immediate = false } = {}) {
+    await this.pool.query(`UPDATE forge_capacity_workers SET state=$1,updated_at=now() WHERE worker_id=$2`, [immediate ? 'DRAINED' : 'DRAINING', this.workerId]);
+  }
+  async reconcileStaleWorkers() {
+    const r = await this.pool.query(`UPDATE forge_capacity_workers SET state='LOST',updated_at=now()
+      WHERE state IN ('READY','DRAINING') AND last_heartbeat_at < now()-make_interval(secs=>$1) RETURNING worker_id`, [this.heartbeatTimeoutSeconds]);
+    const expired = await this.pool.query(`UPDATE forge_capacity_claims SET status='EXPIRED',released_at=now()
+      WHERE status='HELD' AND (lease_until<now() OR worker_id IN (SELECT worker_id FROM forge_capacity_workers WHERE state='LOST')) RETURNING id`, []);
+    if (expired.rowCount) await this.pool.query(`UPDATE forge_capacity_workers w SET active_claims=GREATEST(0,(SELECT count(*) FROM forge_capacity_claims c WHERE c.worker_id=w.worker_id AND c.status='HELD')),updated_at=now() WHERE w.worker_id IN (SELECT worker_id FROM forge_capacity_workers WHERE state='LOST')`);
+    return { workersLost: r.rowCount, claimsExpired: expired.rowCount };
+  }
+  async _state(c, resource) {
+    const r = await c.query(`SELECT p.*,COALESCE((SELECT count(*) FROM forge_jobs j WHERE j.status='QUEUED'),0)::bigint queue_depth,
+      COALESCE((SELECT percentile_cont(.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM (now()-created_at))*1000) FROM forge_jobs WHERE status='QUEUED'),0) p95_latency_ms
+      FROM forge_capacity_pools p WHERE resource=$1 FOR UPDATE`, [resource]);
+    if (!r.rows[0]) throw Object.assign(new Error(`capacity pool ${resource} not configured`), { code: 'CAPACITY_POOL_MISSING' });
+    const p = r.rows[0];
+    const utilization = Number(p.capacity) ? Number(p.in_use + p.reserved) / Number(p.capacity) : 1;
+    let state = 'NORMAL';
+    if (p.drain) state = 'DRAINING'; else if (p.emergency_shed) state = 'SHED';
+    else if (Number(p.queue_depth) >= Number(p.queue_hard_limit) || utilization >= Number(p.utilization_hard) || Number(p.p95_latency_ms) >= Number(p.latency_hard_ms)) state = 'HARD';
+    else if (Number(p.queue_depth) >= Number(p.queue_soft_limit) || utilization >= Number(p.utilization_soft) || Number(p.p95_latency_ms) >= Number(p.latency_soft_ms)) state = 'SOFT';
+    return { ...p, utilization, state };
+  }
+  async admit({ resource = 'workflow_jobs', tenantId, projectId = null, jobId = null, workerId = this.workerId, priority = 0, units = 1, idempotencyKey, allowSoft = true, metadata = {} } = {}) {
+    if (!tenantId) throw Object.assign(new Error('tenantId is required for capacity admission'), { code: 'TENANT_ISOLATION' });
+    const c = await this.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const p = await this._state(c, resource);
+      const worker = (await c.query(`SELECT * FROM forge_capacity_workers WHERE worker_id=$1 FOR UPDATE`, [workerId])).rows[0];
+      if (!worker || worker.state !== 'READY' || Number(worker.active_claims) + units > Number(worker.capacity)) throw Object.assign(new Error('worker capacity unavailable'), { code: 'CAPACITY_WORKER_FULL', retryable: true });
+      const duplicate = (await c.query(`SELECT * FROM forge_capacity_claims WHERE idempotency_key=$1`, [idempotencyKey])).rows[0];
+      if (duplicate?.status === 'HELD') { await c.query('COMMIT'); return { allowed: true, claim: duplicate, state: p.state }; }
+      if (p.state === 'DRAINING' || p.state === 'SHED' || (p.state === 'HARD' && priority < Number(p.priority_floor)) || (!allowSoft && p.state === 'SOFT'))
+        throw Object.assign(new Error(`capacity backpressure: ${p.state.toLowerCase()}`), { code: 'CAPACITY_BACKPRESSURE', retryable: true, state: p.state });
+      if (Number(p.in_use) + Number(p.reserved) + units > Number(p.capacity)) throw Object.assign(new Error('capacity exhausted'), { code: 'CAPACITY_EXHAUSTED', retryable: true });
+      const id = randomUUID();
+      const claim = (await c.query(`INSERT INTO forge_capacity_claims(id,resource,worker_id,tenant_id,project_id,job_id,priority,units,lease_until,idempotency_key,metadata)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(secs=>$9),$10,$11::jsonb) RETURNING *`,
+        [id, resource, workerId, tenantId, projectId, jobId, priority, units, this.claimLeaseSeconds, idempotencyKey, JSON.stringify(metadata)])).rows[0];
+      await c.query(`UPDATE forge_capacity_pools SET in_use=in_use+$1,updated_at=now() WHERE resource=$2`, [units, resource]);
+      await c.query(`UPDATE forge_capacity_workers SET active_claims=active_claims+$1,updated_at=now() WHERE worker_id=$2`, [units, workerId]);
+      await c.query('COMMIT'); return { allowed: true, claim, state: p.state };
+    } catch (e) { try { await c.query('ROLLBACK'); } catch {} throw e; } finally { c.release(); }
+  }
+  async release({ claimId, outcome = 'RELEASED' }) {
+    const c = await this.pool.connect();
+    try { await c.query('BEGIN'); const r = await c.query(`UPDATE forge_capacity_claims SET status=$1,released_at=now() WHERE id=$2 AND status='HELD' RETURNING resource,worker_id,units`, [outcome === 'SETTLED' ? 'SETTLED' : 'RELEASED', claimId]); if (r.rows[0]) { const x=r.rows[0]; await c.query(`UPDATE forge_capacity_pools SET in_use=GREATEST(0,in_use-$1),updated_at=now() WHERE resource=$2`,[x.units,x.resource]); await c.query(`UPDATE forge_capacity_workers SET active_claims=GREATEST(0,active_claims-$1),updated_at=now() WHERE worker_id=$2`,[x.units,x.worker_id]); } await c.query('COMMIT'); return Boolean(r.rowCount); } catch(e){try{await c.query('ROLLBACK')}catch{}throw e} finally{c.release()}
+  }
+  async metrics() {
+    const r = await this.pool.query(`SELECT p.resource,p.capacity,p.in_use,p.reserved,p.queue_soft_limit,p.queue_hard_limit,p.utilization_soft,p.utilization_hard,p.drain,p.emergency_shed,
+      COALESCE((SELECT count(*) FROM forge_jobs j WHERE j.status='QUEUED'),0)::int queue_depth,
+      COALESCE((SELECT count(*) FROM forge_capacity_workers w WHERE w.state='READY'),0)::int ready_workers,
+      COALESCE((SELECT count(*) FROM forge_capacity_workers w WHERE w.state='LOST'),0)::int lost_workers
+      FROM forge_capacity_pools p ORDER BY p.resource`); return r.rows;
+  }
+}
+module.exports = { CapacityControl, RESOURCES };
