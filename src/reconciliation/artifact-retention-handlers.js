@@ -1,4 +1,5 @@
 const { ArtifactRetentionOptimizer } = require('../storage/artifact-retention-optimizer');
+const { ArtifactDuplicateCompactor } = require('../storage/artifact-duplicate-compactor');
 
 function parsePolicy() {
   let parsed = {};
@@ -11,13 +12,9 @@ function parsePolicy() {
 
 function createArtifactRetentionHandlers({ pool, storage, observability = null, workerId } = {}) {
   if (!pool || !storage) throw new TypeError('pool and storage are required');
-  const optimizer = new ArtifactRetentionOptimizer({
-    pool,
-    storage,
-    workerId,
-    policy: parsePolicy(),
-    metrics: observability?.metrics,
-  });
+  const policy = parsePolicy();
+  const optimizer = new ArtifactRetentionOptimizer({ pool, storage, workerId, policy, metrics: observability?.metrics });
+  const duplicateCompactor = new ArtifactDuplicateCompactor({ pool, storage, signal: null });
 
   async function run(payload = {}) {
     const action = payload.action || 'plan';
@@ -30,7 +27,11 @@ function createArtifactRetentionHandlers({ pool, storage, observability = null, 
     }
     if (action === 'approve') return { plan: await optimizer.approvePlan({ tenantId, planId: payload.planId, actor: payload.actor }) };
     if (action === 'cancel') return { plan: await optimizer.cancelPlan({ tenantId, planId: payload.planId }) };
-    if (action === 'compact') return { result: await optimizer.compactApprovedPlan({ tenantId, planId: payload.planId, maxDeletes: payload.maxDeletes }) };
+    if (action === 'compact') {
+      const duplicates = await duplicateCompactor.compact({ tenantId, maxObjects: payload.maxDuplicates || 25 });
+      const result = await optimizer.compactApprovedPlan({ tenantId, planId: payload.planId, maxDeletes: payload.maxDeletes });
+      return { result, duplicates, usageAccounting: { storageBytesReclaimed: Number(duplicates.bytesReclaimed || 0) + Number(result.deletedBytes || 0) } };
+    }
     if (action === 'report') return optimizer.report({ tenantId, planId: payload.planId });
     throw Object.assign(new Error(`Unsupported artifact retention action: ${action}`), { code: 'INVALID_ACTION', retryable: false });
   }
