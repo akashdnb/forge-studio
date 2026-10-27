@@ -1,6 +1,6 @@
-const { SafeSearchIndexConsistencyService } = require('./index-consistency-safe');
+const { JsonSafeSearchIndexConsistencyService } = require('./index-consistency-json-safe');
 
-class LockedSearchIndexConsistencyService extends SafeSearchIndexConsistencyService {
+class LockedSearchIndexConsistencyService extends JsonSafeSearchIndexConsistencyService {
   async runBatch(args) {
     const lock = await this.pool.query({ text: `SELECT pg_try_advisory_lock(hashtextextended($1,0)) locked`, values: [args.generationId] });
     if (!lock.rows[0]?.locked) return this.getGeneration({ tenantId: args.tenantId, generationId: args.generationId });
