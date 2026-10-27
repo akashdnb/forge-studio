@@ -1,0 +1,120 @@
+-- Durable saga/compensation state. Forward history is append-only; only
+-- compensation execution state is mutable. All rows are tenant/project scoped
+-- through the immutable workflow snapshot and ownership triggers.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS forge_compensation_plans (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  workflow_id text NOT NULL REFERENCES episode_workflows(id) ON DELETE RESTRICT,
+  workflow_version_hash char(64) NOT NULL,
+  plan_hash char(64) NOT NULL,
+  status text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','COMPENSATING','COMPENSATED','PARTIAL','QUARANTINED','CANCELLED')),
+  trigger text,
+  trigger_reason jsonb NOT NULL DEFAULT '{}'::jsonb,
+  operator_approval_id text,
+  created_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  finished_at timestamptz,
+  UNIQUE(workflow_id)
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_plans_tenant_idx ON forge_compensation_plans(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS forge_compensation_plans_project_idx ON forge_compensation_plans(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS forge_compensation_steps (
+  id text PRIMARY KEY,
+  plan_id text NOT NULL REFERENCES forge_compensation_plans(id) ON DELETE RESTRICT,
+  sequence_no integer NOT NULL CHECK (sequence_no > 0),
+  stage text NOT NULL,
+  action_type text NOT NULL CHECK (action_type IN ('RELEASE_RESERVATION','CANCEL_PUBLISH','PROVIDER_HTTP','QUARANTINE_ARTIFACT','NON_COMPENSATABLE')),
+  reversible boolean NOT NULL,
+  requires_approval boolean NOT NULL DEFAULT false,
+  status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','LEASED','RUNNING','SUCCEEDED','SKIPPED','FAILED','QUARANTINED')),
+  lease_token text,
+  lease_until timestamptz,
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts integer NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 20),
+  available_at timestamptz NOT NULL DEFAULT now(),
+  next_backoff_seconds integer NOT NULL DEFAULT 1 CHECK (next_backoff_seconds >= 1),
+  idempotency_key text NOT NULL UNIQUE,
+  side_effect_fingerprint char(64),
+  forward_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+  compensation_spec jsonb NOT NULL DEFAULT '{}'::jsonb,
+  last_error jsonb,
+  finished_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(plan_id, sequence_no)
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_steps_claim_idx ON forge_compensation_steps(status, available_at, sequence_no);
+CREATE INDEX IF NOT EXISTS forge_compensation_steps_plan_idx ON forge_compensation_steps(plan_id, sequence_no);
+
+CREATE TABLE IF NOT EXISTS forge_compensation_events (
+  id bigserial PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  plan_id text NOT NULL REFERENCES forge_compensation_plans(id) ON DELETE RESTRICT,
+  step_id text REFERENCES forge_compensation_steps(id) ON DELETE RESTRICT,
+  event_type text NOT NULL,
+  actor text NOT NULL,
+  fencing_token text,
+  event_key text NOT NULL UNIQUE,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_events_plan_idx ON forge_compensation_events(plan_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS forge_compensation_approvals (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  plan_id text NOT NULL REFERENCES forge_compensation_plans(id) ON DELETE RESTRICT,
+  step_id text REFERENCES forge_compensation_steps(id) ON DELETE RESTRICT,
+  requested_by text NOT NULL,
+  approved_by text,
+  status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED','EXPIRED')),
+  reason text NOT NULL,
+  expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  decided_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_approvals_scope_idx ON forge_compensation_approvals(tenant_id, project_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS forge_compensation_artifact_quarantines (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  project_id text NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  plan_id text NOT NULL REFERENCES forge_compensation_plans(id) ON DELETE RESTRICT,
+  step_id text NOT NULL REFERENCES forge_compensation_steps(id) ON DELETE RESTRICT,
+  artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+  version_id text NOT NULL REFERENCES version_records(id) ON DELETE RESTRICT,
+  reason text NOT NULL,
+  status text NOT NULL DEFAULT 'QUARANTINED' CHECK (status IN ('QUARANTINED','RELEASED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(plan_id, artifact_id)
+);
+CREATE INDEX IF NOT EXISTS forge_compensation_artifact_quarantine_scope_idx ON forge_compensation_artifact_quarantines(tenant_id, project_id, artifact_id);
+
+CREATE OR REPLACE FUNCTION forge_compensation_scope_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE expected_tenant text;
+BEGIN
+  SELECT p.tenant_id INTO expected_tenant FROM projects p WHERE p.id=NEW.project_id;
+  IF expected_tenant IS NULL OR expected_tenant<>NEW.tenant_id THEN RAISE EXCEPTION 'compensation tenant/project mismatch'; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS forge_compensation_scope_guard ON forge_compensation_plans;
+CREATE TRIGGER forge_compensation_scope_guard BEFORE INSERT OR UPDATE ON forge_compensation_plans FOR EACH ROW EXECUTE FUNCTION forge_compensation_scope_guard();
+
+CREATE OR REPLACE FUNCTION forge_compensation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_TABLE_NAME='forge_compensation_plans' AND (NEW.workflow_id<>OLD.workflow_id OR NEW.workflow_version_hash<>OLD.workflow_version_hash OR NEW.plan_hash<>OLD.plan_hash OR NEW.tenant_id<>OLD.tenant_id OR NEW.project_id<>OLD.project_id) THEN RAISE EXCEPTION 'immutable compensation plan identity'; END IF;
+  IF TG_TABLE_NAME='forge_compensation_steps' AND (NEW.plan_id<>OLD.plan_id OR NEW.sequence_no<>OLD.sequence_no OR NEW.action_type<>OLD.action_type OR NEW.idempotency_key<>OLD.idempotency_key OR NEW.forward_evidence<>OLD.forward_evidence OR NEW.compensation_spec<>OLD.compensation_spec) THEN RAISE EXCEPTION 'immutable compensation step definition'; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS forge_compensation_plan_immutable ON forge_compensation_plans;
+CREATE TRIGGER forge_compensation_plan_immutable BEFORE UPDATE ON forge_compensation_plans FOR EACH ROW EXECUTE FUNCTION forge_compensation_immutable();
+DROP TRIGGER IF EXISTS forge_compensation_step_immutable ON forge_compensation_steps;
+CREATE TRIGGER forge_compensation_step_immutable BEFORE UPDATE ON forge_compensation_steps FOR EACH ROW EXECUTE FUNCTION forge_compensation_immutable();
+
+COMMIT;
