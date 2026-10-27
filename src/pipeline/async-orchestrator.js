@@ -1,7 +1,7 @@
 const { EpisodeWorkflowIntegration, WORKFLOW_STAGES, WORKFLOW_DEPENDENCIES } = require('./episode-workflow-integration');
 const { WorkflowTemplateService } = require('../workflow-templates/service');
 class AsyncEpisodeOrchestrator {
-  constructor({ pool, leaseSeconds = 300 }) { if (!pool) throw new TypeError('pool is required'); this.integration = new EpisodeWorkflowIntegration({pool,leaseSeconds}); this.queue=this.integration.queue; this.templates=new WorkflowTemplateService({pool}); }
+  constructor({ pool, leaseSeconds = 300 }) { if (!pool) throw new TypeError('pool is required'); this.pool=pool; this.integration = new EpisodeWorkflowIntegration({pool,leaseSeconds}); this.queue=this.integration.queue; this.templates=new WorkflowTemplateService({pool}); }
   async enqueue({ episodeId, projectId=null, brief, stages=WORKFLOW_STAGES, actor='workflow', idempotencyPrefix=null, tenantId=null }) {
     const episode=(await this.pool.query('SELECT e.*,p.tenant_id FROM episodes e JOIN projects p ON p.id=e.project_id WHERE e.id=$1',[episodeId])).rows[0];
     const effectiveTenant=tenantId||episode?.tenant_id||actor;
