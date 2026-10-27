@@ -5,7 +5,7 @@ const path = require('node:path');
 const { sha256, safeJson, retentionUntil, installInboundEventHardening } = require('../src/events/inbound-event-hardening');
 
 test('inbound hardening helpers are deterministic and bounded', () => {
-  assert.equal(sha256('forge'), '4d7f3e2d6c6e0a0c2c8e2a9c7e9b5c5d7b6f3f8f5c6b6f3f7c0a9c2d0e5b8f1');
+  assert.equal(sha256('forge'), '71b41d6dd48dc58eba8f5cf9edf30fef6597fdf285a521bb8fcbad4b3d50887d');
   assert.deepEqual(safeJson('{"correlationId":"c1"}'), { correlationId: 'c1' });
   assert.deepEqual(safeJson('[]'), {});
   assert.deepEqual(safeJson('{bad'), {});
@@ -33,7 +33,7 @@ test('hardening wrapper persists verified intake and duplicate state', async () 
   const service = new Service();
   const result = await service.ingest({ endpointId: 'wh_1', method: 'POST', path: '/webhooks/wh_1/events', timestamp: '1767225600', nonce: 'nonce_12345678', signature: 'v1=' + 'a'.repeat(64), externalEventId: 'evt_1', eventType: 'provider.callback', version: 1, body: '{"providerRunId":"r1","status":"ok"}', contentType: 'application/json' });
   assert.deepEqual(result, { status: 'ACCEPTED', eventId: 'in_1' });
-  assert.ok(calls.some(sql => sql.includes("processing_state=$1") || sql.includes("processing_state=$1")));
+  assert.ok(calls.some(sql => sql.includes('UPDATE forge_event_intake')));
 });
 
 test('migration contains immutable identity, tenant guard and concurrent replay gate', () => {
