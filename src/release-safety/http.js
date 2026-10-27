@@ -4,6 +4,8 @@ const { URL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const { authenticate, hasRole } = require('../security/http-security');
 const { DeploymentSafetyService } = require('./deployment-safety');
+const { installPublicRunnerEpochGuards } = require('./runtime-guards');
+installPublicRunnerEpochGuards();
 
 function reply(res, status, body, requestId) { if (res.headersSent) return; res.setHeader('content-type','application/json; charset=utf-8'); res.setHeader('cache-control','no-store'); res.setHeader('x-request-id',requestId); res.writeHead(status); res.end(JSON.stringify(body)); }
 async function body(req) { const chunks=[]; let size=0; for await(const chunk of req){size+=chunk.length;if(size>256*1024)throw Object.assign(new Error('Request body exceeds limit'),{statusCode:413,code:'PAYLOAD_TOO_LARGE'});chunks.push(chunk)} if(!chunks.length)return{}; try{return JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{throw Object.assign(new Error('Malformed JSON request body'),{statusCode:400,code:'VALIDATION_ERROR'})} }
@@ -33,11 +35,11 @@ function installReleaseDeploymentSafety({ pg=null, authSecret=process.env.FORGE_
     if(parts[2]&&parts[2]!=='health'&&parts[2]!=='diagnostics'){
       const releaseId=parts[2];
       if(req.method==='GET'&&parts.length===4&&parts[3]==='health')return reply(res,200,await service.health(releaseId),requestId);
-      if(req.method==='POST'&&parts.length===4&&parts[3]==='preflight'){return reply(res,200,await service.preflight(releaseId,{},auth.actor),requestId)}
-      if(req.method==='POST'&&parts.length===4&&parts[3]==='approve'){return reply(res,200,await service.approve(releaseId,auth.actor,await body(req)),requestId)}
-      if(req.method==='POST'&&parts.length===4&&parts[3]==='activate'){return reply(res,202,await service.activate(releaseId,auth.actor),requestId)}
-      if(req.method==='POST'&&parts.length===4&&parts[3]==='health'){return reply(res,200,await service.completeHealth(releaseId,auth.actor),requestId)}
-      if(req.method==='POST'&&parts.length===4&&parts[3]==='rollback'){return reply(res,200,await service.rollback(releaseId,auth.actor,await body(req)),requestId)}
+      if(req.method==='POST'&&parts.length===4&&parts[3]==='preflight')return reply(res,200,await service.preflight(releaseId,{},auth.actor),requestId);
+      if(req.method==='POST'&&parts.length===4&&parts[3]==='approve')return reply(res,200,await service.approve(releaseId,auth.actor,await body(req)),requestId);
+      if(req.method==='POST'&&parts.length===4&&parts[3]==='activate')return reply(res,202,await service.activate(releaseId,auth.actor),requestId);
+      if(req.method==='POST'&&parts.length===4&&parts[3]==='health')return reply(res,200,await service.completeHealth(releaseId,auth.actor),requestId);
+      if(req.method==='POST'&&parts.length===4&&parts[3]==='rollback')return reply(res,200,await service.rollback(releaseId,auth.actor,await body(req)),requestId);
     }
     if(req.method==='POST'&&parts.length===3&&parts[2]==='plan'){const input=await body(req);const manifest=await service.persistManifest({...input,releaseId:input.releaseId||randomUUID()},auth.actor);return reply(res,201,{item:manifest},requestId)}
     return reply(res,404,{error:{code:'NOT_FOUND'},requestId},requestId);
