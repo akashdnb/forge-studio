@@ -2,148 +2,57 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { randomBytes, randomUUID } = require('node:crypto');
 
 const als = new AsyncLocalStorage();
+let activeObservability = null;
 const LABEL_LIMITS = Object.freeze({ method: 16, route: 96, status: 8, job_kind: 64, stage: 48, provider: 64, outcome: 24, dependency: 32, reason: 48 });
 const SECRET_KEY = /(?:authorization|cookie|token|secret|password|passwd|api[-_]?key|client[-_]?secret|refresh[-_]?token|access[-_]?token|credential|signature|set-cookie)/i;
 const CONTENT_KEY = /^(?:content|body|payload|prompt|request|response|input|output|artifact)$/i;
 
-function clampLabel(name, value) {
-  const limit = LABEL_LIMITS[name] || 64;
-  const normalized = value == null ? 'unknown' : String(value).trim().toLowerCase();
-  return normalized.length > limit ? normalized.slice(0, limit) : normalized;
-}
-
-function sanitizeLabels(labels = {}) {
-  const out = {};
-  for (const [key, value] of Object.entries(labels)) {
-    if (!Object.prototype.hasOwnProperty.call(LABEL_LIMITS, key)) continue;
-    out[key] = clampLabel(key, value);
-  }
-  return out;
-}
-
+function clampLabel(name, value) { const limit = LABEL_LIMITS[name] || 64; const normalized = value == null ? 'unknown' : String(value).trim().toLowerCase(); return normalized.length > limit ? normalized.slice(0, limit) : normalized; }
+function sanitizeLabels(labels = {}) { const out = {}; for (const [key, value] of Object.entries(labels)) { if (!Object.prototype.hasOwnProperty.call(LABEL_LIMITS, key)) continue; out[key] = clampLabel(key, value); } return out; }
 function redact(value, depth = 0) {
   if (depth > 5) return '[REDACTED_DEPTH]';
   if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.length > 512 ? `${value.slice(0, 128)}…[REDACTED_CONTENT]` : value;
   if (Buffer.isBuffer(value)) return `[REDACTED_BUFFER:${value.length}]`;
   if (Array.isArray(value)) return value.slice(0, 32).map((item) => redact(item, depth + 1));
-  if (typeof value === 'object') {
-    const out = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (SECRET_KEY.test(key) || CONTENT_KEY.test(key)) out[key] = '[REDACTED]';
-      else if (/^(?:id|requestId|traceId|spanId|jobId|episodeId|versionId|stageId|projectId|providerRunId)$/i.test(key)) out[key] = typeof item === 'string' ? item : String(item);
-      else out[key] = redact(item, depth + 1);
-    }
-    return out;
-  }
+  if (typeof value === 'object') { const out = {}; for (const [key, item] of Object.entries(value)) { if (SECRET_KEY.test(key) || CONTENT_KEY.test(key)) out[key] = '[REDACTED]'; else if (/^(?:id|requestId|traceId|spanId|jobId|episodeId|versionId|stageId|projectId|providerRunId)$/i.test(key)) out[key] = typeof item === 'string' ? item : String(item); else out[key] = redact(item, depth + 1); } return out; }
   return String(value);
 }
-
 function randomHex(bytes) { return randomBytes(bytes).toString('hex'); }
 function validTraceId(value) { return /^[0-9a-f]{32}$/i.test(value || '') && !/^0+$/.test(value); }
 function validSpanId(value) { return /^[0-9a-f]{16}$/i.test(value || '') && !/^0+$/.test(value); }
-
-function parseTraceparent(header) {
-  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(String(header || ''));
-  if (!match || !validTraceId(match[1]) || !validSpanId(match[2]) || match[3] === '00') return null;
-  return { traceId: match[1].toLowerCase(), parentSpanId: match[2].toLowerCase(), traceFlags: match[3].toLowerCase() };
-}
-
-function createTraceContext({ traceparent, traceId, spanId, parentSpanId, correlationId } = {}) {
-  const parsed = parseTraceparent(traceparent);
-  return {
-    traceId: validTraceId(traceId) ? traceId : (parsed?.traceId || randomHex(16)),
-    spanId: validSpanId(spanId) ? spanId : randomHex(8),
-    parentSpanId: validSpanId(parentSpanId) ? parentSpanId : (parsed?.parentSpanId || null),
-    correlationId: typeof correlationId === 'string' && correlationId.length <= 128 ? correlationId : randomUUID(),
-    traceFlags: parsed?.traceFlags || '01',
-  };
-}
-
+function parseTraceparent(header) { const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(String(header || '')); if (!match || !validTraceId(match[1]) || !validSpanId(match[2]) || match[3] === '00') return null; return { traceId: match[1].toLowerCase(), parentSpanId: match[2].toLowerCase(), traceFlags: match[3].toLowerCase() }; }
+function createTraceContext({ traceparent: header, traceId, spanId, parentSpanId, correlationId } = {}) { const parsed = parseTraceparent(header); return { traceId: validTraceId(traceId) ? traceId : (parsed?.traceId || randomHex(16)), spanId: validSpanId(spanId) ? spanId : randomHex(8), parentSpanId: validSpanId(parentSpanId) ? parentSpanId : (parsed?.parentSpanId || null), correlationId: typeof correlationId === 'string' && correlationId.length <= 128 ? correlationId : randomUUID(), traceFlags: parsed?.traceFlags || '01' }; }
 function traceparent(context) { return `00-${context.traceId}-${context.spanId}-${context.traceFlags || '01'}`; }
+function getCurrentTraceContext() { return als.getStore() || null; }
+function setActiveObservability(value) { activeObservability = value || null; }
+function getActiveObservability() { return activeObservability; }
 
 class MetricsRegistry {
   constructor({ maxSeries = 4000 } = {}) { this.maxSeries = maxSeries; this.series = new Map(); }
   _key(name, labels) { return `${name}|${Object.keys(labels).sort().map((key) => `${key}=${labels[key]}`).join(',')}`; }
-  _series(name, labels) {
-    const safe = sanitizeLabels(labels);
-    const key = this._key(name, safe);
-    let entry = this.series.get(key);
-    if (!entry) {
-      if (this.series.size >= this.maxSeries) return null;
-      entry = { name, labels: safe, value: 0, buckets: null, count: 0, sum: 0 };
-      this.series.set(key, entry);
-    }
-    return entry;
-  }
+  _series(name, labels) { const safe = sanitizeLabels(labels); const key = this._key(name, safe); let entry = this.series.get(key); if (!entry) { if (this.series.size >= this.maxSeries) return null; entry = { name, labels: safe, value: 0, buckets: null, count: 0, sum: 0 }; this.series.set(key, entry); } return entry; }
   inc(name, labels = {}, value = 1) { const entry = this._series(name, labels); if (entry) entry.value += Number(value) || 0; }
   set(name, labels = {}, value = 0) { const entry = this._series(name, labels); if (entry) entry.value = Number(value) || 0; }
-  observe(name, labels = {}, value, buckets = [0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]) {
-    const entry = this._series(name, labels); if (!entry) return;
-    if (!entry.buckets) entry.buckets = Object.fromEntries(buckets.map((bucket) => [String(bucket), 0]));
-    const numeric = Math.max(0, Number(value) || 0); entry.count += 1; entry.sum += numeric;
-    for (const bucket of buckets) if (numeric <= bucket) entry.buckets[String(bucket)] += 1;
-  }
-  render() {
-    const grouped = new Map();
-    for (const entry of this.series.values()) {
-      if (!grouped.has(entry.name)) grouped.set(entry.name, []); grouped.get(entry.name).push(entry);
-    }
-    const lines = ['# HELP forge_observability_series Forge Studio bounded in-process observability series', '# TYPE forge_observability_series gauge'];
-    for (const [name, entries] of grouped) {
-      for (const entry of entries) {
-        const labels = Object.entries(entry.labels).map(([k, v]) => `${k}="${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') }"`).join(',');
-        const suffix = labels ? `{${labels}}` : '';
-        if (entry.buckets) {
-          for (const [bucket, count] of Object.entries(entry.buckets)) lines.push(`${name}_bucket${suffix.slice(0, -1)}${labels ? ',' : '{'}le="${bucket}"}${labels ? '' : ''} ${count}`);
-          lines.push(`${name}_count${suffix} ${entry.count}`); lines.push(`${name}_sum${suffix} ${entry.sum}`);
-        } else lines.push(`${name}${suffix} ${entry.value}`);
-      }
-    }
-    return `${lines.join('\n')}\n`;
-  }
+  observe(name, labels = {}, value, buckets = [0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]) { const entry = this._series(name, labels); if (!entry) return; if (!entry.buckets) entry.buckets = Object.fromEntries(buckets.map((bucket) => [String(bucket), 0])); const numeric = Math.max(0, Number(value) || 0); entry.count += 1; entry.sum += numeric; for (const bucket of buckets) if (numeric <= bucket) entry.buckets[String(bucket)] += 1; }
+  render() { const grouped = new Map(); for (const entry of this.series.values()) { if (!grouped.has(entry.name)) grouped.set(entry.name, []); grouped.get(entry.name).push(entry); } const lines = []; for (const [name, entries] of grouped) { for (const entry of entries) { const baseLabels = Object.entries(entry.labels).map(([k, v]) => `${k}="${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`); if (entry.buckets) { for (const [bucket, count] of Object.entries(entry.buckets)) lines.push(`${name}_bucket{${[...baseLabels, `le="${bucket}"`].join(',')}} ${count}`); lines.push(`${name}_count{${baseLabels.join(',')}} ${entry.count}`); lines.push(`${name}_sum{${baseLabels.join(',')}} ${entry.sum}`); } else lines.push(`${name}${baseLabels.length ? `{${baseLabels.join(',')}}` : ''} ${entry.value}`); } } return `${lines.join('\n')}\n`; }
   snapshot() { return [...this.series.values()].map((entry) => ({ ...entry, labels: { ...entry.labels }, buckets: entry.buckets ? { ...entry.buckets } : null })); }
 }
 
 class Observability {
-  constructor({ service = 'forge-studio', logger = console, pool = null, sampleRate = Number(process.env.FORGE_TRACE_SAMPLE_RATE ?? '0.1') } = {}) {
-    this.service = service; this.logger = logger; this.pool = pool; this.sampleRate = Number.isFinite(sampleRate) ? Math.min(1, Math.max(0, sampleRate)) : 0.1;
-    this.metrics = new MetricsRegistry({ maxSeries: Number.parseInt(process.env.FORGE_METRICS_MAX_SERIES || '4000', 10) });
-  }
-  context() { return als.getStore() || null; }
+  constructor({ service = 'forge-studio', logger = console, pool = null, sampleRate = Number(process.env.FORGE_TRACE_SAMPLE_RATE ?? '0.1') } = {}) { this.service = service; this.logger = logger; this.pool = pool; this.sampleRate = Number.isFinite(sampleRate) ? Math.min(1, Math.max(0, sampleRate)) : 0.1; this.metrics = new MetricsRegistry({ maxSeries: Number.parseInt(process.env.FORGE_METRICS_MAX_SERIES || '4000', 10) }); setActiveObservability(this); }
+  context() { return getCurrentTraceContext(); }
   run(context, fn) { return als.run(context, fn); }
-  startSpan(name, attributes = {}) {
-    const parent = this.context(); const context = createTraceContext({ traceId: parent?.traceId, parentSpanId: parent?.spanId, correlationId: parent?.correlationId });
-    const start = process.hrtime.bigint(); const sampled = parent ? parent.sampled !== false : Math.random() < this.sampleRate;
-    const span = { ...context, name, sampled, attributes: redact(attributes), start, ended: false };
-    const finish = (error = null, extra = {}) => { if (span.ended) return; span.ended = true; const duration = Number(process.hrtime.bigint() - start) / 1e9; this.metrics.observe('forge_trace_span_duration_seconds', { stage: name }, duration); if (error) this.metrics.inc('forge_trace_span_errors_total', { stage: name, outcome: 'error' }); if (sampled) this.log('trace', { traceId: span.traceId, spanId: span.spanId, parentSpanId: span.parentSpanId, span: name, durationMs: Math.round(duration * 1000), ...extra, error: error ? redact({ message: error.message, code: error.code }) : undefined }); };
-    return { context: { ...context, sampled }, finish, run: (fn) => this.run({ ...context, sampled }, fn), traceparent: traceparent({ ...context, traceFlags: sampled ? '01' : '00' }) };
-  }
+  startSpan(name, attributes = {}) { const parent = this.context(); const context = createTraceContext({ traceId: parent?.traceId, parentSpanId: parent?.spanId, correlationId: parent?.correlationId }); const start = process.hrtime.bigint(); const sampled = parent ? parent.sampled !== false : Math.random() < this.sampleRate; const finish = (error = null, extra = {}) => { const duration = Number(process.hrtime.bigint() - start) / 1e9; this.metrics.observe('forge_trace_span_duration_seconds', { stage: name }, duration); if (error) this.metrics.inc('forge_trace_span_errors_total', { stage: name, outcome: 'error' }); if (sampled) this.log('trace', { traceId: context.traceId, spanId: context.spanId, parentSpanId: context.parentSpanId, span: name, durationMs: Math.round(duration * 1000), ...extra, error: error ? redact({ message: error.message, code: error.code }) : undefined }); }; return { context: { ...context, sampled }, finish, run: (fn) => this.run({ ...context, sampled }, fn), traceparent: traceparent({ ...context, traceFlags: sampled ? '01' : '00' }) }; }
   async withSpan(name, attributes, fn) { const span = this.startSpan(name, attributes); try { return await span.run(fn); } catch (error) { span.finish(error); throw error; } finally { if (!span.ended) span.finish(); } }
   log(level, fields = {}) { const payload = redact({ timestamp: new Date().toISOString(), level, service: this.service, ...this.context(), ...fields }); delete payload.sampled; this.logger?.[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info']?.(JSON.stringify(payload)); }
-  httpRequest(req, res, route = 'unknown') {
-    const context = createTraceContext({ traceparent: req.headers.traceparent, correlationId: req.headers['x-correlation-id'] || req.headers['x-request-id'] });
-    res.setHeader('x-request-id', context.correlationId); res.setHeader('traceparent', traceparent(context));
-    const start = process.hrtime.bigint(); const method = req.method || 'GET';
-    const finish = () => { const seconds = Number(process.hrtime.bigint() - start) / 1e9; const status = String(res.statusCode || 200); this.metrics.inc('forge_http_requests_total', { method, route, status }); this.metrics.observe('forge_http_request_duration_seconds', { method, route }, seconds); this.log(res.statusCode >= 500 ? 'error' : 'info', { event: 'http.request', method, route, status: Number(status), durationMs: Math.round(seconds * 1000) }); };
-    res.once('finish', finish); return context;
-  }
-  jobContext(job, parentContext = this.context()) {
-    return createTraceContext({ traceparent: parentContext ? traceparent(parentContext) : undefined, correlationId: job?.correlation_id || parentContext?.correlationId, traceId: job?.trace_id || parentContext?.traceId });
-  }
-  recordJob(job, outcome, durationSeconds) {
-    const labels = { job_kind: job?.kind || 'unknown', outcome: outcome || 'unknown' };
-    this.metrics.inc('forge_jobs_total', labels); if (durationSeconds != null) this.metrics.observe('forge_job_duration_seconds', { job_kind: labels.job_kind }, durationSeconds); if (Number(job?.attempts) > 1) this.metrics.inc('forge_job_retries_total', { job_kind: labels.job_kind });
-  }
-  async audit(event) {
-    if (!this.pool) return;
-    const safe = redact(event.details || {}); try {
-      await this.pool.query('INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,request_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [event.projectId || null, event.episodeId || null, event.actor || 'system', event.action, event.targetType || 'system', String(event.targetId || 'unknown').slice(0, 256), event.requestId || this.context()?.correlationId || null, JSON.stringify(safe)]);
-    } catch (error) { this.metrics.inc('forge_observability_audit_failures_total', { outcome: 'error' }); this.log('error', { event: 'audit.persist_failed', error: { message: error.message } }); }
-  }
+  httpRequest(req, res, route = 'unknown') { const context = createTraceContext({ traceparent: req.headers.traceparent, correlationId: req.headers['x-correlation-id'] || req.headers['x-request-id'] }); res.setHeader('x-request-id', context.correlationId); res.setHeader('traceparent', traceparent(context)); const start = process.hrtime.bigint(); const method = req.method || 'GET'; const finish = () => { const seconds = Number(process.hrtime.bigint() - start) / 1e9; const status = String(res.statusCode || 200); this.metrics.inc('forge_http_requests_total', { method, route, status }); this.metrics.observe('forge_http_request_duration_seconds', { method, route }, seconds); this.log(res.statusCode >= 500 ? 'error' : 'info', { event: 'http.request', method, route, status: Number(status), durationMs: Math.round(seconds * 1000) }); }; res.once('finish', finish); return context; }
+  jobContext(job, parentContext = this.context()) { return createTraceContext({ traceparent: parentContext ? traceparent(parentContext) : undefined, correlationId: job?.correlation_id || parentContext?.correlationId, traceId: job?.trace_id || parentContext?.traceId }); }
+  recordJob(job, outcome, durationSeconds) { const labels = { job_kind: job?.kind || 'unknown', outcome: outcome || 'unknown' }; this.metrics.inc('forge_jobs_total', labels); if (durationSeconds != null) this.metrics.observe('forge_job_duration_seconds', { job_kind: labels.job_kind }, durationSeconds); if (Number(job?.attempts) > 1) this.metrics.inc('forge_job_retries_total', { job_kind: labels.job_kind }); }
+  async audit(event) { if (!this.pool) return; const safe = redact(event.details || {}); try { await this.pool.query('INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,request_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [event.projectId || null, event.episodeId || null, event.actor || 'system', event.action, event.targetType || 'system', String(event.targetId || 'unknown').slice(0, 256), event.requestId || this.context()?.correlationId || null, JSON.stringify(safe)]); } catch (error) { this.metrics.inc('forge_observability_audit_failures_total', { outcome: 'error' }); this.log('error', { event: 'audit.persist_failed', error: { message: error.message } }); } }
   async dependencyCheck(name, check) { const start = Date.now(); try { const details = await check(); this.metrics.set('forge_dependency_health', { dependency: name }, 1); return { name, status: 'ok', latencyMs: Date.now() - start, details: redact(details || {}) }; } catch (error) { this.metrics.set('forge_dependency_health', { dependency: name }, 0); return { name, status: 'unavailable', latencyMs: Date.now() - start, error: error.code || 'DEPENDENCY_ERROR' }; } }
   async diagnostics() { const checks = []; if (this.pool) checks.push(await this.dependencyCheck('postgres', async () => { const result = await this.pool.query('SELECT 1 AS ok'); return { ok: result.rows[0]?.ok === 1 }; })); return { status: checks.every((check) => check.status === 'ok') ? 'ok' : 'degraded', service: this.service, checks, metricsSeries: this.metrics.series.size, sampleRate: this.sampleRate }; }
   metricsText() { return this.metrics.render(); }
 }
 
-module.exports = { Observability, MetricsRegistry, redact, sanitizeLabels, parseTraceparent, createTraceContext, traceparent, LABEL_LIMITS };
+module.exports = { Observability, MetricsRegistry, redact, sanitizeLabels, parseTraceparent, createTraceContext, traceparent, getCurrentTraceContext, setActiveObservability, getActiveObservability, LABEL_LIMITS };
