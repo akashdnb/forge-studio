@@ -2,6 +2,7 @@
 BEGIN;
 
 ALTER TABLE publish_runs
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS provider_response jsonb NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS upload_session_uri text,
   ADD COLUMN IF NOT EXISTS last_provider_status integer,
