@@ -83,7 +83,9 @@ test('postgres search integration: resumable rebuild and missing-entry reconcili
   assert.ok(found.items.some(item => item.source_id === project));
   await pool.query(`DELETE FROM forge_search_documents WHERE project_id=$1 AND source_type='project' AND source_id=$1`, [project]);
   const reconciled = await search.reconcile({ tenantId:tenant, actor, projectId:project, limit:10 });
-  assert.ok(reconciled.missingRepaired >= 1);
+  assert.ok(reconciled.missingEntriesDetected >= 1);
+  const repair = await search.rebuildBatch({ tenantId:tenant, actor, rebuildId:reconciled.rebuildId, limit:10 });
+  assert.ok(['RUNNING','SUCCEEDED'].includes(repair.state));
   const repaired = await search.search({ tenantId:tenant, actor, params:{ query:'Rebuild', projectId:project, limit:'10' } });
   assert.ok(repaired.items.some(item => item.source_id === project));
   await pool.query(`DELETE FROM project_members WHERE project_id=$1`, [project]);
