@@ -6,6 +6,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { authenticate, hasRole, applySecurityHeaders } = require('../security/http-security');
 const { FencedOutboundWebhookReliability } = require('./fenced-outbound-webhook-reliability');
 const { EVENT_SCHEMAS } = require('./durable-delivery');
+const { EventSchemaRegistry } = require('./schema-registry');
 
 async function readJson(req, limit = 1024 * 1024) {
   let size = 0;
@@ -57,6 +58,7 @@ function createDurableEventApi({
   logger = console,
 } = {}) {
   const delivery = new FencedOutboundWebhookReliability({ pool, logger });
+  const registry = new EventSchemaRegistry({ pool, logger });
   const server = http.createServer(async (req, res) => {
     const requestId = req.headers['x-request-id'] || randomUUID();
     try {
@@ -70,6 +72,64 @@ function createDurableEventApi({
         return send(res, 200, { status: metrics.staleLeases || metrics.circuits.some((x) => x.circuit_state === 'OPEN') ? 'degraded' : 'ok', component: 'outbound-webhook-delivery', metrics }, requestId);
       }
       if (req.method === 'GET' && url.pathname === '/v1/event-schemas') return send(res, 200, { schemas: EVENT_SCHEMAS }, requestId);
+
+      if (req.method === 'GET' && url.pathname === '/v1/schema-registry/health') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        return send(res, 200, { item: await registry.health({ tenantId: auth.tenantId }) }, requestId);
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/schema-registry/consumers') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        return send(res, 200, { items: await registry.inventory({ tenantId: auth.tenantId, eventFamily: url.searchParams.get('eventFamily') || null }) }, requestId);
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/schema-registry/family') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const family = await registry.getFamily(url.searchParams.get('eventFamily'), auth.tenantId);
+        if (!family) return send(res, 404, { error: { code: 'SCHEMA_FAMILY_NOT_FOUND' } }, requestId);
+        const versions = (await pool.query(`SELECT id,version,fingerprint,status,effective_at,deprecated_at,producer_owner,consumer_owners,migration_metadata,created_by,created_at,updated_at FROM forge_event_schemas WHERE family_id=$1 ORDER BY version DESC`, [family.id])).rows;
+        return send(res, 200, { family, versions }, requestId);
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/schema-registry/quarantine') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 50)));
+        const rows = await pool.query(`SELECT id,project_id,event_family,event_version,payload_fingerprint,reason_code,reason,source,source_id,replay_of,released_at,released_by,created_at FROM forge_event_schema_quarantine WHERE tenant_id=$1 AND ($2::text IS NULL OR event_family=$2) ORDER BY created_at DESC LIMIT $3`, [auth.tenantId, url.searchParams.get('eventFamily'), limit]);
+        return send(res, 200, { items: rows.rows }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/schemas') {
+        if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const body = await readJson(req);
+        if (body.tenantId && body.tenantId !== auth.tenantId) return send(res, 403, { error: { code: 'TENANT_MISMATCH' } }, requestId);
+        const item = await registry.register({ ...body, tenantId: auth.tenantId, actor: auth.actor, producerOwner: body.producerOwner || auth.actor });
+        await audit(pool, auth, 'schema.registered', 'event_schema', item.id, null, { eventFamily: body.eventFamily, version: body.version, fingerprint: item.fingerprint });
+        return send(res, 201, { item }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/activate') {
+        if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const body = await readJson(req);
+        const item = await registry.activate({ eventFamily: body.eventFamily, version: body.version, tenantId: auth.tenantId, actor: auth.actor });
+        await audit(pool, auth, 'schema.activated', 'event_schema', item.id, null, { eventFamily: body.eventFamily, version: body.version });
+        return send(res, 200, { item }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/deprecate') {
+        if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const body = await readJson(req);
+        const item = await registry.deprecate({ eventFamily: body.eventFamily, version: body.version, tenantId: auth.tenantId, actor: auth.actor, reason: body.reason });
+        await audit(pool, auth, 'schema.deprecated', 'event_schema', item.id, null, { eventFamily: body.eventFamily, version: body.version, reason: body.reason });
+        return send(res, 200, { item }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/compatibility') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        return send(res, 200, { item: await registry.diff({ eventFamily: (await readJson(req)).eventFamily, fromVersion: (await readJson(req)).fromVersion, toVersion: (await readJson(req)).toVersion, tenantId: auth.tenantId }) }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/verify') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const body = await readJson(req);
+        return send(res, 200, { item: await registry.verify({ eventFamily: body.eventFamily, version: body.version, schema: body.schema, tenantId: auth.tenantId }) }, requestId);
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/schema-registry/negotiate') {
+        if (!hasRole(auth, 'VIEWER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
+        const body = await readJson(req);
+        return send(res, 200, { item: await registry.negotiate({ eventFamily: body.eventFamily, tenantId: auth.tenantId, consumerId: body.consumerId, supportedVersions: body.supportedVersions }) }, requestId);
+      }
 
       if (req.method === 'GET' && url.pathname === '/v1/event-subscriptions') {
         const rows = await pool.query(`SELECT id,tenant_id,project_id,endpoint_url,event_types,ordered,rate_limit_per_second,max_concurrency,active,
@@ -199,7 +259,7 @@ function createDurableEventApi({
       return send(res, error.statusCode || 400, { error: { code: error.code || 'INVALID_REQUEST', message: error.message } }, requestId);
     }
   });
-  return { server, delivery };
+  return { server, delivery, registry };
 }
 
 module.exports = { createDurableEventApi, readJson, send };
