@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const { Pool } = require('pg');
 const { RecoveryControlPlane } = require('./recovery-control');
 const { canonicalize, sha256, verifyDatabaseInvariants } = require('./recovery-verifier');
 const { allocateGeneration, recordIntegrity, coverage, rpo, targetHash } = require('./recovery-assurance');
@@ -6,6 +7,11 @@ const { retryBounded } = require('./recovery-retry');
 const { redactDatabaseUrl } = require('./backup-service');
 
 class AssuredRecoveryControlPlane extends RecoveryControlPlane {
+  constructor({ productionStorage, ...options }) {
+    super(options);
+    this.productionStorage = productionStorage;
+  }
+
   async createBackup(options = {}) {
     const result = await super.createBackup(options);
     if (result.dryRun) return result;
@@ -62,7 +68,7 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
       operationId = crypto.randomUUID();
       await this.pool.query(`INSERT INTO forge_restore_operations(id,backup_id,status,phase,dry_run,target_database,fencing_token,created_by,tenant_id,heartbeat_at,approval_id,production_restore,started_at) VALUES($1,$2,'RUNNING','PRODUCTION_PREFLIGHT',false,$3,$4,$5,$6,now(),$7,true,now())`, [operationId, backupId, redactDatabaseUrl(options.targetDatabaseUrl), String(fence), options.actor, options.tenantId, approval.id]);
       await this.createCheckpoint(operationId, 'PRODUCTION_PREFLIGHT', 'COMPLETED', { archiveSha256: archive.archiveSha256, manifestSha256: archive.metadataDigest, approvalId: approval.id });
-      target = new (require('pg').Pool)({ connectionString: options.targetDatabaseUrl, max: 4, connectionTimeoutMillis: 5000 });
+      target = new Pool({ connectionString: options.targetDatabaseUrl, max: 4, connectionTimeoutMillis: 5000 });
       await target.query('SELECT 1');
       await this.backup.compatibility(target, extracted.metadata);
       await this.createCheckpoint(operationId, 'PRODUCTION_COMPATIBILITY', 'COMPLETED');
