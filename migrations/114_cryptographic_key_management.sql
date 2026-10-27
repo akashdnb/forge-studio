@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS forge_crypto_key_epochs (
   CHECK (length(wrap_nonce) = 12),
   CHECK (length(wrap_auth_tag) = 16)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS forge_crypto_active_epoch_uq ON forge_crypto_key_epochs(tenant_id, project_id, purpose) WHERE status='ACTIVE';
+DROP INDEX IF EXISTS forge_crypto_active_epoch_uq;
+CREATE UNIQUE INDEX forge_crypto_active_epoch_uq ON forge_crypto_key_epochs(tenant_id, COALESCE(project_id, ''), purpose) WHERE status='ACTIVE';
 CREATE INDEX IF NOT EXISTS forge_crypto_epoch_lookup_idx ON forge_crypto_key_epochs(tenant_id, project_id, purpose, epoch DESC);
 CREATE INDEX IF NOT EXISTS forge_crypto_status_idx ON forge_crypto_key_epochs(status, updated_at);
 
