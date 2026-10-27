@@ -1,0 +1,27 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { renderAudioPost, normalizeSegments } = require('../src/pipeline/audio-post-production');
+const { renderTimeline, sha256Json } = require('../src/pipeline/ffmpeg-renderer');
+
+test('acceptance render contains the post-produced AAC stereo 48k audio stream', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-audio-render-'));
+  try {
+    const make = (args) => { const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args], { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr); };
+    make(['-f', 'lavfi', '-i', 'color=c=black:s=1280x720:r=30:d=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path.join(dir, 'video.mp4')]);
+    make(['-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', path.join(dir, 'narration.wav')]);
+    const segments = normalizeSegments([{ type: 'NARRATION', segments: [{ start: 0, duration: 4, assetVersionId: 'narration:v1' }] }], 4);
+    const audio = await renderAudioPost({ inputFiles: [{ versionId: 'narration:v1', checksum: 'local-fixture', path: path.join(dir, 'narration.wav') }], segments, durationSeconds: 4, outputPath: path.join(dir, 'post.wav') });
+    const baseManifest = { schemaVersion: 'forge-audio-acceptance-v1', manifestKind: 'render-manifest', compilerVersion: 'acceptance', episodeId: 'acceptance-episode', timelineVersionId: 'timeline:acceptance', timelineContentHash: sha256Json({ fixture: true }), inputVersionIds: ['timeline:acceptance', audio.recipeIdentity], durationSeconds: 4, tracks: [{ type: 'VIDEO', segments: [{ id: 'video', start: 0, duration: 4, sourcePath: 'video.mp4' }] }, { type: 'NARRATION', segments: [{ id: 'audio', start: 0, duration: 4, sourcePath: 'post.wav' }] }] };
+    const manifest = { ...baseManifest, manifestChecksum: sha256Json(baseManifest) };
+    const result = await renderTimeline({ input: { manifest, workDir: dir }, workDir: dir, outputPath: path.join(dir, 'acceptance.mp4') });
+    assert.ok(result.sizeBytes > 0);
+    const probe = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,sample_rate,channels:format=duration', '-of', 'json', path.join(dir, 'acceptance.mp4')], { encoding: 'utf8' });
+    assert.equal(probe.status, 0, probe.stderr);
+    const parsed = JSON.parse(probe.stdout); const video = parsed.streams.find((stream) => stream.codec_type === 'video'); const audioStream = parsed.streams.find((stream) => stream.codec_type === 'audio');
+    assert.equal(video.codec_name, 'h264'); assert.equal(audioStream.codec_name, 'aac'); assert.equal(Number(audioStream.sample_rate), 48000); assert.equal(Number(audioStream.channels), 2); assert.ok(Math.abs(Number(parsed.format.duration) - 4) < 0.15); assert.equal(audio.validation.sampleRate, 48000);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
