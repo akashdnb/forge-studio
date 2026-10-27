@@ -17,13 +17,19 @@ services:
         sync: false
       - key: FORGE_RUNNER_CALLBACK_TOKEN
         sync: false
+      - key: FORGE_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: FORGE_RUNTIME_POLICY_ENABLED
+        value: "true"
+      - key: FORGE_REQUIRE_SECRET_ENCRYPTION
+        value: "true"
       - key: RUN_MIGRATIONS_ON_START
         value: "false"
   - type: worker
     name: forge-studio-worker
     runtime: docker
     plan: starter
-    dockerCommand: node src/worker.js
+    dockerCommand: node src/runtime/worker-entry.js
     disk:
       name: forge-render-scratch
       mountPath: /var/lib/forge
@@ -37,6 +43,10 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: FORGE_REQUIRE_SECRET_ENCRYPTION
+        value: "true"
       - key: FORGE_COST_ENFORCEMENT_ENABLED
         value: "true"
       - key: FORGE_USAGE_RESERVATION_TTL_MS
