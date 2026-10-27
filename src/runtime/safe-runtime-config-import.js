@@ -1,0 +1,15 @@
+'use strict';
+const { SafeRuntimeConfiguration, fingerprint } = require('./safe-runtime-configuration');
+SafeRuntimeConfiguration.prototype.importRevision = async function importRevision(input={}) {
+  const required=['id','configKey','scopeType','scopeId','revision','valueType','value','schema','schemaFingerprint','state','owner','createdBy'];
+  for(const key of required)if(input[key]===undefined||input[key]===null)throw new TypeError(`missing import field: ${key}`);
+  if(input.schemaFingerprint!==fingerprint(input.schema))throw Object.assign(new Error('schema fingerprint mismatch'),{code:'CONFIG_IMPORT_FINGERPRINT_MISMATCH'});
+  const client=await this.pool.connect();
+  try {await client.query('BEGIN');
+    const existing=(await client.query('SELECT schema_fingerprint,value,state FROM forge_runtime_config_revisions WHERE id=$1 FOR UPDATE',[input.id])).rows[0];
+    if(existing){if(existing.schema_fingerprint!==input.schemaFingerprint||JSON.stringify(existing.value)!==JSON.stringify(input.value))throw Object.assign(new Error('import conflicts with existing immutable revision'),{code:'CONFIG_IMPORT_CONFLICT',statusCode:409});await client.query('COMMIT');return{imported:false,id:input.id};}
+    await client.query(`INSERT INTO forge_runtime_config_revisions(id,config_key,scope_type,scope_id,tenant_id,project_id,workflow_id,revision,value_type,value,schema,schema_fingerprint,state,owner,activation_start,activation_end,rollout_percent,rollout_cohort,prerequisites,dependencies,evidence_refs,previous_revision,rollback_revision,fence_epoch,secret,created_by,created_at,published_at,activated_at,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20::jsonb,$21::jsonb,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,[input.id,input.configKey,input.scopeType,input.scopeId,input.tenantId||null,input.projectId||null,input.workflowId||null,input.revision,input.valueType,JSON.stringify(input.secret?'[REDACTED]':input.value),JSON.stringify(input.schema),input.schemaFingerprint,input.state,input.owner,input.activationStart||null,input.activationEnd||null,input.rolloutPercent??100,input.rolloutCohort||'stable',JSON.stringify(input.prerequisites||[]),JSON.stringify(input.dependencies||[]),JSON.stringify(input.evidenceRefs||[]),input.previousRevision||null,input.rollbackRevision||null,input.fenceEpoch||1,Boolean(input.secret),input.createdBy,input.createdAt||new Date().toISOString(),input.publishedAt||null,input.activatedAt||null,input.retiredAt||null]);
+    await client.query('COMMIT'); await this.audit({tenantId:input.tenantId||null,projectId:input.projectId||null,actor:input.createdBy,action:'REVISION_IMPORTED',configKey:input.configKey,scopeType:input.scopeType,scopeId:input.scopeId,revision:input.revision,details:{id:input.id,schemaFingerprint:input.schemaFingerprint}}); return{imported:true,id:input.id};
+  }catch(e){try{await client.query('ROLLBACK')}catch{}throw e}finally{client.release()}
+};
+module.exports=SafeRuntimeConfiguration;
