@@ -1,4 +1,4 @@
-const { ArtifactAccessGateway, verifyToken } = require('./artifact-access-gateway');
+const { ArtifactAccessGateway, ArtifactAccessError, verifyToken } = require('./artifact-access-gateway');
 
 const RELEASED_EPISODE_STATES = new Set(['APPROVED', 'PUBLISHING', 'PUBLISHED']);
 
@@ -21,7 +21,7 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
       const access = await super._authorize(artifactId, options);
       const recovery = Boolean(options.recovery);
       const released = RELEASED_EPISODE_STATES.has(access.artifact.episode_state) && access.artifact.approved_render_id === access.artifact.id;
-      if (options.action === 'metadata' && !recovery && !access.worker && !released) throw Object.assign(new Error('Artifact is not approved for delivery'), { code: 'APPROVAL_REQUIRED', statusCode: 403 });
+      if (options.action === 'metadata' && !recovery && !access.worker && !released) throw new ArtifactAccessError('Artifact is not approved for delivery', 'APPROVAL_REQUIRED', 403);
       return access;
     } catch (error) {
       try {
@@ -35,8 +35,8 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
   async resolve({ artifactId, actor, action = 'metadata', token = null, purpose = 'user', recovery = false }) {
     if (token) {
       const payload = verifyToken(token, this.signingSecret, this.clock());
-      if (payload.artifactId !== artifactId || payload.actor !== actor) throw Object.assign(new Error('Access token does not match requested artifact'), { code: 'TOKEN_BINDING_MISMATCH', statusCode: 403 });
-      if (payload.action !== action && !(payload.action === 'download' && action === 'stream')) throw Object.assign(new Error('Access token does not permit requested delivery mode'), { code: 'TOKEN_BINDING_MISMATCH', statusCode: 403 });
+      if (payload.artifactId !== artifactId || payload.actor !== actor) throw new ArtifactAccessError('Access token does not match requested artifact', 'TOKEN_BINDING_MISMATCH', 403);
+      if (payload.action !== action && !(payload.action === 'download' && action === 'stream')) throw new ArtifactAccessError('Access token does not permit requested delivery mode', 'TOKEN_BINDING_MISMATCH', 403);
       purpose = payload.purpose || purpose; recovery = Boolean(payload.recovery);
       return this._authorize(artifactId, { actor, action: payload.action === 'download' ? 'download' : action, purpose, recovery });
     }
