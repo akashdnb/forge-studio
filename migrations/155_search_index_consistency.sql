@@ -22,9 +22,6 @@ SET source_fingerprint = md5(concat_ws('|',
 ))
 WHERE source_fingerprint IS NULL;
 
-ALTER TABLE forge_search_documents
-  ALTER COLUMN source_fingerprint SET DEFAULT md5(concat_ws('|',project_id,tenant_id,source_type,source_id));
-
 CREATE INDEX IF NOT EXISTS forge_search_documents_fingerprint_idx
   ON forge_search_documents(project_id, source_type, source_updated_at, source_fingerprint);
 
