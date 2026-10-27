@@ -20,10 +20,13 @@ class RuntimePublishService extends PublishService {
     if (!run) return null;
     return { ...run, package_id: run.package_artifact_id, package_version_id: run.package_version_id };
   }
-  async gate(run) {
-    const result = super.gate(run);
-    await this.mediaValidator.assertPublishable({ tenantId: run.tenant_id, projectId: run.project_id, artifactId: run.render_artifact_id, versionId: run.render_version_id });
-    return result;
+  gate(run) {
+    return super.gate(run);
+  }
+  async publish({ runId, job = {}, actor = 'worker' }) {
+    const run = await this.loadRun(runId);
+    if (run) await this.mediaValidator.assertPublishable({ tenantId: run.tenant_id, projectId: run.project_id, artifactId: run.render_artifact_id, versionId: run.render_version_id });
+    return super.publish({ runId, job, actor });
   }
 }
 
