@@ -35,8 +35,7 @@ CREATE TABLE IF NOT EXISTS forge_tenant_region_assignments (
   state text NOT NULL DEFAULT 'PRIMARY' CHECK (state IN ('PRIMARY','FAILOVER','RECOVERING','FENCED')),
   lease_owner text,
   lease_until timestamptz,
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (tenant_id, region_id) REFERENCES forge_tenant_residency_policies(tenant_id, home_region) DEFERRABLE INITIALLY DEFERRED
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS forge_region_control_leases (
