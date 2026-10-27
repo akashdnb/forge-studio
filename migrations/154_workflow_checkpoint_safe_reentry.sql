@@ -4,6 +4,8 @@ ALTER TABLE forge_workflow_checkpoints
   ADD COLUMN IF NOT EXISTS checkpoint_epoch bigint,
   ADD COLUMN IF NOT EXISTS workflow_run_id text,
   ADD COLUMN IF NOT EXISTS stage_version text NOT NULL DEFAULT '1',
+  ADD COLUMN IF NOT EXISTS release_epoch bigint,
+  ADD COLUMN IF NOT EXISTS execution_snapshot_id uuid,
   ADD COLUMN IF NOT EXISTS plan_hash char(64),
   ADD COLUMN IF NOT EXISTS input_fingerprint char(64),
   ADD COLUMN IF NOT EXISTS output_fingerprint char(64),
@@ -19,7 +21,13 @@ ALTER TABLE forge_workflow_checkpoints
   ADD COLUMN IF NOT EXISTS validation_hash char(64),
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
-UPDATE forge_workflow_checkpoints SET checkpoint_epoch=execution_epoch WHERE checkpoint_epoch IS NULL;
+UPDATE forge_workflow_checkpoints c
+SET checkpoint_epoch=c.execution_epoch,
+    release_epoch=p.release_epoch,
+    execution_snapshot_id=p.execution_snapshot_id
+FROM forge_execution_plans p
+WHERE p.id=c.plan_id AND c.checkpoint_epoch IS NULL;
+
 ALTER TABLE forge_workflow_checkpoints ALTER COLUMN checkpoint_epoch SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS forge_workflow_checkpoints_validity_idx
@@ -71,6 +79,7 @@ BEGIN
     NEW.reentry_contract IS DISTINCT FROM OLD.reentry_contract OR NEW.schema_version IS DISTINCT FROM OLD.schema_version OR
     NEW.state_hash IS DISTINCT FROM OLD.state_hash OR NEW.checkpoint_epoch IS DISTINCT FROM OLD.checkpoint_epoch OR
     NEW.workflow_run_id IS DISTINCT FROM OLD.workflow_run_id OR NEW.stage_version IS DISTINCT FROM OLD.stage_version OR
+    NEW.release_epoch IS DISTINCT FROM OLD.release_epoch OR NEW.execution_snapshot_id IS DISTINCT FROM OLD.execution_snapshot_id OR
     NEW.plan_hash IS DISTINCT FROM OLD.plan_hash OR NEW.input_fingerprint IS DISTINCT FROM OLD.input_fingerprint OR
     NEW.output_fingerprint IS DISTINCT FROM OLD.output_fingerprint OR NEW.provider_state_hash IS DISTINCT FROM OLD.provider_state_hash OR
     NEW.credential_state_hash IS DISTINCT FROM OLD.credential_state_hash OR NEW.admission_state_hash IS DISTINCT FROM OLD.admission_state_hash OR
