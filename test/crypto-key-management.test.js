@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { KeyManagementService, ScopedEnvelopeCipher } = require('../src/crypto/key-management');
 
 test('root key validation is strict and fail-closed', () => {
@@ -14,10 +15,15 @@ test('tenant context is mandatory for scoped envelope operations', async () => {
   assert.equal(result, 'ok');
 });
 
-test('AAD includes tenant, project, purpose and epoch', async () => {
-  const crypto = require('node:crypto');
-  const source = require('../src/crypto/key-management');
-  const pool = { connect: async () => { throw new Error('database must be required for encryption'); } };
-  const kms = new source.KeyManagementService({ pool, rootKey: crypto.randomBytes(32).toString('base64') });
-  await assert.rejects(() => kms.encrypt({ tenantId: 't', projectId: 'p', purpose: 'runtime-secret', plaintext: 'secret' }), /database/);
+test('synchronous persistence cipher round-trips and authenticates tenant/project AAD', async () => {
+  const rootKey = crypto.randomBytes(32).toString('base64');
+  const kms = new KeyManagementService({ pool: { connect() {} }, rootKey });
+  const record = await KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: crypto.randomBytes(32), epoch: 7 }, () => {
+    const encrypted = kms.encryptSync('credential-material');
+    assert.equal(typeof encrypted.then, 'undefined');
+    return encrypted;
+  });
+  await assert.rejects(() => KeyManagementService.withContext({ tenantId: 'tenant-b', projectId: 'project-a', purpose: 'provider-credential', key: crypto.randomBytes(32), epoch: 7 }, () => kms.decryptSync(record)), /CIPHERTEXT_INVALID/);
+  const plaintext = await KeyManagementService.withContext({ tenantId: 'tenant-a', projectId: 'project-a', purpose: 'provider-credential', key: crypto.randomBytes(32), epoch: 7 }, () => kms.decryptSync(record));
+  assert.equal(plaintext, 'credential-material');
 });
