@@ -112,7 +112,7 @@ class JobQueue {
   async cancel(id, workerId, reason = 'Cancelled by admission control', dispatchToken = null) {
     const updated = await this.pool.query(
       `UPDATE forge_jobs SET status='CANCELLED',leased_until=NULL,dispatch_token=NULL,timeout_at=NULL,error=$1::jsonb,finished_at=now(),updated_at=now()
-       WHERE id=$2 AND status='RUNNING' AND worker_id=$3 AND dispatch_token=$4 RETURNING *`,
+       WHERE id=$2 AND status='RUNNING' AND worker_id=$3 AND($4::text IS NULL OR dispatch_token=$4) RETURNING *`,
       [JSON.stringify({ message: reason }), id, workerId, dispatchToken],
     );
     if (!updated.rows[0]) throw Object.assign(new Error(`Job ${id} is not owned by worker ${workerId}`), { code: 'STALE_WORKER' });
