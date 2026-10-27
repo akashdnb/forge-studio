@@ -1,5 +1,6 @@
 'use strict';
 
+require('./guards');
 const { NotificationOrchestrator } = require('./notification-orchestrator');
 const { getEvidenceContext } = require('../evidence/audit-evidence');
 const { randomUUID } = require('node:crypto');
