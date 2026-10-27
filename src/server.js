@@ -2,7 +2,7 @@ const { createExtendedApiServer } = require('./extended-http-api');
 const { PersistentProductionRepository } = require('./persistence/production-repository');
 const { handleGithubRunnerCallback } = require('./execution/github-actions-callback');
 const { createStorageFromEnv } = require('./storage');
-const { ArtifactAccessGateway } = require('./storage/artifact-access-gateway');
+const { ProductionArtifactAccessGateway } = require('./storage/production-artifact-access-gateway');
 const { handleArtifactAccess } = require('./storage/artifact-access-http');
 const { URL } = require('node:url');
 
@@ -19,7 +19,7 @@ async function start() {
     repository = new PersistentProductionRepository({ pool });
     try { await pool.query('SELECT 1'); } catch (error) { await pool.end(); throw new Error(`PostgreSQL connection failed: ${error.message}`); }
     if (process.env.RUN_MIGRATIONS_ON_START === 'true') await repository.migrate();
-    artifactGateway = new ArtifactAccessGateway({ repository, storage: createStorageFromEnv() });
+    artifactGateway = new ProductionArtifactAccessGateway({ repository, storage: createStorageFromEnv() });
   }
   const apiToken = process.env.API_BEARER_TOKEN || null;
   const { server } = createExtendedApiServer({ repository, apiToken, allowUnauthenticatedRead: process.env.ALLOW_UNAUTHENTICATED_READS === 'true' });
