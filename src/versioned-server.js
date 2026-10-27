@@ -8,6 +8,32 @@ const { randomUUID } = require('node:crypto');
 // server.js removes the initial extended-api listener and captures it as apiHandler.
 // Wrap that listener here so search routes use the verified production identity and
 // never bypass the main security boundary.
+const originalReconcile = ProductionSearchService.prototype.reconcile;
+ProductionSearchService.prototype.reconcile = async function reconcileWithMissingDetection(args) {
+  const result = await originalReconcile.call(this, args);
+  const missing = await this.pool.query({
+    text: `WITH expected AS (
+      SELECT p.id project_id,'project' source_type,p.id source_id FROM projects p WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'episode',e.id FROM episodes e JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'version',v.id FROM version_records v JOIN episodes e ON e.id=v.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'artifact',a.id FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT coalesce(j.project_id,e.project_id),'job',j.id FROM forge_jobs j LEFT JOIN episodes e ON e.id=j.episode_id JOIN projects p ON p.id=coalesce(j.project_id,e.project_id) WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'provider_run',r.id FROM provider_runs r JOIN episodes e ON e.id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'approval',a.id::text FROM approvals a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'qa',q.id FROM qa_results q JOIN episodes e ON e.id=q.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'publish_run',r.id FROM publish_runs r JOIN episodes e ON e.id=r.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT e.project_id,'cost',c.id FROM cost_records c JOIN episodes e ON e.id=c.episode_id JOIN projects p ON p.id=e.project_id WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+      UNION ALL SELECT coalesce(a.project_id,e.project_id),'audit_event',a.id::text FROM audit_events a LEFT JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=coalesce(a.project_id,e.project_id) WHERE p.tenant_id=$1 AND ($2::text IS NULL OR p.id=$2)
+    ) SELECT count(*)::int AS count FROM expected x LEFT JOIN forge_search_documents d ON d.project_id=x.project_id AND d.source_type=x.source_type AND d.source_id=x.source_id WHERE d.source_id IS NULL`,
+    values: [args.tenantId, args.projectId || null],
+    statement_timeout: this.statementTimeoutMs,
+  });
+  const missingCount = Number(missing.rows[0]?.count || 0);
+  if (!missingCount) return { ...result, missingEntriesDetected: 0, rebuildId: null };
+  const rebuild = await this.createRebuild({ tenantId: args.tenantId, actor: args.actor, projectId: args.projectId || null });
+  return { ...result, missingEntriesDetected: missingCount, rebuildId: rebuild.id, rebuildState: rebuild.state };
+};
+
 const originalCreateExtendedApiServer = extended.createExtendedApiServer;
 extended.createExtendedApiServer = function createExtendedApiServerWithSearch(options = {}) {
   const result = originalCreateExtendedApiServer(options);
