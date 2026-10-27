@@ -2,7 +2,8 @@
 'use strict';
 
 const { Pool } = require('pg');
-const { verifyPackageAttestation, attestPackage } = require('../src/attestation/package-attestation');
+const { verifyPackageIntegrity } = require('../src/attestation/package-integrity');
+const { attestPackage } = require('../src/attestation/package-attestation');
 
 async function main() {
   const [command, packageArtifactId, reason] = process.argv.slice(2);
@@ -11,7 +12,7 @@ async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
   try {
     const result = command === 'verify'
-      ? await verifyPackageAttestation({ pool, packageArtifactId })
+      ? await verifyPackageIntegrity({ pool, packageArtifactId })
       : await attestPackage({ pool, packageArtifactId, operator: process.env.FORGE_STATIC_ACTOR_ID || 'operator-cli', reason: reason || 'TOOLCHAIN_MISMATCH', reattest: true, operatorApproved: process.env.FORGE_REATTEST_APPROVED === 'true' });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (command === 'verify' && !result.ok) process.exitCode = 2;
