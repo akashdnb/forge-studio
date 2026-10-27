@@ -28,6 +28,7 @@ Authenticated OWNER requests may use:
 - `GET /internal/provider-admission/policies?tenantId=<tenant>&projectId=<project>`
 - `PUT /internal/provider-admission/policies`
 - `GET /internal/provider-admission/diagnostics?tenantId=<tenant>&projectId=<project>`
+- `GET /internal/provider-admission/metrics?tenantId=<tenant>`
 
 The authenticated tenant is mandatory. Supplying another tenant is rejected. Responses contain policy and decision metadata only; credentials, bearer tokens, request payloads and provider response bodies are never returned.
 
