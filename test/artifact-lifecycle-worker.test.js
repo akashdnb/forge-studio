@@ -3,19 +3,21 @@ const assert = require('node:assert/strict');
 const { ArtifactLifecycleWorker, parseRetentionPolicy } = require('../src/reconciliation/artifact-lifecycle-worker');
 function baseArtifact(overrides = {}) { return { id: 'a1', episode_id: 'e1', project_id: 'p1', version_id: 'v1', kind: 'render', episode_state: 'PUBLISHED', storage_key: 'tenants/forge/projects/p1/artifacts/render/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4', storage_status: 'READY', created_at: new Date(Date.now() - 120 * 86400000), ...overrides }; }
 class FakeClient {
-  constructor({ lifecycle = null, refs = {}, reachable = false, expired = true, lock = true } = {}) { this.lifecycle = lifecycle || { artifact_id: 'a1', project_id: 'p1', state: 'RETAINED', reference_count: 0, quarantine_at: null }; this.refs = refs; this.reachable = reachable; this.expired = expired; this.lock = lock; this.events = []; this.updates = []; this.inTx = false; }
+  constructor({ lifecycle = null, refs = {}, reachable = false, lock = true } = {}) { this.lifecycle = lifecycle || { artifact_id: 'a1', project_id: 'p1', state: 'RETAINED', reference_count: 0, quarantine_at: null }; this.refs = refs; this.reachable = reachable; this.lock = lock; this.events = []; this.updates = []; }
   async query(sql, params = []) {
-    if (sql === 'BEGIN') { this.inTx = true; return { rows: [] }; }
-    if (sql === 'COMMIT' || sql === 'ROLLBACK') { this.inTx = false; return { rows: [] }; }
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: this.lock }] };
-    if (sql.includes('INSERT INTO artifact_lifecycle_records')) { this.lifecycle = { ...this.lifecycle, artifact_id: params[0], project_id: params[1] }; return { rows: [] }; }
+    if (sql.includes('INSERT INTO artifact_lifecycle_records')) return { rows: [] };
     if (sql.includes('SELECT * FROM artifact_lifecycle_records WHERE artifact_id=$1')) return { rows: [this.lifecycle] };
-    if (sql.includes('FROM artifact_lifecycle_records WHERE artifact_id=$1 FOR UPDATE')) return { rows: [this.lifecycle] };
     if (sql.includes('SELECT a.created_at, s.expires_at')) return { rows: [{ created_at: new Date(Date.now() - 120 * 86400000), expires_at: null, status: 'READY', storage_key: 'k/a1' }] };
     if (sql.includes('SELECT count(*) FROM version_dependencies')) return { rows: [{ dependency_refs: this.refs.dependencyRefs || 0, input_version_refs: this.refs.inputVersionRefs || 0, approval_refs: this.refs.approvalRefs || 0, qa_refs: this.refs.qaRefs || 0, publish_refs: this.refs.publishRefs || 0, package_refs: this.refs.packageRefs || 0, episode_refs: this.refs.episodeRefs || 0, active_job_refs: this.refs.activeJobRefs || 0, active_provider_refs: this.refs.activeProviderRefs || 0, hold_refs: this.refs.holdRefs || 0, active_episode_refs: this.refs.activeEpisodeRefs || 0 }] };
     if (sql.includes('WITH RECURSIVE reachable')) return { rows: [{ reachable: this.reachable }] };
     if (sql.includes('UPDATE artifact_lifecycle_records SET state=') && sql.includes('RETURNING *')) { this.lifecycle = { ...this.lifecycle, state: 'DELETION_PENDING' }; return { rows: [this.lifecycle] }; }
-    if (sql.includes('UPDATE artifact_lifecycle_records SET state=')) { const state = params[0]; this.lifecycle = { ...this.lifecycle, state, reference_count: Number(params[1] || 0) }; this.updates.push({ sql, params }); return { rows: [] }; }
+    if (sql.includes('UPDATE artifact_lifecycle_records SET state=')) {
+      const state = sql.includes("state='DELETED'") ? 'DELETED' : sql.includes("state='PROTECTED'") ? 'PROTECTED' : sql.includes("state='QUARANTINED'") ? 'QUARANTINED' : (typeof params[0] === 'string' && ['PROTECTED','DELETED','RETAINED','QUARANTINED','DELETION_PENDING'].includes(params[0]) ? params[0] : this.lifecycle.state);
+      this.lifecycle = { ...this.lifecycle, state, reference_count: Number(params[1] || params[0] || 0) };
+      this.updates.push({ sql, params }); return { rows: [] };
+    }
     if (sql.includes('UPDATE artifact_lifecycle_records SET reference_count=')) { this.lifecycle = { ...this.lifecycle, reference_count: Number(params[0] || 0) }; return { rows: [] }; }
     if (sql.includes('INSERT INTO artifact_lifecycle_events')) { this.events.push({ sql, params }); return { rows: [] }; }
     if (sql.includes('SELECT a.*,e.project_id')) return { rows: [this.lifecycle.state === 'DELETION_PENDING' ? { ...baseArtifact(), ...this.lifecycle } : baseArtifact()] };
