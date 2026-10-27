@@ -16,19 +16,19 @@ async function executeProviderWithRetry(provider, request, context, { maxAttempt
     const parentAbort = () => controller.abort();
     context.signal?.addEventListener('abort', parentAbort, { once: true });
     let timer;
+    let timedOut = false;
     try {
       const execution = Promise.resolve(provider.execute(request, { ...context, attempt, signal: controller.signal }));
-      timer = setTimeout(() => controller.abort(), timeoutMs);
+      timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
       timer.unref?.();
-      const output = await Promise.race([
+      return await Promise.race([
         execution,
-        delay(timeoutMs).then(() => { throw timeoutError(timeoutMs); }),
+        delay(timeoutMs).then(() => { timedOut = true; controller.abort(); throw timeoutError(timeoutMs); }),
       ]);
-      return output;
     } catch (error) {
+      if (timedOut || error?.code === 'PROVIDER_TIMEOUT') throw timeoutError(timeoutMs);
       last = error;
       const code = String(error?.code || '').toUpperCase();
-      if (code === 'PROVIDER_TIMEOUT') throw error;
       const status = Number(error?.status || error?.statusCode || 0);
       const retryable = status === 429 || status >= 500 || ['RATE_LIMITED', 'TOO_MANY_REQUESTS', 'PROVIDER_UNAVAILABLE', 'UPSTREAM_5XX', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN'].includes(code);
       if (!retryable || attempt >= attempts) break;
