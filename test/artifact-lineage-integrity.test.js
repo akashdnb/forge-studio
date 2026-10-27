@@ -8,6 +8,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { LocalFileStorage } = require('../src/storage/local-file-storage');
 const { ArtifactIntegrityControlPlane, digest } = require('../src/storage/artifact-integrity-control-plane');
+const { verifyAndRebuildContentReference } = require('../src/storage/artifact-integrity-repair');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -16,6 +17,7 @@ test('artifact integrity modules remain syntactically valid', () => {
     'src/storage/artifact-integrity-control-plane.js',
     'src/storage/artifact-integrity-bootstrap.js',
     'src/storage/artifact-integrity-worker.js',
+    'src/storage/artifact-integrity-repair.js',
     'src/storage/artifact-storage-service.js',
     'src/runtime/worker-entry.js',
   ]) execFileSync(process.execPath, ['--check', path.join(ROOT, file)], { stdio: 'pipe' });
@@ -42,6 +44,17 @@ test('local storage rejects same-size corruption during verified read', async ()
   }
 });
 
+test('verified repair refuses a checksum mismatch before ledger mutation', async () => {
+  let mutated = false;
+  const service = {
+    pool: { query: async () => ({ rows: [{ id: 'a', content_hash: 'a'.repeat(64), storage_key: 'k', size_bytes: 3, status: 'READY', project_id: 'p', tenant_id: 't' }] }) },
+    storage: { download: async () => ({ stream: require('node:stream').Readable.from(Buffer.from('bad')) }) },
+    rebuildContentReference: async () => { mutated = true; },
+  };
+  await assert.rejects(() => verifyAndRebuildContentReference(service, { tenantId: 't', artifactId: 'a' }), error => error.code === 'CHECKSUM_MISMATCH' || error.code === 'SIZE_MISMATCH');
+  assert.equal(mutated, false);
+});
+
 test('migration 149 is present exactly once', () => {
   const matches = fs.readdirSync(path.join(ROOT, 'migrations')).filter(name => /^149_.*\.sql$/.test(name));
   assert.equal(matches.length, 1, `expected one migration 149, found ${matches.join(', ')}`);
@@ -59,12 +72,7 @@ test('postgres lineage write is concurrent-idempotent and tenant scoped', { skip
       WHERE e.id=$1 AND a.id<>$2 ORDER BY a.created_at LIMIT 1`, [scope.episode_id, scope.artifact_id])).rows[0];
     if (!parent) return;
     const service = new ArtifactIntegrityControlPlane({ pool, storage: { download: async () => { throw Object.assign(new Error('not used'), { code: 'ARTIFACT_NOT_FOUND' }); } } });
-    const results = await Promise.all(Array.from({ length: 5 }, () => service.recordArtifactLineage({
-      childArtifactId: scope.artifact_id,
-      parentArtifactId: parent.id,
-      actor: 'integrity-test',
-      evidence: { test: true },
-    })));
+    const results = await Promise.all(Array.from({ length: 5 }, () => service.recordArtifactLineage({ childArtifactId: scope.artifact_id, parentArtifactId: parent.id, actor: 'integrity-test', evidence: { test: true } })));
     assert.equal(new Set(results.map(row => row.id)).size, 1);
     const count = Number((await pool.query(`SELECT count(*) FROM artifact_lineage_edges WHERE child_artifact_id=$1 AND parent_artifact_id=$2 AND relation='DERIVED_FROM'`, [scope.artifact_id, parent.id])).rows[0].count);
     assert.equal(count, 1);
