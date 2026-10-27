@@ -62,8 +62,9 @@ async function validateCheckpoint({pool, checkpointId, tenantId, actor='system',
   if(cp.validity==='QUARANTINED') throw fail('CHECKPOINT_QUARANTINED','Checkpoint is quarantined');
   const {envelope}=await buildEnvelope({pool,planId:cp.plan_id,tenantId,checkpoint:cp,actor});
   const mismatches=[];
-  for(const key of ['templateVersionId','templateContentHash','schemaFamily','schemaVersion','schemaHash','planHash','inputFingerprint','outputFingerprint','providerStateHash','credentialStateHash','admissionStateHash','sideEffectBoundary','workflowRunId']) {
+  for(const key of ['templateVersionId','templateContentHash','releaseEpoch','executionSnapshotId','schemaFamily','schemaVersion','schemaHash','planHash','inputFingerprint','outputFingerprint','providerStateHash','credentialStateHash','admissionStateHash','sideEffectBoundary','workflowRunId']) {
     const column = key.replace(/[A-Z]/g, m => `_${m.toLowerCase()}`);
+    if(key==='releaseEpoch'||key==='executionSnapshotId'){ const expected = key==='releaseEpoch' ? cp.release_epoch : cp.execution_snapshot_id; if(expected != null && String(expected)!==String(envelope[key])) mismatches.push(key); continue; }
     if(cp[column] != null && String(cp[column]) !== String(envelope[key])) mismatches.push(key);
   }
   if(cp.checkpoint_epoch != null && Number(cp.checkpoint_epoch)!==Number(envelope.checkpointEpoch)) mismatches.push('checkpointEpoch');
@@ -71,7 +72,7 @@ async function validateCheckpoint({pool, checkpointId, tenantId, actor='system',
   if(hash(cp.safe_state)!==cp.state_hash) mismatches.push('stateHash');
   if(cp.validation_hash && cp.validation_hash!==hash(stableEnvelope(envelope))) mismatches.push('validationHash');
   const valid=mismatches.length===0;
-  await pool.query(`INSERT INTO forge_workflow_checkpoint_diagnostics(checkpoint_id,tenant_id,plan_id,execution_epoch,outcome,reason,evidence,actor) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,[cp.id,tenantId,cp.plan_id,cp.execution_epoch,valid?'VALID':'INVALID',valid?null:'Checkpoint compatibility or integrity validation failed',JSON.stringify({mismatches,current:{templateVersionId:envelope.templateVersionId,schemaHash:envelope.schemaHash,providerStateHash:envelope.providerStateHash,credentialStateHash:envelope.credentialStateHash,admissionStateHash:envelope.admissionStateHash}}),actor]);
+  await pool.query(`INSERT INTO forge_workflow_checkpoint_diagnostics(checkpoint_id,tenant_id,plan_id,execution_epoch,outcome,reason,evidence,actor) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,[cp.id,tenantId,cp.plan_id,cp.execution_epoch,valid?'VALID':'INVALID',valid?null:'Checkpoint compatibility or integrity validation failed',JSON.stringify({mismatches,current:{templateVersionId:envelope.templateVersionId,releaseEpoch:envelope.releaseEpoch,schemaHash:envelope.schemaHash,providerStateHash:envelope.providerStateHash,credentialStateHash:envelope.credentialStateHash,admissionStateHash:envelope.admissionStateHash}}),actor]);
   await pool.query(`UPDATE forge_workflow_checkpoints SET validity=$2,validated_at=now(),validated_by=$3,invalid_reason=$4,updated_at=now() WHERE id=$1 AND tenant_id=$5`,[cp.id,valid?'VALID':'INVALID',actor,valid?null:mismatches.join(','),tenantId]);
   if(!valid) throw fail('CHECKPOINT_INVALID',`Checkpoint is not safely reusable: ${mismatches.join(',')}`);
   return {valid:true,checkpoint:cp,mismatches:[]};
@@ -100,7 +101,7 @@ async function admitReentry({pool,planId,tenantId,checkpointId,actor='workflow-c
     if(uncertain)throw fail('REENTRY_SIDE_EFFECT_UNCERTAIN','An external provider operation started without a durable success attestation; quarantine or reconcile before replay');
   }
   if(stage?.runtime_stage==='PUBLISH'){
-    const publishing=(await pool.query(`SELECT 1 FROM publish_runs p JOIN episodes e ON e.id=p.episode_id WHERE e.id=(SELECT episode_id FROM forge_execution_plans WHERE id=$1) AND p.status IN ('UPLOADING','PUBLISHED') LIMIT 1`,[planId])).rows[0];
+    const publishing=(await pool.query(`SELECT 1 FROM publish_runs p WHERE p.episode_id=(SELECT episode_id FROM forge_execution_plans WHERE id=$1 AND tenant_id=$2) AND p.status IN ('UPLOADING','PUBLISHED') LIMIT 1`,[planId,tenantId])).rows[0];
     if(publishing)throw fail('REENTRY_PUBLISH_BOUNDARY','Publishing has an in-flight or completed external side effect; replay is blocked');
   }
   const id=randomUUID();
