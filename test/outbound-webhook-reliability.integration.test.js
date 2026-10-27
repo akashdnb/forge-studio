@@ -10,7 +10,6 @@ let pool;
 let tenantId;
 let projectId;
 let episodeId;
-const ids = [];
 
 function endpointOptions(overrides = {}) {
   return {
@@ -34,7 +33,6 @@ integration('outbound webhook delivery is tenant scoped, fenced, signed, replaya
     tenantId, projectId, endpointUrl: 'https://example.com/webhooks', eventTypes: ['job.state.changed'], ordered: true,
     secret: '0123456789012345', createdBy: 'integration', configurationRef: 'config:webhook-test', maxAttempts: 4,
   });
-  ids.push(sub.id);
 
   const eventId = (await pool.query(`SELECT forge_capture_event('job.state.changed',$1,$2,'job','webhook-job',$3::jsonb) AS id`, [
     projectId, episodeId, JSON.stringify({ jobId: 'webhook-job', projectId, kind: 'integration', status: 'SUCCEEDED' }),
@@ -43,6 +41,10 @@ integration('outbound webhook delivery is tenant scoped, fenced, signed, replaya
 
   const workerA = new OutboundWebhookReliability({ pool, ...endpointOptions() });
   const workerB = new OutboundWebhookReliability({ pool, ...endpointOptions() });
+  let request;
+  const fakeSuccess = async (_url, body, headers) => { request = { body, headers }; return { status: 204, headers: {}, body: '' }; };
+  workerA.requestImpl = fakeSuccess;
+  workerB.requestImpl = fakeSuccess;
   const [claimsA, claimsB] = await Promise.all([
     workerA.claim({ workerId: 'worker-a', limit: 10 }),
     workerB.claim({ workerId: 'worker-b', limit: 10 }),
@@ -50,12 +52,7 @@ integration('outbound webhook delivery is tenant scoped, fenced, signed, replaya
   const claimed = [...claimsA, ...claimsB].filter((row) => row.event_id === eventId);
   assert.equal(claimed.length, 1);
 
-  let request;
-  workerA.requestImpl = async (_url, body, headers) => {
-    request = { body, headers };
-    return { status: 204, headers: {}, body: '' };
-  };
-  const result = await (claimsA[0] ? workerA.deliver(claimsA[0]) : workerB.deliver(claimsB[0]));
+  const result = claimsA[0] ? await workerA.deliver(claimsA[0]) : await workerB.deliver(claimsB[0]);
   assert.equal(result.status, 'SUCCEEDED');
   assert.equal(request.headers['x-forge-event-id'], eventId);
   assert.equal(request.headers['x-forge-idempotency-key'], claimed[0].id);
@@ -85,7 +82,6 @@ integration('outbound webhook delivery is tenant scoped, fenced, signed, replaya
     tenantId, projectId, endpointUrl: 'https://example.com/circuit', eventTypes: ['job.state.changed'], ordered: false,
     secret: '0123456789012345', createdBy: 'integration', circuitFailureThreshold: 2, maxAttempts: 4,
   });
-  ids.push(circuitSub.id);
   await pool.query(`SELECT forge_capture_event('job.state.changed',$1,$2,'job','circuit-job',$3::jsonb)`, [
     projectId, episodeId, JSON.stringify({ jobId: 'circuit-job', projectId, kind: 'integration', status: 'FAILED' }),
   ]);
