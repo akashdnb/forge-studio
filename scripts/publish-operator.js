@@ -3,7 +3,7 @@
 const { Pool } = require('pg');
 const { createStorageFromEnv } = require('../src/storage');
 const { createDefaultDestinationRegistry } = require('../src/publishing/destination-contract');
-const { PublishService } = require('../src/publishing/publish-service');
+const { RuntimePublishService } = require('../src/publishing/publish-service-runtime');
 
 function arg(name) { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; }
 async function main() {
@@ -12,7 +12,7 @@ async function main() {
   const command = process.argv[2] || 'reconcile';
   const actor = process.env.FORGE_ACTOR_ID || 'publish-operator';
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 3 });
-  const service = new PublishService({ pool, storage: createStorageFromEnv(), registry: createDefaultDestinationRegistry({ pool }), logger: console });
+  const service = new RuntimePublishService({ pool, storage: createStorageFromEnv(), registry: createDefaultDestinationRegistry({ pool }), logger: console });
   try {
     if (command === 'reconcile') console.log(JSON.stringify(await service.reconcile(runId, actor), null, 2));
     else if (command === 'retry') console.log(JSON.stringify(await service.retry(runId, actor), null, 2));
