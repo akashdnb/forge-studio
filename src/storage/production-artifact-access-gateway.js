@@ -1,7 +1,9 @@
 const { ArtifactAccessGateway, ArtifactAccessError, verifyToken, signToken } = require('./artifact-access-gateway');
 const { randomUUID } = require('node:crypto');
 const RELEASED_EPISODE_STATES = new Set(['APPROVED', 'PUBLISHING', 'PUBLISHED']);
+
 class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
+  constructor(options = {}) { super(options); this.deliveryCache = options.deliveryCache || null; this.observability = options.observability || null; }
   async _projectRole(projectId, actor, tenantId = null) {
     const result = await this.repository.db.pool.query(`SELECT p.tenant_id,p.created_by,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.actor_id=$2 WHERE p.id=$1`, [projectId, actor]);
     const row = result.rows[0]; if (!row || (tenantId && row.tenant_id !== tenantId)) return null;
@@ -45,10 +47,26 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
     await this._audit(artifact, actor, 'ARTIFACT_METADATA_READ', {});
     return { id: artifact.id, episodeId: artifact.episode_id, projectId: artifact.project_id, versionId: artifact.version_id, kind: artifact.kind, mediaType: artifact.media_type || 'application/octet-stream', contentHash: artifact.content_hash, contentLength: Number(artifact.size_bytes), lifecycleState: artifact.lifecycle_state || 'RETAINED' };
   }
-  async open({ artifactId, actor, tenantId = null, rangeHeader = null, token = null, purpose = 'user', recovery = false }) {
-    const artifact = await this._loadArtifact(artifactId);
-    if (!artifact || !(await this._projectRole(artifact.project_id, actor, tenantId))) throw new ArtifactAccessError('Artifact access denied', 'FORBIDDEN', 403);
-    return super.open({ artifactId, actor, rangeHeader, token, purpose, recovery });
+  async open({ artifactId, actor, tenantId = null, rangeHeader = null, token = null, purpose = 'user', recovery = false, signal }) {
+    const access = await this.resolve({ artifactId, actor, tenantId, action: rangeHeader ? 'stream' : 'download', token, purpose, recovery });
+    const artifact = access.artifact;
+    const sizeBytes = Number(artifact.size_bytes);
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > this.maxTransferBytes) throw new ArtifactAccessError('Artifact exceeds configured transfer limit', 'TRANSFER_TOO_LARGE', 413);
+    const { parseRange } = require('./artifact-access-gateway');
+    const range = parseRange(rangeHeader, sizeBytes, this.maxRangeBytes);
+    try {
+      if (this.deliveryCache) {
+        const resolved = await this.deliveryCache.open({ tenantId: tenantId || artifact.project_id, artifact, originStorage: this.storage, range, signal });
+        const actualLength = range ? range.length : resolved.sizeBytes;
+        if (actualLength !== (range ? range.length : sizeBytes)) throw new ArtifactAccessError('Cached content length mismatch', 'CONTENT_LENGTH_MISMATCH', 503);
+        await this._audit(artifact, actor, range ? 'ARTIFACT_STREAM_CACHE' : 'ARTIFACT_DOWNLOAD_CACHE', { bytes: actualLength, ranged: Boolean(range), cache: true, purpose });
+        return { artifact, stream: resolved.stream, statusCode: range ? 206 : 200, contentLength: actualLength, contentRange: range ? `bytes ${range.start}-${range.end}/${sizeBytes}` : null, contentType: artifact.media_type || 'application/octet-stream', contentDisposition: `attachment; filename="forge-${String(artifact.kind || 'artifact').replace(/[^A-Za-z0-9._-]/g, 'artifact')}-${artifact.id}.${String(artifact.media_type || '').split('/')[1]?.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'bin'}"`, etag: `"sha256-${artifact.content_hash}"`, acceptRanges: 'bytes' };
+      }
+      return super.open({ artifactId, actor, rangeHeader, token, purpose, recovery });
+    } catch (error) {
+      if (error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'ARTIFACT_CORRUPT') throw new ArtifactAccessError('Artifact delivery failed', error.code, error.code === 'ARTIFACT_NOT_FOUND' ? 404 : 503);
+      throw error;
+    }
   }
   async _audit(artifact, actor, action, details) { await this.repository.db.pool.query(`INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,$4,'artifact',$5,$6::jsonb)`, [artifact.project_id, artifact.episode_id, actor, action, artifact.id, JSON.stringify({ ...details, artifactVersionId: artifact.version_id })]); }
 }
