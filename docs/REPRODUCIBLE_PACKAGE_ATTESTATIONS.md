@@ -45,7 +45,8 @@ Re-attestation is intentionally narrow: the package must not have a published re
 - `TOOLCHAIN_MISMATCH`: current runner toolchain differs from the attested fingerprint.
 - `MANIFEST_DRIFT` / `CHECKSUM_DRIFT`: immutable package identity no longer matches stored evidence.
 - `PROVENANCE_DRIFT`: approved/current render no longer matches the package component.
-- `DEPENDENCY_CONFLICT`: the same version identity resolves to different content hashes.
+- `MISSING_DEPENDENCY` / `DEPENDENCY_CONFLICT`: package dependency closure is incomplete or resolves the same version identity to different content hashes.
+- `PACKAGE_STORAGE_UNREADY`: the package artifact is missing an immutable ready storage object.
 - `PACKAGE_ATTESTATION_BLOCKED`: publish was stopped by the integrity gate.
 
 ## Incident response
@@ -53,11 +54,15 @@ Re-attestation is intentionally narrow: the package must not have a published re
 1. Do not bypass the publish gate or mutate attestation rows.
 2. Run the verification CLI and preserve its diagnostics in the incident evidence.
 3. If the package is unpublished and the only failure is an approved safe reason, use operator-approved re-attestation.
-4. For source, render, QA, approval, package-manifest, or dependency drift, rebuild the package instead of re-attesting.
+4. For source, render, QA, approval, package-manifest, storage, or dependency drift, rebuild the package instead of re-attesting.
 5. Re-run reconciliation after restoring storage or database state and confirm the exact package fingerprint before releasing.
 
 ## Metrics and health
 
-Track package build/attestation outcomes as `package_attestation_total` with outcome labels (`verified`, `blocked`, `drifted`, `reattested`) and `package_attestation_diagnostics_total` by diagnostic code. Alert on sustained `SIGNATURE_INVALID`, `REPLAY_DIVERGENCE`, `TOOLCHAIN_MISMATCH`, or `PACKAGE_ATTESTATION_BLOCKED` events.
+Track package build/attestation outcomes as `forge_package_attestation_total` with outcome labels (`verified`, `blocked`) and `forge_package_attestation_diagnostics_total` by diagnostic code. Alert on sustained `SIGNATURE_INVALID`, `REPLAY_DIVERGENCE`, `TOOLCHAIN_MISMATCH`, or `PACKAGE_ATTESTATION_BLOCKED` events.
 
 The normal service readiness check remains authoritative; a package runner is healthy only when it can access PostgreSQL, immutable artifact storage, FFmpeg/ffprobe, and the signing secret without exposing it to runner output.
+
+## Validation coverage
+
+The added unit suite covers canonical key ordering, stable fingerprints, secret redaction, signature tampering, replay/toolchain divergence, and re-attestation safety. Existing packaging/reconciliation tests cover repeated builds, missing artifacts, stale manifests, partial persistence, storage checksum failures, cancellation, timeout, and concurrent reconciliation; provider-run integration tests exercise concurrent durable probe claims. The production GitHub runner path additionally persists the canonical build-input inventory before returning success.
