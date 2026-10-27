@@ -20,7 +20,8 @@ class SafeSearchIndexConsistencyService extends Base {
       if(sourceIndex<0) sourceIndex=0;
       const [sourceType,table]=SOURCES[sourceIndex];
       const cursor=g.checkpoint_type===sourceType ? g.checkpoint_id : '';
-      const sql=`SELECT to_jsonb(t) AS row FROM ${table} t WHERE forge_search_source_tenant_id(forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id','')))= $1 AND ($2::text IS NULL OR forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id',''))=$2) AND t.id::text>$3 ORDER BY t.id::text LIMIT $4`;
+      const projectExpr=sourceType==='project' ? 't.id::text' : `forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id',''))`;
+      const sql=`SELECT to_jsonb(t) AS row FROM ${table} t WHERE forge_search_source_tenant_id(${projectExpr})= $1 AND ($2::text IS NULL OR ${projectExpr}=$2) AND t.id::text>$3 ORDER BY t.id::text LIMIT $4`;
       const rows=await this.pool.query({text:sql,values:[tenantId,g.project_id,cursor,this.batchSize]});
       if(rows.rows.length===0){
         const next=SOURCES[sourceIndex+1];
@@ -79,7 +80,8 @@ class SafeSearchIndexConsistencyService extends Base {
     let sourceErrors=[];
     for(const [sourceType,table] of SOURCES){
       try{
-        const r=await this.pool.query({text:`SELECT count(*)::bigint count FROM ${table} t WHERE forge_search_source_tenant_id(forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id','')))= $1 AND ($2::text IS NULL OR forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id',''))=$2)`,values:[tenantId,projectId]});
+        const projectExpr=sourceType==='project' ? 't.id::text' : `forge_search_source_project_id(to_jsonb(t),NULLIF(to_jsonb(t)->>'episode_id',''))`;
+        const r=await this.pool.query({text:`SELECT count(*)::bigint count FROM ${table} t WHERE forge_search_source_tenant_id(${projectExpr})= $1 AND ($2::text IS NULL OR ${projectExpr}=$2)`,values:[tenantId,projectId]});
         expected+=Number(r.rows[0]?.count||0);
       }catch(error){sourceErrors.push({sourceType,error:String(error.message||error)});}
     }
