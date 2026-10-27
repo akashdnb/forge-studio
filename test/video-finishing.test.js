@@ -1,0 +1,65 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const { normalizeConfig, sha256Json, buildFinishingArgs, parseCaptionFile, validateSubtitleSync, inspectActualMedia } = require('../src/media/video-finishing');
+
+function command(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (c) => { stdout += c; });
+    child.stderr.on('data', (c) => { stderr += c; });
+    child.once('error', reject);
+    child.once('close', (code) => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${command} exited ${code}: ${stderr}`)));
+  });
+}
+
+test('finishing config is deterministic and validates variants/caption mode', () => {
+  const a = normalizeConfig({ branding: { text: 'Forge Studio' }, variants: ['16:9', '9:16', '1:1'] });
+  const b = normalizeConfig({ variants: ['1:1', '9:16', '16:9'], branding: { text: 'Forge Studio' } });
+  assert.equal(sha256Json(a), sha256Json(b));
+  assert.throws(() => normalizeConfig({ variants: ['4:3'] }), /variants/);
+  assert.throws(() => normalizeConfig({ captionMode: 'burn-in' }), /captionPath/);
+});
+
+test('finishing args encode deterministic dimensions, codec and provenance metadata', () => {
+  const config = normalizeConfig({ variants: ['9:16'], branding: { text: 'Forge Studio' } });
+  const args = buildFinishingArgs({ inputPath: '/tmp/input.mp4', outputPath: '/tmp/output.mp4', config, variant: '9:16' });
+  assert.ok(args.includes('720:1280:force_original_aspect_ratio=increase'));
+  assert.ok(args.includes('libx264'));
+  assert.ok(args.includes('aac'));
+  assert.ok(args.some((value) => value.includes('forge_finishing_config_sha256=')));
+});
+
+test('subtitle parser and sync validator reject out-of-range or unordered cues', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-caption-test-'));
+  const good = path.join(dir, 'captions.srt');
+  const bad = path.join(dir, 'bad.srt');
+  await fs.writeFile(good, '1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,100 --> 00:00:02,000\nWorld\n');
+  await fs.writeFile(bad, '1\n00:00:03,000 --> 00:00:04,000\nToo late\n');
+  assert.equal(parseCaptionFile(await fs.readFile(good, 'utf8'), good).length, 2);
+  assert.equal((await validateSubtitleSync(good, 3)).status, 'PASSED');
+  assert.equal((await validateSubtitleSync(bad, 2)).status, 'FAILED');
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('acceptance: render an actual MP4 and run ffprobe/decode/black/freeze QA', async (t) => {
+  const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
+  const ffprobe = process.env.FFPROBE_PATH || 'ffprobe';
+  try { await command(ffmpeg, ['-version']); await command(ffprobe, ['-version']); } catch { t.skip('ffmpeg/ffprobe are not installed in this environment'); return; }
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-finish-acceptance-'));
+  const input = path.join(dir, 'input.mp4');
+  try {
+    await command(ffmpeg, ['-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2', input]);
+    const qa = await inspectActualMedia(input, { ffmpegPath: ffmpeg, ffprobePath: ffprobe, expectedDurationSeconds: 2, width: 640, height: 360, fps: 30 });
+    assert.equal(qa.status, 'PASSED', JSON.stringify(qa, null, 2));
+    assert.ok(qa.checks.some((check) => check.name === 'decode_integrity' && check.status === 'PASS'));
+    assert.ok(qa.checks.some((check) => check.name === 'black_frames' && check.status === 'PASS'));
+    assert.ok(qa.checks.some((check) => check.name === 'frozen_frames' && check.status === 'PASS'));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
