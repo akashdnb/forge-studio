@@ -1,4 +1,5 @@
 'use strict';
+require('./contract-bootstrap');
 
 const http = require('node:http');
 const { Pool } = require('pg');
@@ -28,5 +29,4 @@ if (!http.Server.prototype[installed] && process.env.DATABASE_URL) {
   };
   http.Server.prototype[installed] = { pool, registry };
 }
-
 module.exports = { installed };
