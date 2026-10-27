@@ -41,4 +41,6 @@ function createSafeReleaseScheduleService(options = {}) {
   };
 }
 
+const releaseSchedulerModule = require('./release-scheduler');
+releaseSchedulerModule.createReleaseScheduleService = createSafeReleaseScheduleService;
 module.exports = { createSafeReleaseScheduleService, nextOccurrence, resolveLocalDateTime: resolveLocal };
