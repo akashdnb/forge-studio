@@ -4,6 +4,14 @@ const extended = require('./extended-http-api');
 const { ProductionSearchService, handleSearchRequest } = require('./search/production-search');
 const { authenticate, applySecurityHeaders, safeError } = require('./security/http-security');
 const { randomUUID } = require('node:crypto');
+const { installOperationsControlPlane } = require('./operations/control-plane');
+const { installIncidentControlPlane } = require('./incidents/http-extension');
+const { installIncidentEventSubscriptionBridge } = require('./incidents/event-subscription-bridge');
+const { installIncidentHealthEndpoint } = require('./incidents/health-extension');
+installOperationsControlPlane();
+installIncidentControlPlane();
+installIncidentEventSubscriptionBridge();
+installIncidentHealthEndpoint();
 
 // server.js removes the initial extended-api listener and captures it as apiHandler.
 // Wrap that listener here so search routes use the verified production identity and
