@@ -38,12 +38,13 @@ test('b-roll scoring prefers semantic, role and continuity matches and avoids re
   const ranked = scoreAssets(assets, requirement);
   assert.equal(ranked[0].id, 'lab-detail');
   assert.ok(ranked[0].score > ranked[1].score);
-  const selections = selectBroll({ scenes: [{ id: 's1', narrationText: requirement.narrationText, intent: requirement.intent, shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4, location: 'lab' }] }], assets });
+  const selections = selectBroll({ scenes: normaliseScenes({ scenes: [{ id: 's1', narrationText: requirement.narrationText, intent: requirement.intent, shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4, location: 'lab' }] }] }), assets });
   assert.equal(selections[0].selectedAssetId, 'lab-detail');
 });
 
 test('b-roll has durable fallback when no candidate is suitable', () => {
-  const selections = selectBroll({ scenes: [{ id: 's1', narrationText: 'a very specific event', shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4 }] }], assets: [] });
+  const scenes = normaliseScenes({ scenes: [{ id: 's1', narrationText: 'a very specific event', shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4 }] }] });
+  const selections = selectBroll({ scenes, assets: [] });
   assert.equal(selections[0].selectedAssetId, null);
   assert.deepEqual(selections[0].fallback.order, ['preferred-existing', 'provider-generated', 'continuity-compatible-prior', 'neutral-establishing']);
   assert.equal(selections[0].fallback.retryableProviderFailure, true);
