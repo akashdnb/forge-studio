@@ -24,12 +24,7 @@ class AuditEvidenceQueryService {
     this.logger = logger;
   }
 
-  async search({
-    tenantId, projectId = null, actor = null, serviceIdentity = null, eventClass = null,
-    sourceTable = null, operation = null, targetType = null, targetId = null, requestId = null,
-    correlationId = null, causationId = null, eventId = null, from = null, to = null,
-    includeArchived = false, privileged = false, limit = 100, cursor = null,
-  } = {}) {
+  async search({ tenantId, projectId = null, actor = null, serviceIdentity = null, eventClass = null, sourceTable = null, operation = null, targetType = null, targetId = null, requestId = null, correlationId = null, causationId = null, eventId = null, from = null, to = null, includeArchived = false, privileged = false, limit = 100, cursor = null } = {}) {
     if (!tenantId) throw Object.assign(new Error('tenantId is required'), { code: 'TENANT_REQUIRED', statusCode: 403 });
     const size = boundedInteger(limit, 100, 1, MAX_LIMIT);
     const decoded = decodeCursor(cursor);
@@ -51,20 +46,16 @@ class AuditEvidenceQueryService {
     if (from) add('e.occurred_at >= ?', from);
     if (to) add('e.occurred_at < ?', to);
     if (!includeArchived) where.push("e.retention_state NOT IN ('ARCHIVED','EXPIRED','QUARANTINED')");
-    // Retention/privacy is evaluated from the source-of-truth policy tables at query time.
-    where.push("NOT EXISTS (SELECT 1 FROM privacy_retention_items ri WHERE ri.tenant_id=e.tenant_id AND ri.resource_type='audit_evidence' AND ri.resource_id=e.event_id AND ri.state='DESTROYED')");
+    where.push("NOT EXISTS (SELECT 1 FROM privacy_retention_items ri WHERE ri.tenant_id=e.tenant_id AND ri.resource_type='audit_evidence' AND ri.resource_id=e.event_id AND ri.state IN ('ELIGIBLE','APPROVED','DESTROYED') AND ri.eligible_at <= now())");
     where.push("NOT EXISTS (SELECT 1 FROM privacy_quarantine pq WHERE pq.tenant_id=e.tenant_id AND pq.resource_type='audit_evidence' AND pq.resource_id=e.event_id AND pq.state='PURGED')");
     if (!privileged) where.push("e.redaction_level <> 'RESTRICTED'");
     if (decoded) {
-      values.push(decoded.occurredAt, decoded.occurredAt, decoded.ledgerSeq, decoded.ledgerSeq, decoded.eventId);
-      const base = values.length - 4;
-      where.push(`(e.occurred_at < $${base} OR (e.occurred_at = $${base + 1} AND e.ledger_seq < $${base + 2}) OR (e.occurred_at = $${base + 3} AND e.ledger_seq = $${base + 4} AND e.event_id < $${base + 5}))`);
+      const occurredParam = values.length + 1;
+      values.push(decoded.occurredAt, decoded.ledgerSeq, decoded.eventId);
+      where.push(`(e.occurred_at < $${occurredParam} OR (e.occurred_at = $${occurredParam} AND e.ledger_seq < $${occurredParam + 1}) OR (e.occurred_at = $${occurredParam} AND e.ledger_seq = $${occurredParam + 1} AND e.event_id < $${occurredParam + 2}))`);
     }
     values.push(size + 1);
-    const sql = `SELECT e.*,
-      EXISTS (SELECT 1 FROM privacy_holds h WHERE h.active AND h.tenant_id=e.tenant_id AND (h.project_id IS NULL OR h.project_id=e.project_id)) AS live_legal_hold
-      FROM evidence_search_index e WHERE ${where.join(' AND ')}
-      ORDER BY e.occurred_at DESC, e.ledger_seq DESC, e.event_id DESC LIMIT $${values.length}`;
+    const sql = `SELECT e.*, EXISTS (SELECT 1 FROM privacy_holds h WHERE h.active AND h.tenant_id=e.tenant_id AND (h.project_id IS NULL OR h.project_id=e.project_id)) AS live_legal_hold FROM evidence_search_index e WHERE ${where.join(' AND ')} ORDER BY e.occurred_at DESC, e.ledger_seq DESC, e.event_id DESC LIMIT $${values.length}`;
     const rows = (await this.pool.query(sql, values)).rows;
     const page = rows.slice(0, size).map((row) => this.redact(row, privileged));
     const last = page[page.length - 1];
@@ -109,28 +100,27 @@ class AuditEvidenceQueryService {
     const upper = toSeq == null ? Number(head.chain_head_seq) : boundedInteger(toSeq, Number(head.chain_head_seq), 0, Number.MAX_SAFE_INTEGER);
     const lower = fromSeq == null ? (fullChain ? 1 : Math.max(1, upper - bound + 1)) : boundedInteger(fromSeq, 1, 1, Number.MAX_SAFE_INTEGER);
     if (lower > upper) return { ok: true, checked: 0, selectedCount: 0, issues: [], fromSeq: lower, toSeq: upper };
-    const selected = (await this.pool.query(`SELECT e.* FROM evidence_ledger e WHERE e.tenant_id=$1 AND e.ledger_seq BETWEEN $2 AND $3 ORDER BY e.ledger_seq LIMIT $4`, [tenantId, lower, upper, bound + 1])).rows;
+    const selected = (await this.pool.query('SELECT e.* FROM evidence_ledger e WHERE e.tenant_id=$1 AND e.ledger_seq BETWEEN $2 AND $3 ORDER BY e.ledger_seq LIMIT $4', [tenantId, lower, upper, bound + 1])).rows;
     const issues = [];
     if (selected.length > bound) issues.push({ code: 'SCAN_BOUND_REACHED', maxEvents: bound });
     const rows = selected.slice(0, bound);
-    const globalRows = (await this.pool.query(`SELECT ledger_seq,event_id,tenant_id,prev_hash,event_hash FROM evidence_ledger WHERE ledger_seq BETWEEN $1 AND $2 ORDER BY ledger_seq`, [Math.max(1, lower - 1), upper])).rows;
+    const globalRows = (await this.pool.query('SELECT ledger_seq,event_id,tenant_id,prev_hash,event_hash FROM evidence_ledger WHERE ledger_seq BETWEEN $1 AND $2 ORDER BY ledger_seq', [Math.max(1, lower - 1), upper])).rows;
     const bySeq = new Map(globalRows.map((r) => [Number(r.ledger_seq), r]));
-    let previousGlobal = bySeq.get(lower - 1) || null;
     let previousOccurred = null;
     for (const row of rows) {
       const seq = Number(row.ledger_seq);
       const expected = sha256([row.ledger_seq,row.event_id,row.prev_hash,row.tenant_id || '',row.project_id || '',row.episode_id || '',row.actor,row.source_table,row.operation,row.target_id,row.request_id || '',row.causal_event_id || '',row.payload_digest].join('|'));
+      const previousGlobal = bySeq.get(seq - 1) || null;
       if (expected !== row.event_hash) issues.push({ code: 'CHAIN_HASH_MISMATCH', ledgerSeq: seq, eventId: row.event_id });
       if (previousGlobal && row.prev_hash !== previousGlobal.event_hash) issues.push({ code: 'CHAIN_BREAK', ledgerSeq: seq, eventId: row.event_id });
-      if (previousGlobal && seq !== Number(previousGlobal.ledger_seq) + 1) issues.push({ code: 'SEQUENCE_GAP', ledgerSeq: seq, eventId: row.event_id });
-      if (previousOccurred && new Date(row.occurred_at).getTime() > previousOccurred) issues.push({ code: 'CLOCK_REORDER', ledgerSeq: seq, eventId: row.event_id });
+      if (!previousGlobal && seq > 1) issues.push({ code: 'SEQUENCE_GAP', ledgerSeq: seq, eventId: row.event_id });
+      if (previousOccurred !== null && new Date(row.occurred_at).getTime() > previousOccurred) issues.push({ code: 'CLOCK_REORDER', ledgerSeq: seq, eventId: row.event_id });
       previousOccurred = new Date(row.occurred_at).getTime();
-      previousGlobal = row;
     }
-    const duplicates = (await this.pool.query(`SELECT event_id,COUNT(*)::int AS count FROM evidence_ledger WHERE tenant_id=$1 GROUP BY event_id HAVING COUNT(*)>1 LIMIT 20`, [tenantId])).rows;
+    const duplicates = (await this.pool.query('SELECT event_id,COUNT(*)::int AS count FROM evidence_ledger WHERE tenant_id=$1 GROUP BY event_id HAVING COUNT(*)>1 LIMIT 20', [tenantId])).rows;
     for (const duplicate of duplicates) issues.push({ code: 'DUPLICATE_EVENT_ID', eventId: duplicate.event_id, count: duplicate.count });
     const result = { ok: issues.length === 0, checked: rows.length, selectedCount: rows.length, issues, fromSeq: lower, toSeq: upper, chainHeadHash: head.chain_head_hash };
-    await this.pool.query(`INSERT INTO evidence_integrity_runs(tenant_id,from_seq,to_seq,checked,issue_count,status,issues,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now())`, [tenantId, lower, upper, result.checked, issues.length, issues.length ? 'FAILED' : 'PASSED', JSON.stringify(issues)]);
+    await this.pool.query('INSERT INTO evidence_integrity_runs(tenant_id,from_seq,to_seq,checked,issue_count,status,issues,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now())', [tenantId, lower, upper, result.checked, issues.length, issues.length ? 'FAILED' : 'PASSED', JSON.stringify(issues)]);
     return result;
   }
 
