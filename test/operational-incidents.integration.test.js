@@ -57,6 +57,9 @@ test('PostgreSQL incident lifecycle, dedupe, tenant isolation, escalation and du
     await manager.transition({tenantId:tenantA,incidentId:first.incident.id,actorId:'operator-a',action:'ACKNOWLEDGE',reason:'Operator is actively investigating',idempotencyKey:'ack-1'});
     const ackReplay = await manager.transition({tenantId:tenantA,incidentId:first.incident.id,actorId:'operator-a',action:'ACKNOWLEDGE',reason:'Operator is actively investigating',idempotencyKey:'ack-1'});
     assert.equal(ackReplay.status,'ACKNOWLEDGED');
+    await pool.query(`UPDATE operational_incidents SET status='OPEN',next_escalation_at=now()-interval '1 second' WHERE id=$1`, [first.incident.id]);
+    await manager.escalateTenant(tenantA);
+    assert.equal((await manager.get(tenantA, first.incident.id)).current_escalation_level, 1);
     await manager.transition({tenantId:tenantA,incidentId:first.incident.id,actorId:'operator-a',action:'RESOLVE',reason:'Root cause fixed and worker recovered',resolutionEvidence:{jobId:jobA,status:'RECOVERED',token:'must-not-leak'},idempotencyKey:'resolve-1'});
     assert.equal((await manager.get(tenantA, first.incident.id)).status,'RESOLVED');
 
