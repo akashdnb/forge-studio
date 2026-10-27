@@ -1,0 +1,68 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { SecretCipher } = require('../src/runtime/runtime-policy');
+const { CredentialAccessService } = require('../src/providers/credential-access-service');
+const { ProviderCredentialRegistry, confirmToken } = require('../src/providers/credential-registry');
+
+function key() { return Buffer.alloc(32, 9).toString('base64'); }
+
+if (process.env.FORGE_CREDENTIAL_ACCESS_INTEGRATION === 'true') {
+  test('PostgreSQL credential access leases are tenant scoped, fenced and rotation aware', async () => {
+    const { Pool } = require('pg');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12 });
+    const cipher = new SecretCipher(key());
+    const access = new CredentialAccessService({ pool, secretCipher:cipher, signingSecret:'credential-access-test-signing-secret', region:'test-region', executionEpoch:'test-epoch' });
+    const registry = new ProviderCredentialRegistry({ pool, secretCipher:cipher });
+    const tenantA=`credential-access-a-${Date.now()}`; const tenantB=`credential-access-b-${Date.now()}`;
+    await pool.query("INSERT INTO tenants(id,name,created_by) VALUES($1,$2,'credential-access-test'),($3,$4,'credential-access-test')",[tenantA,'credential-access-a',tenantB,'credential-access-b']);
+    try {
+      await registry.upsertCapability({provider:'access-test-provider',capability:'text-generation',model:'test-model',actor:'credential-access-test'});
+      const created=await registry.create({tenantId:tenantA,provider:'access-test-provider',credentialName:'default',material:{apiKey:'tenant-a-secret'},capabilities:[{capability:'text-generation',model:'test-model'}],actor:'credential-access-test'});
+      const base={tenantId:tenantA,provider:'access-test-provider',model:'test-model',purpose:'workflow:script',capability:'text-generation',operation:'script',workflowId:'wf-1',jobId:'job-1',attemptId:'attempt-1'};
+      const [a,b]=await Promise.all([access.acquire(base),access.acquire(base)]);
+      assert.equal(a.leaseId,b.leaseId);
+      assert.notEqual(a.grant,b.grant);
+      assert.equal(a.credentialVersion,1);
+      assert.ok(a.grant.length>80);
+      assert.doesNotMatch(a.grant,/tenant-a-secret/);
+      const result=await access.execute({grant:a.grant,request:{url:'https://provider.invalid/v1/generate',body:{prompt:'hello'}},expected:{provider:'access-test-provider',purpose:'workflow:script',region:'test-region',executionEpoch:'test-epoch'},fetchImpl:async(_url,options)=>{assert.equal(options.headers.authorization,'Bearer tenant-a-secret');return new Response(JSON.stringify({artifact:{content:{ok:true}}}),{status:200,headers:{'content-type':'application/json'}})}});
+      assert.equal(result.ok,true);
+      const renewed=await access.renew({tenantId:tenantA,leaseId:a.leaseId,fencingToken:a.fencingToken,leaseSeconds:60});
+      assert.equal(renewed.fencingToken,a.fencingToken+1);
+      await assert.rejects(()=>access.release({tenantId:tenantA,leaseId:a.leaseId,fencingToken:a.fencingToken}),error=>error.code==='STALE_FENCING_TOKEN');
+      const confirmation=confirmToken({action:'ROTATE',credentialId:created.id,version:created.version});
+      await registry.rotate({tenantId:tenantA,credentialId:created.id,material:{apiKey:'tenant-a-secret-v2'},capabilities:[{capability:'text-generation',model:'test-model'}],actor:'credential-access-test',confirm:confirmation,overlapSeconds:120});
+      const next=await access.acquire({...base,jobId:'job-2',attemptId:'attempt-2'});
+      assert.equal(next.credentialVersion,2);
+      const oldGrantResult=await access.execute({grant:a.grant,request:{url:'https://provider.invalid/v1/generate',body:{prompt:'old'}},expected:{provider:'access-test-provider',purpose:'workflow:script',region:'test-region',executionEpoch:'test-epoch'},fetchImpl:async(_url,options)=>{assert.equal(options.headers.authorization,'Bearer tenant-a-secret');return new Response(JSON.stringify({artifact:{content:{old:true}}}),{status:200})}});
+      assert.equal(oldGrantResult.ok,true);
+      await access.revoke({tenantId:tenantA,leaseId:a.leaseId,reason:'test revoke'});
+      await assert.rejects(()=>access.execute({grant:a.grant,request:{url:'https://provider.invalid/v1/generate',body:{}},expected:{provider:'access-test-provider',purpose:'workflow:script',region:'test-region',executionEpoch:'test-epoch'},fetchImpl:async()=>new Response('{}',{status:200})}),error=>['GRANT_REVOKED','GRANT_EXPIRED'].includes(error.code));
+      await assert.rejects(()=>access.acquire({...base,tenantId:tenantB,jobId:'job-b',attemptId:'attempt-b'}),error=>error.code==='CREDENTIAL_UNAVAILABLE');
+      const attestations=await access.history({tenantId:tenantA,leaseId:a.leaseId});
+      assert.ok(attestations.some(item=>item.outcome==='SUCCEEDED'));
+      assert.ok(attestations.every(item=>!JSON.stringify(item).includes('tenant-a-secret')));
+    } finally {
+      await pool.query('DELETE FROM forge_credential_access_events WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM forge_credential_usage_attestations WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM forge_credential_access_grants WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM forge_credential_access_leases WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM forge_provider_credential_audit WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM forge_provider_credentials WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query('DELETE FROM tenants WHERE id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.end();
+    }
+  });
+}
+
+test('credential grant references and attestation payloads never contain raw credential material', () => {
+  const { redact, hash } = require('../src/providers/credential-access-service');
+  const value={provider:'x',authorization:'Bearer secret-value',nested:{apiKey:'another-secret',ok:true}};
+  const safe=redact(value);
+  assert.equal(safe.authorization,'[REDACTED]');
+  assert.equal(safe.nested.apiKey,'[REDACTED]');
+  assert.equal(safe.nested.ok,true);
+  assert.equal(typeof hash({a:1}),'string');
+});
