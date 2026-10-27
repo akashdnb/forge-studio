@@ -1,0 +1,21 @@
+{
+  "version": "v2",
+  "errorEnvelope": { "required": ["error.code", "error.message"], "requestId": "optional" },
+  "protected": {
+    "GET /v2/episodes": { "status": [200, 401, 403], "security": "bearer" },
+    "POST /v2/episodes": { "status": [201, 400, 401, 403], "security": "bearer" },
+    "GET /v2/episodes/{episodeId}": { "status": [200, 401, 403, 404], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/workflow": { "status": [202, 400, 403, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/transitions": { "status": [200, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/artifacts": { "status": [201, 400, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/provider-runs": { "status": [201, 400, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/costs": { "status": [201, 400], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/qa": { "status": [201, 400, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/approvals": { "status": [201, 400, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/publish": { "status": [202, 409], "security": "bearer" },
+    "POST /v2/episodes/{episodeId}/shorts/handoff": { "status": [200, 403, 409], "security": "bearer" },
+    "GET /v2/jobs": { "status": [200, 403], "security": "bearer" },
+    "GET /v2/jobs/{jobId}": { "status": [200, 404], "security": "bearer" }
+  },
+  "requiredHeaders": ["x-request-id", "x-api-version", "x-api-compatibility", "vary"]
+}
