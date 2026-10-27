@@ -1,0 +1,20 @@
+'use strict';
+
+const installed = Symbol.for('forge.provider.credential.revocation.hook');
+function install() {
+  const { ProviderCredentialRegistry } = require('./credential-registry');
+  if (ProviderCredentialRegistry.prototype[installed]) return;
+  const original = ProviderCredentialRegistry.prototype.revoke;
+  ProviderCredentialRegistry.prototype.revoke = async function revokeAndFence(args = {}) {
+    const result = await original.call(this, args);
+    if (args.credentialId && this.pool?.query) {
+      await this.pool.query(`UPDATE forge_credential_access_grants SET revoked_at=now() WHERE credential_id=$1 AND revoked_at IS NULL`, [args.credentialId]);
+      await this.pool.query(`UPDATE forge_credential_access_leases SET state='REVOKED',revoked_at=now(),last_seen_at=now() WHERE credential_id=$1 AND state='HELD'`, [args.credentialId]);
+      await this.pool.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,event_type,reason,details) SELECT tenant_id,project_id,'CREDENTIAL_REVOKED','credential registry revocation',$2::jsonb FROM forge_provider_credentials WHERE id=$1`, [args.credentialId, JSON.stringify({ actor:args.actor || 'system' })]);
+    }
+    return result;
+  };
+  ProviderCredentialRegistry.prototype[installed] = true;
+}
+install();
+module.exports = { install };
