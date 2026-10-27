@@ -6,62 +6,31 @@ const TOKEN_VERSION = 'fcap1';
 const MAX_TTL_SECONDS = 15 * 60;
 const CLOCK_SKEW_SECONDS = 30;
 
-function canonical(value) {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
-}
+function canonical(value) { if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; return JSON.stringify(value); }
 function sign(payload, secret) { return crypto.createHmac('sha256', secret).update(payload).digest('base64url'); }
 function tokenDigest(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 function safeEqual(a, b) { const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || '')); return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y); }
 
 class CapabilityTokenService {
-  constructor({ pool, secret = process.env.FORGE_CAPABILITY_SIGNING_SECRET, clock = () => Date.now(), defaultTtlSeconds = 300 } = {}) {
-    if (!pool || typeof pool.query !== 'function') throw new TypeError('pool is required');
-    if (!secret || secret.length < 32) throw new Error('FORGE_CAPABILITY_SIGNING_SECRET must be at least 32 characters');
-    this.pool = pool; this.secret = secret; this.clock = clock; this.defaultTtlSeconds = Math.min(MAX_TTL_SECONDS, Math.max(30, Number(defaultTtlSeconds)));
-  }
-
-  issue({ subject, tenantId, projectId = null, audience, resourceType, resourceId, action, ttlSeconds = this.defaultTtlSeconds, singleUse = true, maxUses = 1, policyVersion = null } = {}) {
-    if (!subject || !tenantId || !audience || !resourceType || !resourceId || !action) throw new TypeError('subject, tenantId, audience, resourceType, resourceId and action are required');
-    const now = Math.floor(this.clock() / 1000); const ttl = Math.min(MAX_TTL_SECONDS, Math.max(1, Number(ttlSeconds)));
-    const payload = { v: 1, sub: String(subject), tenantId: String(tenantId), projectId: projectId ? String(projectId) : null, aud: String(audience), resourceType: String(resourceType), resourceId: String(resourceId), action: String(action), iat: now, nbf: now, exp: now + ttl, jti: crypto.randomUUID(), singleUse: Boolean(singleUse), maxUses: Math.max(1, Math.min(32, Number(maxUses) || 1)), policyVersion: policyVersion == null ? null : Number(policyVersion) };
-    const encoded = Buffer.from(canonical(payload)).toString('base64url');
-    return { token: `${TOKEN_VERSION}.${encoded}.${sign(encoded, this.secret)}`, payload };
-  }
-
-  async persistIssued({ token, payload }) {
-    await this.pool.query(`INSERT INTO security_capability_tokens(token_digest,jti,tenant_id,project_id,subject,audience,resource_type,resource_id,action,policy_version,expires_at,max_uses,uses,issued_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11),$12,0,to_timestamp($13))`, [tokenDigest(token), payload.jti, payload.tenantId, payload.projectId, payload.sub, payload.aud, payload.resourceType, payload.resourceId, payload.action, payload.policyVersion, payload.exp, payload.maxUses, payload.iat]);
-    return token;
-  }
-
+  constructor({ pool, secret = process.env.FORGE_CAPABILITY_SIGNING_SECRET, clock = () => Date.now(), defaultTtlSeconds = 300 } = {}) { if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') throw new TypeError('pool is required'); if (!secret || secret.length < 32) throw new Error('FORGE_CAPABILITY_SIGNING_SECRET must be at least 32 characters'); this.pool = pool; this.secret = secret; this.clock = clock; this.defaultTtlSeconds = Math.min(MAX_TTL_SECONDS, Math.max(30, Number(defaultTtlSeconds))); }
+  issue({ subject, tenantId, projectId = null, audience, resourceType, resourceId, action, ttlSeconds = this.defaultTtlSeconds, singleUse = true, maxUses = 1, policyVersion = null } = {}) { if (!subject || !tenantId || !audience || !resourceType || !resourceId || !action) throw new TypeError('subject, tenantId, audience, resourceType, resourceId and action are required'); const now = Math.floor(this.clock() / 1000); const ttl = Math.min(MAX_TTL_SECONDS, Math.max(1, Number(ttlSeconds))); const payload = { v: 1, sub: String(subject), tenantId: String(tenantId), projectId: projectId ? String(projectId) : null, aud: String(audience), resourceType: String(resourceType), resourceId: String(resourceId), action: String(action), iat: now, nbf: now, exp: now + ttl, jti: crypto.randomUUID(), singleUse: Boolean(singleUse), maxUses: Math.max(1, Math.min(32, Number(maxUses) || 1)), policyVersion: policyVersion == null ? null : Number(policyVersion) }; const encoded = Buffer.from(canonical(payload)).toString('base64url'); return { token: `${TOKEN_VERSION}.${encoded}.${sign(encoded, this.secret)}`, payload }; }
+  async persistIssued({ token, payload }) { await this.pool.query(`INSERT INTO security_capability_tokens(token_digest,jti,tenant_id,project_id,subject,audience,resource_type,resource_id,action,policy_version,expires_at,max_uses,uses,issued_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11),$12,0,to_timestamp($13))`, [tokenDigest(token), payload.jti, payload.tenantId, payload.projectId, payload.sub, payload.aud, payload.resourceType, payload.resourceId, payload.action, payload.policyVersion, payload.exp, payload.maxUses, payload.iat]); return token; }
   async issueAndPersist(args) { const issued = this.issue(args); await this.persistIssued(issued); return issued; }
-
-  parse(token) {
-    if (typeof token !== 'string') return null;
-    const parts = token.split('.'); if (parts.length !== 3 || parts[0] !== TOKEN_VERSION) return null;
-    const [, encoded, signature] = parts; if (!safeEqual(sign(encoded, this.secret), signature)) return null;
-    let payload; try { payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { return null; }
-    const now = Math.floor(this.clock() / 1000);
-    if (payload.v !== 1 || !payload.jti || !payload.sub || !payload.tenantId || !payload.aud || !payload.resourceType || !payload.resourceId || !payload.action) return null;
-    if (payload.nbf > now + CLOCK_SKEW_SECONDS || payload.exp <= now || payload.iat > now + CLOCK_SKEW_SECONDS) return null;
-    return payload;
-  }
-
+  parse(token) { if (typeof token !== 'string') return null; const parts = token.split('.'); if (parts.length !== 3 || parts[0] !== TOKEN_VERSION) return null; const [, encoded, signature] = parts; if (!safeEqual(sign(encoded, this.secret), signature)) return null; let payload; try { payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { return null; } const now = Math.floor(this.clock() / 1000); if (payload.v !== 1 || !payload.jti || !payload.sub || !payload.tenantId || !payload.aud || !payload.resourceType || !payload.resourceId || !payload.action) return null; if (payload.nbf > now + CLOCK_SKEW_SECONDS || payload.exp <= now || payload.iat > now + CLOCK_SKEW_SECONDS) return null; return payload; }
   async verify(token, expected = {}) {
-    const payload = this.parse(token);
-    if (!payload) throw Object.assign(new Error('Invalid or expired capability token'), { code: 'CAPABILITY_INVALID', statusCode: 403 });
-    for (const key of ['tenantId', 'projectId', 'audience', 'resourceType', 'resourceId', 'action', 'subject']) {
-      const claimKey = key === 'audience' ? 'aud' : key === 'subject' ? 'sub' : key;
-      if (expected[key] != null && String(payload[claimKey] ?? '') !== String(expected[key])) throw Object.assign(new Error(`Capability token ${key} binding mismatch`), { code: 'CAPABILITY_BINDING_MISMATCH', statusCode: 403 });
-    }
-    const row = (await this.pool.query('SELECT * FROM security_capability_tokens WHERE token_digest=$1 AND tenant_id=$2 FOR UPDATE', [tokenDigest(token), payload.tenantId])).rows[0];
-    if (!row) throw Object.assign(new Error('Capability token is not registered'), { code: 'CAPABILITY_UNKNOWN', statusCode: 403 });
-    if (row.expires_at <= new Date()) throw Object.assign(new Error('Capability token has expired'), { code: 'CAPABILITY_EXPIRED', statusCode: 403 });
-    if (Number(row.uses) >= Number(row.max_uses)) throw Object.assign(new Error('Capability token replay detected'), { code: 'CAPABILITY_REPLAY', statusCode: 409 });
-    const updated = await this.pool.query('UPDATE security_capability_tokens SET uses=uses+1,used_at=CASE WHEN uses+1>=max_uses THEN now() ELSE used_at END WHERE token_digest=$1 AND uses<max_uses RETURNING uses,max_uses', [tokenDigest(token)]);
-    if (!updated.rows[0]) throw Object.assign(new Error('Capability token replay detected'), { code: 'CAPABILITY_REPLAY', statusCode: 409 });
-    return payload;
+    const payload = this.parse(token); if (!payload) throw Object.assign(new Error('Invalid or expired capability token'), { code: 'CAPABILITY_INVALID', statusCode: 403 });
+    for (const key of ['tenantId', 'projectId', 'audience', 'resourceType', 'resourceId', 'action', 'subject']) { const claimKey = key === 'audience' ? 'aud' : key === 'subject' ? 'sub' : key; if (expected[key] != null && String(payload[claimKey] ?? '') !== String(expected[key])) throw Object.assign(new Error(`Capability token ${key} binding mismatch`), { code: 'CAPABILITY_BINDING_MISMATCH', statusCode: 403 }); }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query('SELECT * FROM security_capability_tokens WHERE token_digest=$1 AND tenant_id=$2 FOR UPDATE', [tokenDigest(token), payload.tenantId])).rows[0];
+      if (!row) throw Object.assign(new Error('Capability token is not registered'), { code: 'CAPABILITY_UNKNOWN', statusCode: 403 });
+      if (row.expires_at <= new Date()) throw Object.assign(new Error('Capability token has expired'), { code: 'CAPABILITY_EXPIRED', statusCode: 403 });
+      if (Number(row.uses) >= Number(row.max_uses)) throw Object.assign(new Error('Capability token replay detected'), { code: 'CAPABILITY_REPLAY', statusCode: 409 });
+      const updated = await client.query('UPDATE security_capability_tokens SET uses=uses+1,used_at=CASE WHEN uses+1>=max_uses THEN now() ELSE used_at END WHERE token_digest=$1 AND uses<max_uses RETURNING uses,max_uses', [tokenDigest(token)]);
+      if (!updated.rows[0]) throw Object.assign(new Error('Capability token replay detected'), { code: 'CAPABILITY_REPLAY', statusCode: 409 });
+      await client.query('COMMIT'); return payload;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
   }
 }
 
