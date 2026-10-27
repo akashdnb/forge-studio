@@ -1,5 +1,9 @@
 BEGIN;
 ALTER TABLE forge_execution_runs
+  DROP CONSTRAINT IF EXISTS forge_execution_runs_backend_check;
+ALTER TABLE forge_execution_runs
+  ADD CONSTRAINT forge_execution_runs_backend_check CHECK (backend IN ('github-actions','public-github-actions','local'));
+ALTER TABLE forge_execution_runs
   ADD COLUMN IF NOT EXISTS release_epoch bigint NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS runner_source_sha char(40),
   ADD COLUMN IF NOT EXISTS security_policy_version text NOT NULL DEFAULT 'forge-public-runner-v2',
