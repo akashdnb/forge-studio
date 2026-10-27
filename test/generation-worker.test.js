@@ -1,0 +1,123 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { ProviderExecutionError, createProviderRegistry, normalizeProviderResponse, classifyHttpStatus, parseRetryAfter } = require('../src/generation/provider-registry');
+const { validateBinary, validateText, outputIdentity, createGenerationWorker } = require('../src/generation/generation-worker');
+
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+
+function fakePool({ cancelled = false } = {}) {
+  return {
+    async query(sql) {
+      if (sql.includes('FROM episodes')) return { rows: [{ id: 'ep-1', project_id: 'project-1', state: 'GENERATION' }] };
+      if (sql.includes('FROM version_records')) return { rowCount: 1, rows: [{ id: 'scene-v1', kind: 'scene-plan', payload: { generationRequests: [{ capability: 'image', input: 'a black square' }] }, content_hash: 'scene-hash' }] };
+      if (sql.includes('FROM approvals')) return { rows: [{ target_version_id: 'scene-v1', decision: 'APPROVED' }] };
+      if (sql.includes('FROM forge_jobs')) return { rows: [{ status: cancelled ? 'CANCELLED' : 'RUNNING' }] };
+      return { rows: [] };
+    },
+    async connect() { throw new Error('not used'); },
+  };
+}
+
+function fakeRepository(pool) {
+  const runs = new Map();
+  return {
+    db: {
+      pool,
+      async appendVersion(input) { return { id: input.id, ...input }; },
+    },
+    async getEpisode() { return { id: 'ep-1', projectId: 'project-1', state: 'GENERATION' }; },
+    async createProviderRun(input) {
+      const existing = runs.get(input.idempotencyKey);
+      if (existing) return existing;
+      const row = { id: input.id, status: 'QUEUED', result_artifact_ids: [], ...input };
+      runs.set(input.idempotencyKey, row);
+      return row;
+    },
+    async transitionProviderRun({ id, status, patch = {} }) {
+      const row = [...runs.values()].find((item) => item.id === id);
+      row.status = status;
+      if (patch.resultArtifactIds) row.result_artifact_ids = patch.resultArtifactIds;
+      return row;
+    },
+    async registerArtifact(input) { return { id: input.id, ...input }; },
+  };
+}
+
+function fakeStorage() { return { async upload() { return { uri: 'file://artifact', key: 'artifact', sha256: 'unused', sizeBytes: PNG.length }; }, async download() {} }; }
+
+test('provider selection and deterministic local mode are explicit and repeatable', async () => {
+  const registry = createProviderRegistry({ env: { NODE_ENV: 'test' } });
+  const first = await registry.get('text').execute({ prompt: 'hello' });
+  const second = await registry.get('text').execute({ prompt: 'hello' });
+  assert.equal(first.artifact.text, second.artifact.text);
+  assert.equal(registry.localMode, true);
+});
+
+test('missing provider configuration is terminal and never exposes secrets', () => {
+  const registry = createProviderRegistry({ env: {} });
+  assert.throws(() => registry.get('image'), (error) => error.code === 'MISSING_PROVIDER_CONFIGURATION' && !error.message.includes('secret'));
+});
+
+test('malformed provider responses are rejected', () => {
+  assert.throws(() => normalizeProviderResponse({ output: {} }, 'image'), (error) => error.code === 'MALFORMED_PROVIDER_RESPONSE');
+  assert.throws(() => normalizeProviderResponse({ output: { text: 42 } }, 'text'), (error) => error.code === 'MALFORMED_PROVIDER_RESPONSE');
+});
+
+test('retry classification and retry-after parsing are bounded', () => {
+  assert.deepEqual(classifyHttpStatus(429), { retryable: true, code: 'RATE_LIMITED' });
+  assert.deepEqual(classifyHttpStatus(400), { retryable: false, code: 'PROVIDER_HTTP_TERMINAL' });
+  assert.equal(parseRetryAfter('2'), 2000);
+  assert.equal(parseRetryAfter('999999'), 60000);
+});
+
+test('output validation rejects unsupported, empty and oversized output', () => {
+  assert.throws(() => validateBinary('image', 'image/gif', PNG, { maxImageBytes: 100 }), /Unsupported media/);
+  assert.throws(() => validateBinary('image', 'image/png', PNG, { maxImageBytes: 1 }), /size limit/);
+  assert.throws(() => validateBinary('image', 'image/png', Buffer.alloc(10), { maxImageBytes: 100 }), /signature/);
+  assert.throws(() => validateText('   ', { maxTextChars: 10 }), /empty/);
+  assert.throws(() => validateText('123456', { maxTextChars: 5 }), /length limit/);
+});
+
+test('output identity is deterministic and changes when immutable inputs change', () => {
+  const a = outputIdentity({ episodeId: 'ep', capability: 'image', provider: 'deterministic', model: 'v1', request: 'x', inputVersionIds: ['v1'] });
+  const b = outputIdentity({ episodeId: 'ep', capability: 'image', provider: 'deterministic', model: 'v1', request: 'x', inputVersionIds: ['v1'] });
+  const c = outputIdentity({ episodeId: 'ep', capability: 'image', provider: 'deterministic', model: 'v1', request: 'x', inputVersionIds: ['v2'] });
+  assert.equal(a, b);
+  assert.notEqual(a, c);
+});
+
+test('provider execution propagates cancellation and does not retry terminal cancellation', async () => {
+  let executed = 0;
+  const pool = fakePool({ cancelled: true });
+  const repository = fakeRepository(pool);
+  const registry = { localMode: false, get: () => ({ provider: 'test', model: 'v1', execute: async (_input, { signal }) => { executed += 1; await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new ProviderExecutionError('cancelled', { code: 'PROVIDER_CANCELLED', retryable: false })))); resolve(); } }) };
+  const worker = createGenerationWorker({ pool, repository, storage: fakeStorage(), providerRegistry: registry, config: { timeoutMs: 30, maxAttempts: 2 } });
+  await assert.rejects(worker({ episodeId: 'ep-1', inputVersionIds: ['scene-v1'], requests: [{ capability: 'image', input: 'x' }] }, { id: 'job-1' }), /cancelled|aborted|timed out/i);
+  assert.equal(executed, 0);
+});
+
+test('worker executes a deterministic image request, persists checksum/provenance and is idempotent', async () => {
+  const pool = fakePool();
+  const repository = fakeRepository(pool);
+  const stored = [];
+  const storage = { async upload({ expectedSha256, content }) { const bytes = Buffer.from(content); stored.push({ expectedSha256, bytes }); return { uri: 'file://artifact', key: 'artifact', sha256: expectedSha256, sizeBytes: bytes.length }; }, async download() {} };
+  const registry = createProviderRegistry({ env: { NODE_ENV: 'test' } });
+  const worker = createGenerationWorker({ pool, repository, storage, providerRegistry: registry, config: { maxAttempts: 1 } });
+  const payload = { episodeId: 'ep-1', inputVersionIds: ['scene-v1'], requests: [{ capability: 'image', input: 'x' }] };
+  const first = await worker(payload, { id: 'job-1' });
+  assert.equal(first.versionIds.length, 1);
+  assert.equal(first.artifactIds.length, 1);
+  assert.equal(stored.length, 1);
+  const second = await worker(payload, { id: 'job-2' });
+  assert.deepEqual(second, first);
+  assert.equal(stored.length, 1);
+});
+
+test('http provider receives abort signal and never persists api keys in execution metadata', async () => {
+  let request;
+  const registry = createProviderRegistry({ env: { FORGE_GENERATION_TEXT_PROVIDER: 'http-json', FORGE_GENERATION_TEXT_ENDPOINT: 'https://provider.invalid/generate', FORGE_GENERATION_TEXT_API_KEY: 'super-secret', FORGE_GENERATION_TEXT_MODEL: 'model-a' }, fetchImpl: async (_url, options) => { request = options; return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ output: { text: 'ok' }, metadata: { safe: true } }) }; } });
+  const result = await registry.get('text').execute({ prompt: 'hello' }, { signal: new AbortController().signal });
+  assert.equal(result.artifact.text, 'ok');
+  assert.equal(request.headers.authorization, 'Bearer super-secret');
+  assert.equal(JSON.stringify(result).includes('super-secret'), false);
+});
