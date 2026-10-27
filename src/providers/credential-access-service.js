@@ -1,0 +1,223 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const { SecretCipher } = require('../runtime/runtime-policy');
+
+const DEFAULT_LEASE_SECONDS = 120;
+const MAX_LEASE_SECONDS = 900;
+const CLOCK_SKEW_MS = 30000;
+const SENSITIVE = /(token|secret|password|credential|authorization|cookie|api[_-]?key|private[_-]?key)/i;
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.keys(value).sort().reduce((out, key) => { out[key] = canonical(value[key]); return out; }, {});
+  return value;
+}
+function hash(value) { return crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex'); }
+function hmac(value, secret) { return crypto.createHmac('sha256', secret).update(JSON.stringify(canonical(value))).digest('base64url'); }
+function redact(value, key = '') {
+  if (SENSITIVE.test(key)) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map(v => redact(v));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, k)]));
+  return value;
+}
+function fail(code, message, statusCode = 409) { return Object.assign(new Error(message), { code, statusCode, retryable: false }); }
+function scopeEquals(actual, expected) { return hash(actual) === hash(expected); }
+
+class CredentialAccessService {
+  constructor({ pool, secretCipher, signingSecret = process.env.FORGE_CREDENTIAL_GRANT_SIGNING_SECRET, region = process.env.FORGE_REGION, executionEpoch = process.env.FORGE_RELEASE_EPOCH || process.env.FORGE_RELEASE_ID || 'local', clock = () => Date.now(), metrics = null, logger = console } = {}) {
+    if (!pool || typeof pool.connect !== 'function') throw new TypeError('pool is required');
+    if (!secretCipher) throw new TypeError('secretCipher is required');
+    if (!signingSecret) throw new TypeError('FORGE_CREDENTIAL_GRANT_SIGNING_SECRET is required');
+    if (!region) throw new TypeError('FORGE_REGION is required');
+    this.pool = pool;
+    this.secretCipher = secretCipher instanceof SecretCipher ? secretCipher : new SecretCipher(secretCipher);
+    this.signingSecret = signingSecret;
+    this.region = String(region);
+    this.executionEpoch = String(executionEpoch);
+    this.clock = clock;
+    this.metrics = metrics || { inc() {} };
+    this.logger = logger;
+  }
+
+  #token(payload) { return `${Buffer.from(JSON.stringify(canonical(payload))).toString('base64url')}.${hmac(payload, this.signingSecret)}`; }
+  #verifyToken(token) {
+    const [encoded, signature] = String(token || '').split('.');
+    if (!encoded || !signature) throw fail('GRANT_INVALID', 'credential grant is malformed', 403);
+    let payload;
+    try { payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { throw fail('GRANT_INVALID', 'credential grant is malformed', 403); }
+    const expected = hmac(payload, this.signingSecret);
+    if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw fail('GRANT_INVALID', 'credential grant signature is invalid', 403);
+    if (Number(payload.exp) + CLOCK_SKEW_MS < this.clock()) throw fail('GRANT_EXPIRED', 'credential grant has expired', 403);
+    return payload;
+  }
+
+  #scope(args) {
+    return { tenantId: String(args.tenantId), projectId: args.projectId ? String(args.projectId) : null, purpose: String(args.purpose), provider: String(args.provider), model: String(args.model || ''), workflowId: args.workflowId ? String(args.workflowId) : null, jobId: args.jobId ? String(args.jobId) : null, attemptId: args.attemptId ? String(args.attemptId) : null, region: String(args.region || this.region), executionEpoch: String(args.executionEpoch || this.executionEpoch), capability: String(args.capability || ''), operation: String(args.operation || '') };
+  }
+
+  async #attest(client, event) {
+    const evidence = redact(event.evidence || {});
+    const payload = { tenantId: event.tenantId, projectId: event.projectId || null, leaseId: event.leaseId || null, grantId: event.grantId || null, credentialId: event.credentialId || null, credentialVersion: event.credentialVersion || null, purpose: event.purpose, provider: event.provider, model: event.model || '', workflowId: event.workflowId || null, jobId: event.jobId || null, attemptId: event.attemptId || null, region: event.region, executionEpoch: event.executionEpoch, fencingToken: event.fencingToken, operation: event.operation, outcome: event.outcome, requestId: event.requestId || null, providerRequestHash: event.providerRequestHash || null, evidence };
+    const attestationHash = hash(payload);
+    const attestationSignature = hmac({ attestationHash, payload }, this.signingSecret);
+    const id = crypto.randomUUID();
+    await client.query(`INSERT INTO forge_credential_usage_attestations(id,tenant_id,project_id,lease_id,grant_id,credential_id,credential_version,purpose,provider,model,workflow_id,job_id,attempt_id,region,execution_epoch,fencing_token,operation,outcome,request_id,provider_request_hash,evidence,attestation_hash,attestation_signature) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22,$23) ON CONFLICT DO NOTHING`, [id, event.tenantId, event.projectId || null, event.leaseId || null, event.grantId || null, event.credentialId || null, event.credentialVersion || null, event.purpose, event.provider, event.model || '', event.workflowId || null, event.jobId || null, event.attemptId || null, event.region, event.executionEpoch, event.fencingToken, event.operation, event.outcome, event.requestId || null, event.providerRequestHash || null, JSON.stringify(evidence), attestationHash, attestationSignature]);
+    return { id, attestationHash, attestationSignature };
+  }
+
+  async acquire(args = {}) {
+    const scope = this.#scope(args);
+    if (!scope.tenantId || !scope.purpose || !scope.provider || !scope.region || !scope.executionEpoch) throw new TypeError('tenant, purpose, provider, region and execution epoch are required');
+    if (!scope.jobId || !scope.attemptId) throw new TypeError('jobId and attemptId are required for credential use');
+    const leaseSeconds = Math.max(5, Math.min(MAX_LEASE_SECONDS, Number(args.leaseSeconds || DEFAULT_LEASE_SECONDS)));
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`credential-access:${scope.tenantId}:${scope.projectId || '*'}:${scope.jobId}:${scope.attemptId}:${scope.provider}`]);
+      await client.query(`UPDATE forge_credential_access_leases SET state='EXPIRED', last_seen_at=now() WHERE tenant_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND state='HELD' AND expires_at<=now()`, [scope.tenantId, scope.projectId]);
+      const existing = (await client.query(`SELECT * FROM forge_credential_access_leases WHERE tenant_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND purpose=$3 AND provider=$4 AND workflow_id IS NOT DISTINCT FROM $5 AND job_id IS NOT DISTINCT FROM $6 AND attempt_id IS NOT DISTINCT FROM $7 ORDER BY issued_at DESC LIMIT 1 FOR UPDATE`, [scope.tenantId, scope.projectId, scope.purpose, scope.provider, scope.workflowId, scope.jobId, scope.attemptId])).rows[0];
+      if (existing?.state === 'HELD' && new Date(existing.expires_at).getTime() > this.clock() && existing.region === scope.region && existing.execution_epoch === scope.executionEpoch && scopeEquals(existing.scope, scope)) {
+        const grant = await this.#issueGrant(client, existing, scope);
+        await client.query('COMMIT');
+        return grant;
+      }
+      const credential = (await client.query(`SELECT * FROM forge_provider_credentials WHERE tenant_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND provider=$3 AND status IN ('ACTIVE','OVERLAP') AND (expires_at IS NULL OR expires_at>now()) ORDER BY version DESC LIMIT 1 FOR UPDATE`, [scope.tenantId, scope.projectId, scope.provider])).rows[0];
+      if (!credential) throw fail('CREDENTIAL_UNAVAILABLE', `no usable credential for provider ${scope.provider}`, 503);
+      if (scope.capability) {
+        const caps = Array.isArray(credential.capabilities) ? credential.capabilities : [];
+        const capabilityOk = caps.some(c => typeof c === 'string' ? c === scope.capability : c.capability === scope.capability && (!scope.model || !c.model || c.model === scope.model));
+        const declared = (await client.query(`SELECT 1 FROM forge_provider_capabilities WHERE provider=$1 AND capability=$2 AND model=$3 AND enabled=true`, [scope.provider, scope.capability, scope.model])).rows[0];
+        if (!capabilityOk || !declared) throw fail('CAPABILITY_SCOPE_DENIED', 'credential/provider capability scope is not compatible', 403);
+      }
+      const fencingToken = existing ? Number(existing.fencing_token || 0) + 1 : 1;
+      const leaseId = crypto.randomUUID();
+      const expiresAt = new Date(this.clock() + leaseSeconds * 1000);
+      await client.query(`INSERT INTO forge_credential_access_leases(id,credential_id,tenant_id,project_id,purpose,provider,model,workflow_id,job_id,attempt_id,region,execution_epoch,scope,fencing_token,state,expires_at,renewed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,'HELD',$15,now())`, [leaseId, credential.id, scope.tenantId, scope.projectId, scope.purpose, scope.provider, scope.model, scope.workflowId, scope.jobId, scope.attemptId, scope.region, scope.executionEpoch, JSON.stringify(scope), fencingToken, expiresAt]);
+      await client.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,lease_id,event_type,details) VALUES($1,$2,$3,'ACQUIRED',$4::jsonb)`, [scope.tenantId, scope.projectId, leaseId, JSON.stringify({ provider: scope.provider, purpose: scope.purpose, credentialVersion: credential.version, fencingToken })]);
+      const grant = await this.#issueGrant(client, { id: leaseId, credential_id: credential.id, credential_version: credential.version, tenant_id: scope.tenantId, project_id: scope.projectId, provider: scope.provider, model: scope.model, purpose: scope.purpose, region: scope.region, execution_epoch: scope.executionEpoch, fencing_token: fencingToken, expires_at: expiresAt }, scope);
+      await client.query('COMMIT');
+      this.metrics.inc('forge_credential_access_leases_total', { outcome: 'acquired', provider: scope.provider });
+      return grant;
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+
+  async #issueGrant(client, lease, scope) {
+    const grantId = crypto.randomUUID();
+    const expiresAt = new Date(Math.min(new Date(lease.expires_at).getTime(), this.clock() + Math.min(60000, new Date(lease.expires_at).getTime() - this.clock())));
+    const payload = { grantId, leaseId: lease.id, tenantId: scope.tenantId, projectId: scope.projectId, provider: scope.provider, model: scope.model, purpose: scope.purpose, region: scope.region, executionEpoch: scope.executionEpoch, fencingToken: Number(lease.fencing_token), credentialId: lease.credential_id, credentialVersion: Number(lease.credential_version), capability: scope.capability, operation: scope.operation, iat: this.clock(), exp: expiresAt.getTime() };
+    const token = this.#token(payload);
+    await client.query(`INSERT INTO forge_credential_access_grants(grant_id,lease_id,tenant_id,project_id,provider,model,purpose,region,execution_epoch,fencing_token,credential_id,credential_version,scope,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15)`, [grantId, lease.id, scope.tenantId, scope.projectId, scope.provider, scope.model, scope.purpose, scope.region, scope.executionEpoch, Number(lease.fencing_token), lease.credential_id, Number(lease.credential_version), JSON.stringify({ capability: scope.capability, operation: scope.operation }), hash(token), expiresAt]);
+    return { grant: token, grantId, leaseId: lease.id, credentialId: lease.credential_id, credentialVersion: Number(lease.credential_version), provider: scope.provider, expiresAt: expiresAt.toISOString(), fencingToken: Number(lease.fencing_token) };
+  }
+
+  async renew({ tenantId, leaseId, fencingToken, leaseSeconds = DEFAULT_LEASE_SECONDS } = {}) {
+    const seconds = Math.max(5, Math.min(MAX_LEASE_SECONDS, Number(leaseSeconds)));
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query(`SELECT * FROM forge_credential_access_leases WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, [leaseId, tenantId])).rows[0];
+      if (!row) throw fail('LEASE_NOT_FOUND', 'credential lease not found', 404);
+      if (row.state !== 'HELD' || Number(row.fencing_token) !== Number(fencingToken) || new Date(row.expires_at).getTime() <= this.clock()) throw fail('STALE_FENCING_TOKEN', 'credential lease fencing token is stale', 409);
+      const nextToken = Number(row.fencing_token) + 1;
+      const expiresAt = new Date(this.clock() + seconds * 1000);
+      await client.query(`UPDATE forge_credential_access_leases SET fencing_token=$1,expires_at=$2,renewed_at=now(),last_seen_at=now() WHERE id=$3 AND tenant_id=$4 AND fencing_token=$5 AND state='HELD'`, [nextToken, expiresAt, leaseId, tenantId, fencingToken]);
+      await client.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,lease_id,event_type,details) VALUES($1,$2,$3,'RENEWED',$4::jsonb)`, [tenantId, row.project_id, leaseId, JSON.stringify({ previousFencingToken: Number(fencingToken), fencingToken: nextToken })]);
+      await client.query('COMMIT');
+      return { leaseId, fencingToken: nextToken, expiresAt: expiresAt.toISOString() };
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+
+  async release({ tenantId, leaseId, fencingToken, reason = 'released' } = {}) {
+    const result = await this.pool.query(`UPDATE forge_credential_access_leases SET state='RELEASED',released_at=now(),last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND state='HELD' AND fencing_token=$3 RETURNING id,project_id`, [leaseId, tenantId, fencingToken]);
+    if (!result.rows[0]) throw fail('STALE_FENCING_TOKEN', 'credential lease release rejected by fencing', 409);
+    await this.pool.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,lease_id,event_type,reason) VALUES($1,$2,$3,'RELEASED',$4)`, [tenantId, result.rows[0].project_id, leaseId, reason]);
+    return { leaseId, released: true };
+  }
+
+  async revoke({ tenantId, leaseId, actor = 'operator', reason = 'operator revoked' } = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query(`UPDATE forge_credential_access_leases SET state='REVOKED',revoked_at=now(),last_seen_at=now() WHERE id=$1 AND tenant_id=$2 AND state='HELD' RETURNING *`, [leaseId, tenantId])).rows[0];
+      if (!row) throw fail('LEASE_NOT_FOUND', 'active credential lease not found', 404);
+      await client.query(`UPDATE forge_credential_access_grants SET revoked_at=now() WHERE lease_id=$1 AND revoked_at IS NULL`, [leaseId]);
+      await client.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,lease_id,event_type,reason,details) VALUES($1,$2,$3,'REVOKED',$4,$5::jsonb)`, [tenantId, row.project_id, leaseId, reason, JSON.stringify({ actor })]);
+      await client.query('COMMIT');
+      return { leaseId, revoked: true };
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+
+  async cleanup({ limit = 200 } = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const rows = (await client.query(`UPDATE forge_credential_access_leases SET state='EXPIRED',last_seen_at=now() WHERE id IN (SELECT id FROM forge_credential_access_leases WHERE state='HELD' AND expires_at<=now() ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING id,tenant_id,project_id`, [Math.max(1, Math.min(1000, Number(limit)))] )).rows;
+      for (const row of rows) await client.query(`INSERT INTO forge_credential_access_events(tenant_id,project_id,lease_id,event_type) VALUES($1,$2,$3,'EXPIRED')`, [row.tenant_id, row.project_id, row.id]);
+      await client.query('COMMIT');
+      return { expired: rows.length };
+    } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+  }
+
+  async #loadAuthorizedGrant(token, expected = {}) {
+    const payload = this.#verifyToken(token);
+    const row = (await this.pool.query(`SELECT l.*,g.grant_id,g.expires_at AS grant_expires_at,g.revoked_at,g.credential_id AS grant_credential_id,g.credential_version AS grant_credential_version FROM forge_credential_access_grants g JOIN forge_credential_access_leases l ON l.id=g.lease_id WHERE g.grant_id=$1 AND g.token_hash=$2`, [payload.grantId, hash(token)])).rows[0];
+    if (!row) throw fail('GRANT_NOT_FOUND', 'credential grant not found', 403);
+    if (row.revoked_at || row.state !== 'HELD' || Number(row.fencing_token) !== Number(payload.fencingToken)) throw fail('GRANT_REVOKED', 'credential grant is no longer authorized', 403);
+    if (new Date(row.expires_at).getTime() <= this.clock() || new Date(row.grant_expires_at).getTime() <= this.clock()) throw fail('GRANT_EXPIRED', 'credential grant has expired', 403);
+    for (const key of ['tenantId','projectId','provider','model','purpose','region','executionEpoch','credentialId','credentialVersion']) if (expected[key] != null && String(row[key === 'credentialId' ? 'grant_credential_id' : key === 'credentialVersion' ? 'grant_credential_version' : key === 'executionEpoch' ? 'execution_epoch' : key]) !== String(expected[key])) throw fail('GRANT_SCOPE_MISMATCH', `credential grant does not match ${key}`, 403);
+    return { payload, row };
+  }
+
+  async execute({ grant, request, fetchImpl = fetch, expected = {}, requestId = null, timeoutMs = 120000 } = {}) {
+    const { row, payload } = await this.#loadAuthorizedGrant(grant, expected);
+    const credential = (await this.pool.query(`SELECT * FROM forge_provider_credentials WHERE id=$1 AND tenant_id=$2 AND version=$3 AND status IN ('ACTIVE','OVERLAP') AND (expires_at IS NULL OR expires_at>now())`, [row.grant_credential_id, row.tenant_id, row.grant_credential_version])).rows[0];
+    if (!credential) throw fail('CREDENTIAL_REVOKED_OR_STALE', 'credential is no longer usable', 403);
+    let material;
+    try { material = JSON.parse(this.secretCipher.decrypt({ ciphertext: credential.ciphertext, nonce: credential.nonce, authTag: credential.auth_tag })); } catch { throw fail('CREDENTIAL_DECRYPT_FAILED', 'credential material could not be decrypted', 503); }
+    const headers = { 'content-type': 'application/json' };
+    const suppliedHeaders = material?.headers && typeof material.headers === 'object' ? material.headers : {};
+    for (const [key, value] of Object.entries(suppliedHeaders)) if (!SENSITIVE.test(key)) headers[key] = String(value);
+    const bearer = material?.accessToken || material?.token || material?.apiKey || material?.key;
+    if (bearer) headers.authorization = `Bearer ${String(bearer)}`;
+    const apiKey = material?.apiKey || material?.key;
+    if (apiKey && material?.headerName) headers[String(material.headerName)] = String(apiKey);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs)));
+    const body = request?.body === undefined ? undefined : JSON.stringify(request.body);
+    const requestHash = hash({ provider: row.provider, purpose: row.purpose, operation: payload.operation, body: redact(request?.body || {}) });
+    const started = this.clock();
+    try {
+      await this.pool.query(`UPDATE forge_credential_access_leases SET last_seen_at=now() WHERE id=$1 AND state='HELD' AND fencing_token=$2`, [row.id, row.fencing_token]);
+      const response = await fetchImpl(request.url, { method: request.method || 'POST', headers, body, signal: controller.signal });
+      const text = await response.text();
+      let parsed = {};
+      if (text) { try { parsed = JSON.parse(text); } catch { parsed = { raw: text.slice(0, 4096) }; } }
+      const client = await this.pool.connect();
+      try { await client.query('BEGIN'); await this.#attest(client, { ...row, grantId: payload.grantId, credentialId: row.grant_credential_id, credentialVersion: row.grant_credential_version, operation: payload.operation || 'provider.execute', outcome: response.ok ? 'SUCCEEDED' : 'FAILED', requestId, providerRequestHash: requestHash, evidence: { status: response.status, durationMs: this.clock() - started } }); await client.query('COMMIT'); } catch (error) { try { await client.query('ROLLBACK'); } catch {} throw error; } finally { client.release(); }
+      return { ok: response.ok, status: response.status, headers: { 'content-type': response.headers.get?.('content-type') || null }, body: parsed, provider: row.provider, credentialVersion: row.grant_credential_version, attestation: 'recorded' };
+    } catch (error) {
+      const client = await this.pool.connect();
+      try { await client.query('BEGIN'); await this.#attest(client, { ...row, grantId: payload.grantId, credentialId: row.grant_credential_id, credentialVersion: row.grant_credential_version, operation: payload.operation || 'provider.execute', outcome: error.code === 'GRANT_REVOKED' ? 'REVOKED' : 'FAILED', requestId, providerRequestHash: requestHash, evidence: { code: error.code || 'PROVIDER_REQUEST_FAILED', durationMs: this.clock() - started } }); await client.query('COMMIT'); } catch {} finally { client.release(); }
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
+  async listLeases({ tenantId, projectId = null, state = null, limit = 100 } = {}) {
+    const values = [tenantId]; const clauses = ['tenant_id=$1'];
+    if (projectId) { values.push(projectId); clauses.push(`project_id=$${values.length}`); }
+    if (state) { values.push(state); clauses.push(`state=$${values.length}`); }
+    values.push(Math.max(1, Math.min(500, Number(limit))));
+    return (await this.pool.query(`SELECT id,tenant_id,project_id,purpose,provider,model,workflow_id,job_id,attempt_id,region,execution_epoch,fencing_token,state,issued_at,expires_at,renewed_at,released_at,revoked_at FROM forge_credential_access_leases WHERE ${clauses.join(' AND ')} ORDER BY issued_at DESC LIMIT $${values.length}`, values)).rows;
+  }
+
+  async history({ tenantId, projectId = null, leaseId = null, limit = 100 } = {}) {
+    const values = [tenantId]; const clauses = ['tenant_id=$1'];
+    if (projectId) { values.push(projectId); clauses.push(`project_id=$${values.length}`); }
+    if (leaseId) { values.push(leaseId); clauses.push(`lease_id=$${values.length}`); }
+    values.push(Math.max(1, Math.min(500, Number(limit))));
+    return (await this.pool.query(`SELECT id,lease_id,grant_id,credential_id,credential_version,purpose,provider,model,workflow_id,job_id,attempt_id,region,execution_epoch,fencing_token,operation,outcome,request_id,provider_request_hash,evidence,attestation_hash,attestation_signature,created_at FROM forge_credential_usage_attestations WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT $${values.length}`, values)).rows;
+  }
+}
+
+module.exports = { CredentialAccessService, redact, hash };
