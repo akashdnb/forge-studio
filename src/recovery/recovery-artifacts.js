@@ -8,7 +8,18 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 
+function canonicalize(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function merkleRoot(items) {
+  let level = items.map((item) => sha256(canonicalize(item))).sort();
+  if (!level.length) return sha256('forge:empty-recovery-manifest:v1');
+  while (level.length > 1) { const next = []; for (let i = 0; i < level.length; i += 2) next.push(sha256(level[i] + (level[i + 1] || level[i]))); level = next; }
+  return level[0];
+}
 async function fileSha256(file) {
   const hash = crypto.createHash('sha256');
   await pipeline(fs.createReadStream(file), new Writable({ write(chunk, _encoding, cb) { hash.update(chunk); cb(); } }));
@@ -28,8 +39,8 @@ class RecoveryArtifactArchive {
     const rows = await this.listArtifacts(tenantId);
     const root = path.join(this.backupDir, `${backupId}.artifacts`); await fsp.mkdir(root, { recursive: true, mode: 0o700 });
     const manifest = []; let totalBytes = 0; let cursor = 0;
-    const worker = async () => {
-      while (true) {
+    try {
+      const worker = async () => { while (true) {
         if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' });
         const index = cursor++; if (index >= rows.length) return;
         const row = rows[index]; if (!row.storage_key || !row.content_hash) throw Object.assign(new Error(`artifact ${row.id} has no trusted content-addressed storage record`), { code: 'ARTIFACT_UNBACKUPABLE' });
@@ -37,19 +48,19 @@ class RecoveryArtifactArchive {
         const safe = `${row.content_hash}.bin`; const file = path.join(root, safe); await pipeline(object.stream, fs.createWriteStream(file, { flags: 'wx', mode: 0o600 }));
         const stat = await fsp.stat(file); totalBytes += stat.size; if (totalBytes > this.maxBytes) throw Object.assign(new Error('artifact backup exceeds configured byte bound'), { code: 'ARTIFACT_BACKUP_TOO_LARGE' });
         manifest[index] = { id: row.id, projectId: row.project_id, tenantId: row.tenant_id, episodeId: row.episode_id, versionId: row.version_id, kind: row.kind, mediaType: row.media_type || 'application/octet-stream', storageKey: row.storage_key, contentHash: row.content_hash, storedHash: row.stored_hash, sizeBytes: stat.size, file: safe };
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker));
-    manifest.sort((a, b) => a.id.localeCompare(b.id));
-    const manifestPath = path.join(root, 'manifest.json'); await fsp.writeFile(manifestPath, JSON.stringify({ format: 'forge-artifacts-v1', backupId, tenantId, artifacts: manifest, root: sha256(JSON.stringify(manifest)) }, null, 2), { mode: 0o600 });
-    const archive = path.join(this.backupDir, `${backupId}.artifacts.tar.gz`);
-    await this.commandRunner('tar', ['-czf', archive, '-C', root, '.']);
-    const info = await fsp.stat(archive); const archiveSha256 = await fileSha256(archive); await fsp.rm(root, { recursive: true, force: true });
-    return { archive, archiveSha256, bytes: info.size, artifactBytes: totalBytes, manifest, root: sha256(JSON.stringify(manifest)) };
+      } };
+      await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker));
+      manifest.sort((a, b) => a.id.localeCompare(b.id));
+      const manifestRoot = merkleRoot(manifest);
+      await fsp.writeFile(path.join(root, 'manifest.json'), JSON.stringify({ format: 'forge-artifacts-v1', backupId, tenantId, artifacts: manifest, root: manifestRoot }, null, 2), { mode: 0o600 });
+      const archive = path.join(this.backupDir, `${backupId}.artifacts.tar.gz`); await this.commandRunner('tar', ['-czf', archive, '-C', root, '.']);
+      const info = await fsp.stat(archive); const archiveSha256 = await fileSha256(archive); await fsp.rm(root, { recursive: true, force: true });
+      return { archive, archiveSha256, bytes: info.size, artifactBytes: totalBytes, manifest, root: manifestRoot };
+    } catch (error) { await fsp.rm(root, { recursive: true, force: true }).catch(() => {}); throw error; }
   }
   async extract(archive) {
     const root = path.join(this.backupDir, `.artifact-restore-${crypto.randomUUID()}`); await fsp.mkdir(root, { recursive: true, mode: 0o700 });
-    try { await this.commandRunner('tar', ['-xzf', archive, '-C', root]); const manifest = JSON.parse(await fsp.readFile(path.join(root, 'manifest.json'), 'utf8')); if (manifest.format !== 'forge-artifacts-v1') throw Object.assign(new Error('unsupported artifact backup format'), { code: 'INCOMPATIBLE_ARTIFACT_FORMAT' }); if (sha256(JSON.stringify(manifest.artifacts)) !== manifest.root) throw Object.assign(new Error('artifact manifest checksum mismatch'), { code: 'ARTIFACT_MANIFEST_CORRUPT' }); return { root, manifest }; }
+    try { await this.commandRunner('tar', ['-xzf', archive, '-C', root]); const manifest = JSON.parse(await fsp.readFile(path.join(root, 'manifest.json'), 'utf8')); if (manifest.format !== 'forge-artifacts-v1') throw Object.assign(new Error('unsupported artifact backup format'), { code: 'INCOMPATIBLE_ARTIFACT_FORMAT' }); if (merkleRoot(manifest.artifacts) !== manifest.root) throw Object.assign(new Error('artifact manifest checksum mismatch'), { code: 'ARTIFACT_MANIFEST_CORRUPT' }); return { root, manifest }; }
     catch (error) { await fsp.rm(root, { recursive: true, force: true }); throw error; }
   }
   async restore({ archive, targetStorage, tenantId, signal }) {
@@ -68,5 +79,4 @@ class RecoveryArtifactArchive {
     finally { await fsp.rm(extracted.root, { recursive: true, force: true }).catch(() => {}); }
   }
 }
-
-module.exports = { RecoveryArtifactArchive, sha256, fileSha256 };
+module.exports = { RecoveryArtifactArchive, sha256, merkleRoot, fileSha256 };
