@@ -2,9 +2,9 @@
 
 const http = require('node:http');
 const { URL } = require('node:url');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { authenticate, hasRole, applySecurityHeaders } = require('../security/http-security');
-const { OutboundWebhookReliability, validateDestination, verifyOutboundSignature } = require('./outbound-webhook-reliability');
+const { FencedOutboundWebhookReliability } = require('./fenced-outbound-webhook-reliability');
 const { EVENT_SCHEMAS } = require('./durable-delivery');
 
 async function readJson(req, limit = 1024 * 1024) {
@@ -43,6 +43,11 @@ async function assertProjectAccess(pool, auth, projectId) {
   if (!row) throw Object.assign(new Error('Project is outside the authenticated tenant scope'), { code: 'FORBIDDEN', statusCode: 403 });
 }
 
+async function audit(pool, auth, action, targetType, targetId, projectId, details = {}) {
+  await pool.query(`INSERT INTO security_audit_events(tenant_id,project_id,actor,action,target_type,target_id,outcome,details)
+    VALUES($1,$2,$3,$4,$5,$6,'ALLOWED',$7::jsonb)`, [auth.tenantId, projectId || null, auth.actor, action, targetType, targetId, JSON.stringify(details)]);
+}
+
 function createDurableEventApi({
   pool,
   authSecret = process.env.FORGE_AUTH_SIGNING_SECRET,
@@ -51,7 +56,7 @@ function createDurableEventApi({
   staticTenant = process.env.FORGE_STATIC_TENANT_ID,
   logger = console,
 } = {}) {
-  const delivery = new OutboundWebhookReliability({ pool, logger });
+  const delivery = new FencedOutboundWebhookReliability({ pool, logger });
   const server = http.createServer(async (req, res) => {
     const requestId = req.headers['x-request-id'] || randomUUID();
     try {
@@ -80,6 +85,7 @@ function createDurableEventApi({
         await assertProjectAccess(pool, auth, body.projectId);
         await assertGovernance(pool, auth, body.governanceDecisionId);
         const item = await delivery.createSubscription({ ...body, tenantId: auth.tenantId, createdBy: auth.actor });
+        await audit(pool, auth, 'delivery.endpoint_created', 'event_subscription', item.id, item.project_id, { endpointConfigRef: item.endpoint_config_ref, deliveryEpoch: item.delivery_epoch });
         return send(res, 201, { item }, requestId);
       }
 
@@ -116,13 +122,16 @@ function createDurableEventApi({
           const body = await readJson(req);
           await assertGovernance(pool, auth, body.governanceDecisionId);
           if (typeof body.secret !== 'string') throw Object.assign(new Error('secret is required'), { code: 'INVALID_SECRET' });
-          return send(res, 200, { item: await delivery.rotateSecret(id, auth.tenantId, body.secret, auth.actor) }, requestId);
+          const result = await delivery.rotateSecret(id, auth.tenantId, body.secret, auth.actor);
+          await audit(pool, auth, 'delivery.secret_rotated', 'event_subscription', id, sub.project_id, { keyId: result.keyId, deliveryEpoch: result.deliveryEpoch });
+          return send(res, 200, { item: result }, requestId);
         }
         if (req.method === 'POST' && path[3] === 'circuit-reset') {
           if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
           const body = await readJson(req);
           await assertGovernance(pool, auth, body.governanceDecisionId);
-          return send(res, 200, { item: await delivery.resetCircuit(id, auth.tenantId, auth.actor) }, requestId);
+          const result = await delivery.resetCircuit(id, auth.tenantId, auth.actor);
+          return send(res, 200, { item: result }, requestId);
         }
         if (req.method === 'PATCH') {
           if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
@@ -133,9 +142,9 @@ function createDurableEventApi({
           let fingerprint = sub.endpoint_fingerprint;
           let epoch = Number(sub.delivery_epoch);
           if (body.endpointUrl !== undefined) {
-            endpointUrl = validateDestination(body.endpointUrl);
+            endpointUrl = delivery.constructor.prototype.constructor === FencedOutboundWebhookReliability ? require('./durable-delivery').validateDestination(body.endpointUrl) : body.endpointUrl;
             await delivery.dnsResolver(endpointUrl);
-            fingerprint = require('node:crypto').createHash('sha256').update(endpointUrl).digest('hex');
+            fingerprint = createHash('sha256').update(endpointUrl).digest('hex');
             epoch += 1;
           }
           const result = await pool.query(`UPDATE forge_event_subscriptions SET endpoint_url=$2,endpoint_fingerprint=$3,delivery_epoch=$4,
@@ -144,6 +153,7 @@ function createDurableEventApi({
             WHERE id=$1 AND tenant_id=$13 RETURNING id,tenant_id,project_id,endpoint_url,event_types,ordered,rate_limit_per_second,max_concurrency,active,endpoint_config_ref,delivery_epoch,circuit_state,circuit_failures,circuit_opened_until,governance_decision_id,governance_policy_hash,updated_at`,
           [id,endpointUrl,fingerprint,epoch,body.active,body.ordered,body.rateLimitPerSecond,body.maxConcurrency,body.configurationRef,body.governanceDecisionId,body.governancePolicyHash,auth.actor,auth.tenantId]);
           if (body.active === false) await pool.query(`UPDATE forge_event_deliveries SET status='CANCELLED',completed_at=now(),updated_at=now() WHERE subscription_id=$1 AND tenant_id=$2 AND status IN ('PENDING','RETRY')`, [id, auth.tenantId]);
+          await audit(pool, auth, 'delivery.endpoint_updated', 'event_subscription', id, sub.project_id, { endpointChanged: body.endpointUrl !== undefined, deliveryEpoch: epoch });
           return send(res, 200, { item: result.rows[0] }, requestId);
         }
         if (req.method === 'DELETE') {
@@ -152,6 +162,7 @@ function createDurableEventApi({
           await assertGovernance(pool, auth, body.governanceDecisionId);
           await pool.query(`UPDATE forge_event_subscriptions SET active=false,updated_by=$3,updated_at=now() WHERE id=$1 AND tenant_id=$2`, [id, auth.tenantId, auth.actor]);
           await pool.query(`UPDATE forge_event_deliveries SET status='CANCELLED',completed_at=now(),updated_at=now() WHERE subscription_id=$1 AND tenant_id=$2 AND status IN ('PENDING','RETRY')`, [id, auth.tenantId]);
+          await audit(pool, auth, 'delivery.endpoint_deleted', 'event_subscription', id, sub.project_id);
           return send(res, 204, null, requestId);
         }
       }
@@ -162,7 +173,11 @@ function createDurableEventApi({
         if (!row) return send(res, 404, { error: { code: 'NOT_FOUND' } }, requestId);
         if (req.method === 'POST' && path[3] === 'cancel') {
           if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
-          return send(res, 200, { item: await delivery.cancelDelivery(id, auth.actor) }, requestId);
+          const body = await readJson(req);
+          await assertGovernance(pool, auth, body.governanceDecisionId);
+          const result = await delivery.cancelDelivery(id, auth.actor);
+          await audit(pool, auth, 'delivery.cancelled', 'event_delivery', id, row.project_id);
+          return send(res, 200, { item: result }, requestId);
         }
         if (req.method === 'POST' && path[3] === 'replay') {
           if (!hasRole(auth, 'OWNER')) return send(res, 403, { error: { code: 'FORBIDDEN' } }, requestId);
@@ -187,4 +202,4 @@ function createDurableEventApi({
   return { server, delivery };
 }
 
-module.exports = { createDurableEventApi, readJson, send, verifyOutboundSignature };
+module.exports = { createDurableEventApi, readJson, send };
