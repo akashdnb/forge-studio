@@ -3,12 +3,12 @@ const assert = require('node:assert/strict');
 const { normaliseScenes, buildContinuity, selectBroll, scoreAssets, buildVisualRecipe, applyRecipeToTimeline, sha256 } = require('../src/visual/visual-continuity');
 
 test('normalises executable shot specifications with deterministic defaults', () => {
-  const scenes = normaliseScenes({ scenes: [{ id: 's1', narrationText: 'A scientist explains the process.', location: 'lab', shots: [{ id: 'shot-1', framing: 'CLOSE', duration: 3, visualSubject: 'Dr Rao' }] }] });
-  assert.equal(scenes[0].shots[0].shotType, 'A_ROLL');
-  assert.equal(scenes[0].shots[0].framing, 'CLOSE');
-  assert.equal(scenes[0].shots[0].cameraMotion, 'STATIC');
-  assert.equal(scenes[0].shots[0].location, 'lab');
-  assert.equal(scenes[0].shots[0].visualSubject.label, 'Dr Rao');
+  const result = buildContinuity(normaliseScenes({ scenes: [{ id: 's1', narrationText: 'A scientist explains the process.', location: 'lab', shots: [{ id: 'shot-1', framing: 'CLOSE', duration: 3, visualSubject: 'Dr Rao' }] }] }));
+  assert.equal(result.scenes[0].shots[0].shotType, 'A_ROLL');
+  assert.equal(result.scenes[0].shots[0].framing, 'CLOSE');
+  assert.equal(result.scenes[0].shots[0].cameraMotion, 'STATIC');
+  assert.equal(result.scenes[0].shots[0].location, 'lab');
+  assert.equal(result.scenes[0].shots[0].visualSubject.label, 'Dr Rao');
 });
 
 test('continuity inherits recurring entity anchors and flags explicit conflicts', () => {
@@ -38,12 +38,12 @@ test('b-roll scoring prefers semantic, role and continuity matches and avoids re
   const ranked = scoreAssets(assets, requirement);
   assert.equal(ranked[0].id, 'lab-detail');
   assert.ok(ranked[0].score > ranked[1].score);
-  const selections = selectBroll({ scenes: normaliseScenes({ scenes: [{ id: 's1', narrationText: requirement.narrationText, intent: requirement.intent, shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4, location: 'lab' }] }] }), assets });
-  assert.equal(selections[0].selectedAssetId, 'lab-detail');
+  const scenes = buildContinuity(normaliseScenes({ scenes: [{ id: 's1', narrationText: requirement.narrationText, intent: requirement.intent, shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4, location: 'lab' }] }] })).scenes;
+  assert.equal(selectBroll({ scenes, assets })[0].selectedAssetId, 'lab-detail');
 });
 
 test('b-roll has durable fallback when no candidate is suitable', () => {
-  const scenes = normaliseScenes({ scenes: [{ id: 's1', narrationText: 'a very specific event', shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4 }] }] });
+  const scenes = buildContinuity(normaliseScenes({ scenes: [{ id: 's1', narrationText: 'a very specific event', shots: [{ id: 'shot', shotType: 'B_ROLL', durationSeconds: 4 }] }] })).scenes;
   const selections = selectBroll({ scenes, assets: [] });
   assert.equal(selections[0].selectedAssetId, null);
   assert.deepEqual(selections[0].fallback.order, ['preferred-existing', 'provider-generated', 'continuity-compatible-prior', 'neutral-establishing']);
