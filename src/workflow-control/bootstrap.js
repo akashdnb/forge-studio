@@ -1,6 +1,7 @@
 'use strict';
 const { WorkflowControlService } = require('./service');
 const { installWorkflowControlHttp } = require('./http');
+const { reenterFromCheckpoint } = require('./reentry');
 const { WorkflowTemplateService } = require('../workflow-templates/service');
 const { JobQueue } = require('../persistence/job-queue');
 
@@ -18,6 +19,10 @@ function installWorkflowControlGuards(){
     await this.pool.query(`UPDATE forge_jobs SET workflow_execution_epoch=$2,workflow_fence_token=$3 WHERE payload->>'executionPlanId'=$1 AND status IN ('QUEUED','RUNNING')`,[planId,gate.executionEpoch,gate.fenceToken]);
     return result;
   };
+  const originalResume=WorkflowControlService.prototype.resume;
+  WorkflowControlService.prototype.resume=async function(args){const result=await originalResume.call(this,args);if(result?.state==='RUNNABLE')await reenterFromCheckpoint({pool:this.pool,planId:args.planId,tenantId:args.tenantId,actor:args.actor});return result;};
+  const originalRetry=WorkflowControlService.prototype.retryFromCheckpoint;
+  WorkflowControlService.prototype.retryFromCheckpoint=async function(args){const result=await originalRetry.call(this,args);if(result?.state==='RUNNABLE')await reenterFromCheckpoint({pool:this.pool,planId:args.planId,tenantId:args.tenantId,actor:args.actor});return result;};
   const originalClaim=JobQueue.prototype.claim;
   const originalClaimSpecific=JobQueue.prototype.claimSpecific;
   const guarded=async function(job){if(!job)return null;const svc=new WorkflowControlService({pool:this.pool});const allowed=await svc.admitJob(job);if(!allowed)return null;return job;};
