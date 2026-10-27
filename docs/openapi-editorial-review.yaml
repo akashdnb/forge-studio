@@ -1,0 +1,88 @@
+openapi: 3.0.3
+info:
+  title: Forge Studio Editorial Review API
+  version: 1.0.0
+paths:
+  /v1/reviews/threads:
+    get:
+      summary: List review threads for an immutable episode version
+      parameters:
+        - {name: projectId, in: query, required: true, schema: {type: string}}
+        - {name: episodeId, in: query, required: true, schema: {type: string}}
+        - {name: versionId, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string, enum: [OPEN, RESOLVED, REOPENED]}}
+      responses: {'200': {description: OK}}
+    post:
+      summary: Create a tenant-scoped immutable-version review thread
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateThread'
+      responses: {'201': {description: Created}, '409': {description: Version conflict or idempotency conflict}}
+  /v1/reviews/threads/{threadId}/comments:
+    post:
+      summary: Append a comment revision
+      parameters: [{name: threadId, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateComment'}}}}
+      responses: {'201': {description: Created}}
+  /v1/reviews/comments/{commentId}:
+    put:
+      summary: Append an immutable edit revision
+      parameters: [{name: commentId, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Updated}, '409': {description: Stale revision}}
+    delete:
+      summary: Append a delete tombstone
+      parameters: [{name: commentId, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Deleted}, '409': {description: Stale revision}}
+  /v1/reviews/threads/{threadId}/resolve:
+    post:
+      summary: Resolve or reopen a thread with optimistic concurrency
+      parameters: [{name: threadId, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Updated}, '409': {description: Stale revision}}
+  /v1/reviews/threads/{threadId}/decision:
+    post:
+      summary: Record durable reviewer decision evidence
+      parameters: [{name: threadId, in: path, required: true, schema: {type: string}}]
+      responses: {'201': {description: Created}}
+  /v1/reviews/gate:
+    get:
+      summary: Evaluate release review gate for an immutable version
+      responses: {'200': {description: Gate result}}
+  /v1/reviews/export:
+    get:
+      summary: Export deterministic review evidence bundle
+      responses: {'200': {description: Bundle and SHA-256 checksum}}
+  /v1/reviews/replay:
+    post:
+      summary: Replay a verified review evidence bundle
+      responses: {'200': {description: Replay checkpoint}}
+  /v1/reviews/diagnostics:
+    get:
+      summary: Review subsystem diagnostics
+      responses: {'200': {description: Diagnostics}}
+components:
+  schemas:
+    CreateThread:
+      type: object
+      required: [projectId, episodeId, versionId, anchorType, title]
+      properties:
+        projectId: {type: string}
+        episodeId: {type: string}
+        versionId: {type: string}
+        anchorType: {type: string, enum: [EPISODE, VERSION, SCENE, TIMELINE_RANGE, ARTIFACT_TIMESTAMP]}
+        anchor: {type: object}
+        title: {type: string, maxLength: 500}
+        severity: {type: string, enum: [INFO, NORMAL, MAJOR, BLOCKER]}
+        requiredForRelease: {type: boolean}
+        idempotencyKey: {type: string}
+    CreateComment:
+      type: object
+      required: [projectId, body]
+      properties:
+        projectId: {type: string}
+        body: {type: string, maxLength: 20000}
+        mentions: {type: array, items: {type: string}}
+        attachmentRefs: {type: array, items: {type: string}}
+        idempotencyKey: {type: string}
