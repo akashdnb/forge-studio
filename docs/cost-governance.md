@@ -29,17 +29,16 @@ Supported deterministic units: `request`, `second`, `byte`, `input_unit`, `outpu
 
 ## Operator APIs
 
-OWNER-only authenticated endpoints:
+OWNER-only authenticated, tenant-scoped endpoints:
 
 - `GET /v1/cost/health`
-- `GET /v1/cost/budgets`
+- `GET /v1/cost/budgets` (requires an owned TENANT/PROJECT/EPISODE scope)
 - `GET /v1/cost/rates`
-- `POST /v1/cost/budgets`
-- `POST /v1/cost/rates`
-- `POST /v1/cost/overrides`
-- `POST /v1/cost/reconcile`
+- `POST /v1/cost/budgets` (TENANT/PROJECT/EPISODE scopes)
+- `POST /v1/cost/overrides` (TENANT/PROJECT/EPISODE scopes)
+- `POST /v1/cost/reconcile` (events belonging to the caller's tenant)
 
-Mutations create new rate/budget records or append adjustments. Historical cost events are database-immutable.
+Rate versions and platform/global budgets are deployment/system configuration, not mutable by a tenant OWNER. Historical cost events remain database-immutable.
 
 ## Configuration
 
@@ -59,7 +58,7 @@ When enforcement is enabled, missing tenant attribution, missing rates, missing 
 3. Never mutate/delete immutable cost events.
 4. Reconcile provider invoice differences through `POST /v1/cost/reconcile`; the delta is append-only.
 5. Use short-lived, reasoned overrides for emergency bounded headroom; never disable enforcement as a bypass.
-6. Publish a new rate version for provider/FX changes.
+6. Publish a new rate version for provider/FX changes through deployment/system configuration.
 7. Allow stale-recovery to expire abandoned reservations; reconcile downstream provider receipts before manually taking any action.
 
 ## Validation
