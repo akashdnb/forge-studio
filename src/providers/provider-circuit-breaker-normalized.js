@@ -1,8 +1,9 @@
 'use strict';
 const { ProviderCircuitBreaker: Base } = require('./provider-circuit-breaker-runtime');
 function normalize(context = {}) { return { ...context, service: context.service || context.capability || '' }; }
+function normalizeCandidate(context = {}, candidate = {}) { return { ...candidate, service: candidate.service || context.service || context.capability || '', region: candidate.region || context.region || '' }; }
 class ProviderCircuitBreaker extends Base {
-  async allow(context, candidate) { return super.allow(normalize(context), candidate); }
+  async allow(context, candidate) { const normalized = normalize(context); return super.allow(normalized, normalizeCandidate(normalized, candidate)); }
   async outcome(context, result) { return super.outcome(normalize(context), result); }
   async inspect(context) { return super.inspect(normalize(context)); }
   async setManual(context, action, options) { return super.setManual(normalize(context), action, options); }
