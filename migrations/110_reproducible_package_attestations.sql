@@ -52,18 +52,7 @@ CREATE INDEX IF NOT EXISTS package_build_inputs_scope_idx ON package_build_input
 CREATE OR REPLACE FUNCTION forge_package_attestation_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'package attestations are append-only'; END IF;
-  IF OLD.package_artifact_id IS DISTINCT FROM NEW.package_artifact_id
-     OR OLD.package_version_id IS DISTINCT FROM NEW.package_version_id
-     OR OLD.attestation_version IS DISTINCT FROM NEW.attestation_version
-     OR OLD.build_fingerprint IS DISTINCT FROM NEW.build_fingerprint
-     OR OLD.payload_hash IS DISTINCT FROM NEW.payload_hash
-     OR OLD.signature IS DISTINCT FROM NEW.signature
-     OR OLD.reason IS DISTINCT FROM NEW.reason
-     OR OLD.payload IS DISTINCT FROM NEW.payload
-     OR OLD.inputs IS DISTINCT FROM NEW.inputs
-     OR OLD.toolchain IS DISTINCT FROM NEW.toolchain THEN
-    RAISE EXCEPTION 'package attestation identity is immutable';
-  END IF;
+  IF OLD.package_artifact_id IS DISTINCT FROM NEW.package_artifact_id OR OLD.package_version_id IS DISTINCT FROM NEW.package_version_id OR OLD.attestation_version IS DISTINCT FROM NEW.attestation_version OR OLD.build_fingerprint IS DISTINCT FROM NEW.build_fingerprint OR OLD.payload_hash IS DISTINCT FROM NEW.payload_hash OR OLD.signature IS DISTINCT FROM NEW.signature OR OLD.reason IS DISTINCT FROM NEW.reason OR OLD.payload IS DISTINCT FROM NEW.payload OR OLD.inputs IS DISTINCT FROM NEW.inputs OR OLD.toolchain IS DISTINCT FROM NEW.toolchain THEN RAISE EXCEPTION 'package attestation identity is immutable'; END IF;
   RETURN NEW;
 END; $$;
 DROP TRIGGER IF EXISTS package_attestation_immutable ON package_attestations;
@@ -72,15 +61,7 @@ CREATE TRIGGER package_attestation_immutable BEFORE UPDATE OR DELETE ON package_
 CREATE OR REPLACE FUNCTION forge_package_build_inputs_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'package build inputs are append-only'; END IF;
-  IF OLD.package_artifact_id IS DISTINCT FROM NEW.package_artifact_id
-     OR OLD.package_manifest_hash IS DISTINCT FROM NEW.package_manifest_hash
-     OR OLD.canonical_inputs_hash IS DISTINCT FROM NEW.canonical_inputs_hash
-     OR OLD.dependency_inventory_hash IS DISTINCT FROM NEW.dependency_inventory_hash
-     OR OLD.toolchain_fingerprint IS DISTINCT FROM NEW.toolchain_fingerprint
-     OR OLD.canonical_inputs IS DISTINCT FROM NEW.canonical_inputs
-     OR OLD.dependency_inventory IS DISTINCT FROM NEW.dependency_inventory THEN
-    RAISE EXCEPTION 'package build inputs are immutable';
-  END IF;
+  IF OLD.package_artifact_id IS DISTINCT FROM NEW.package_artifact_id OR OLD.package_manifest_hash IS DISTINCT FROM NEW.package_manifest_hash OR OLD.canonical_inputs_hash IS DISTINCT FROM NEW.canonical_inputs_hash OR OLD.dependency_inventory_hash IS DISTINCT FROM NEW.dependency_inventory_hash OR OLD.toolchain_fingerprint IS DISTINCT FROM NEW.toolchain_fingerprint OR OLD.canonical_inputs IS DISTINCT FROM NEW.canonical_inputs OR OLD.dependency_inventory IS DISTINCT FROM NEW.dependency_inventory THEN RAISE EXCEPTION 'package build inputs are immutable'; END IF;
   RETURN NEW;
 END; $$;
 DROP TRIGGER IF EXISTS package_build_inputs_immutable ON package_build_inputs;
