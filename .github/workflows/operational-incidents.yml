@@ -1,0 +1,48 @@
+name: Forge Operational Incidents
+
+on:
+  pull_request:
+    paths:
+      - 'src/incidents/**'
+      - 'src/runtime/worker-entry.js'
+      - 'src/versioned-server.js'
+      - 'migrations/022_operational_incidents.sql'
+      - 'test/operational-incidents.integration.test.js'
+      - 'docs/OPERATIONAL_INCIDENTS.md'
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d forge_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: npm run migrate
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/forge_test
+          FORGE_RELEASE_ID: operational-incidents-ci
+      - run: node --test test/operational-incidents.integration.test.js
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/forge_test
+          FORGE_EVENT_SECRET_KEY: incident-test-event-secret-123
