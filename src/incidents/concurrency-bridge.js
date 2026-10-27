@@ -11,5 +11,12 @@ function installIncidentConcurrencyBridge() {
       return original.call(this, args);
     }
   };
+  if (!IncidentManager.prototype.resolve) {
+    IncidentManager.prototype.resolve = async function resolve(id, actorId, reason, evidence = {}) {
+      const row = await this.get(null, id).catch(() => null);
+      if (!row) return null;
+      return this.transition({ tenantId: row.tenant_id, incidentId: id, actorId, action: 'RESOLVE', reason, resolutionEvidence: evidence, idempotencyKey: `detector-resolve:${id}:${new Date().toISOString().slice(0,13)}` });
+    };
+  }
 }
 module.exports = { installIncidentConcurrencyBridge };
