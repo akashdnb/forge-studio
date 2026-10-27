@@ -3,6 +3,7 @@ const { Readable } = require('node:stream');
 const { FailureInjector } = require('../chaos/failure-injector');
 const { getActiveObservability } = require('../observability');
 const { ArtifactIntegrityControlPlane } = require('./artifact-integrity-control-plane');
+const { authenticateManifest, verifyManifest, validateMediaType } = require('./artifact-integrity-manifest');
 
 const SUPPORTED_KINDS = new Set([
   'render', 'render-manifest', 'audio', 'image', 'video', 'caption', 'package',
@@ -27,9 +28,46 @@ class ArtifactStorageService {
     return project.tenant_id;
   }
 
+  _manifestInput({ artifactId, episodeId, projectId, tenantId, versionId, kind, stored, contentType }) {
+    return {
+      tenantId,
+      projectId,
+      artifactId,
+      versionId,
+      kind,
+      storageKey: stored.key,
+      sha256: stored.sha256,
+      sizeBytes: stored.sizeBytes,
+      mediaType: validateMediaType(contentType),
+      encryptionMode: stored.encryptionMode || 'NONE',
+      encryptionKeyId: stored.encryptionKeyId || null,
+      episodeId,
+    };
+  }
+
+  async _assertManifest(row) {
+    if (!row?.manifest_id || !row?.manifest_sha256 || !row?.manifest_mac) throw Object.assign(new Error('Artifact integrity manifest is missing'), { code: 'ARTIFACT_MANIFEST_MISSING' });
+    const valid = verifyManifest({
+      tenantId: row.tenant_id,
+      projectId: row.project_id,
+      artifactId: row.artifact_id,
+      versionId: row.version_id,
+      kind: row.kind,
+      storageKey: row.storage_key,
+      sha256: row.manifest_sha256,
+      sizeBytes: Number(row.manifest_size_bytes),
+      mediaType: row.manifest_media_type,
+      encryptionMode: row.encryption_mode || 'NONE',
+      encryptionKeyId: row.encryption_key_id || null,
+    }, row.manifest_mac);
+    if (!valid) throw Object.assign(new Error('Artifact integrity manifest authentication failed'), { code: 'ARTIFACT_MANIFEST_INVALID' });
+    return true;
+  }
+
   async putArtifact({ episodeId, projectId, tenantId = null, versionId, kind, stream, content, contentType = 'application/octet-stream', expectedSha256, metadata = {}, artifactId = randomUUID(), createdBy = 'worker', inputVersionIds = [], providerRunId = null, source = 'forge', license = null }) {
     if (!SUPPORTED_KINDS.has(kind)) throw new TypeError(`Unsupported stored artifact kind: ${kind}`);
     if (!episodeId || !projectId || !versionId) throw new TypeError('episodeId, projectId and versionId are required');
+    validateMediaType(contentType);
     if (!stream) {
       if (content == null) throw new TypeError('stream or content is required');
       stream = Buffer.isBuffer(content) ? Readable.from(content) : Readable.from([Buffer.from(content)]);
@@ -39,17 +77,8 @@ class ArtifactStorageService {
     if (!episode || episodeProjectId !== projectId) throw Object.assign(new Error('Artifact project/episode mismatch'), { code: 'INVALID_PROVENANCE' });
     const resolvedTenantId = await this._tenantForProject(projectId, tenantId);
     const existing = await this.repository.db.pool.query('SELECT * FROM artifacts WHERE id=$1 AND episode_id=$2', [artifactId, episodeId]);
-    if (existing.rows[0]) {
-      const row = existing.rows[0];
-      if (row.version_id !== versionId || row.kind !== kind) throw Object.assign(new Error('Artifact idempotency key conflicts with immutable artifact identity'), { code: 'IDEMPOTENCY_CONFLICT' });
-      const storedObject = await this.repository.db.pool.query('SELECT status,content_hash FROM storage_objects WHERE artifact_id=$1', [artifactId]);
-      if (storedObject.rows[0]?.status === 'READY' && storedObject.rows[0].content_hash === row.content_hash) {
-        this.observability?.metrics.inc('forge_artifact_io_total', { outcome: 'deduplicated' });
-        await this._recordLineage(artifactId, inputVersionIds, createdBy);
-        if (this.repository.provenanceGraph) await this.repository.provenanceGraph().ensureArtifactChain({ artifactId, actor: createdBy, reason: 'artifact-deduplicated' });
-        return row;
-      }
-    }
+    if (existing.rows[0] && (existing.rows[0].version_id !== versionId || existing.rows[0].kind !== kind)) throw Object.assign(new Error('Artifact idempotency key conflicts with immutable artifact identity'), { code: 'IDEMPOTENCY_CONFLICT' });
+
     await this.injector.trip('artifact.before_upload', { jobId: artifactId, retryable: true });
     const started = Date.now();
     const upload = () => this.storage.upload({ stream, tenantId: resolvedTenantId, projectId, kind, contentType, expectedSha256, metadata });
@@ -57,6 +86,7 @@ class ArtifactStorageService {
     this.observability?.metrics.inc('forge_artifact_io_total', { outcome: 'upload' });
     this.observability?.metrics.observe('forge_artifact_upload_duration_seconds', { stage: kind }, (Date.now() - started) / 1000);
     this.observability?.metrics.inc('forge_artifact_bytes_total', { outcome: 'upload' }, stored.sizeBytes || 0);
+
     try {
       await this.injector.trip('artifact.after_upload', { jobId: artifactId, retryable: true });
       const artifact = existing.rows[0] ? existing.rows[0] : await this.repository.registerArtifact({
@@ -64,13 +94,23 @@ class ArtifactStorageService {
         mediaType: contentType, providerRunId, source, license, inputVersionIds, metadata: { ...metadata, storageKey: stored.key, sizeBytes: stored.sizeBytes }, createdBy
       });
       if (artifact.content_hash && artifact.content_hash !== stored.sha256) throw Object.assign(new Error('Artifact content hash conflicts with uploaded immutable content'), { code: 'IDEMPOTENCY_CONFLICT' });
+      const manifestInput = this._manifestInput({ artifactId, episodeId, projectId, tenantId: resolvedTenantId, versionId: artifact.version_id, kind: artifact.kind, stored, contentType });
+      const auth = authenticateManifest(manifestInput);
+      const manifestId = randomUUID();
       await this.repository.db.withTransaction(async (client) => {
         const project = (await client.query('SELECT tenant_id FROM projects WHERE id=$1 FOR SHARE', [projectId])).rows[0];
         if (!project || project.tenant_id !== resolvedTenantId) throw Object.assign(new Error('Tenant/project scope changed during artifact publication'), { code: 'TENANT_SCOPE_VIOLATION' });
-        await client.query(`INSERT INTO storage_objects(id,project_id,artifact_id,uri,storage_key,kind,content_hash,media_type,size_bytes,checksum_verified,status,metadata)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true,'READY',$10::jsonb)
-          ON CONFLICT (artifact_id) DO UPDATE SET uri=EXCLUDED.uri,storage_key=EXCLUDED.storage_key,kind=EXCLUDED.kind,content_hash=EXCLUDED.content_hash,media_type=EXCLUDED.media_type,size_bytes=EXCLUDED.size_bytes,checksum_verified=true,status='READY',metadata=EXCLUDED.metadata`,
-          [randomUUID(), projectId, artifactId, stored.uri, stored.key, kind, stored.sha256, contentType, stored.sizeBytes, JSON.stringify({ ...metadata, tenantId: resolvedTenantId })]);
+        const manifest = (await client.query(`INSERT INTO artifact_integrity_manifests
+          (id,tenant_id,project_id,artifact_id,version_id,content_identity,sha256,size_bytes,media_type,kind,storage_key,encryption_mode,encryption_key_id,manifest_digest,manifest_mac,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          ON CONFLICT (artifact_id) DO NOTHING RETURNING *`,
+          [manifestId, resolvedTenantId, projectId, artifactId, artifact.version_id, `sha256:${stored.sha256}`, stored.sha256, stored.sizeBytes, contentType.toLowerCase(), artifact.kind, stored.key, stored.encryptionMode || 'NONE', stored.encryptionKeyId || null, auth.digest, auth.mac, createdBy])).rows[0];
+        const existingManifest = manifest || (await client.query('SELECT * FROM artifact_integrity_manifests WHERE artifact_id=$1 FOR SHARE', [artifactId])).rows[0];
+        if (!existingManifest || existingManifest.manifest_digest !== auth.digest || existingManifest.manifest_mac !== auth.mac) throw Object.assign(new Error('Artifact integrity manifest conflicts with immutable content'), { code: 'ARTIFACT_MANIFEST_CONFLICT' });
+        await client.query(`INSERT INTO storage_objects(id,project_id,artifact_id,uri,storage_key,kind,content_hash,media_type,size_bytes,checksum_verified,status,encryption_mode,encryption_key_id,integrity_manifest_id,metadata)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true,'READY',$10,$11,$12,$13::jsonb)
+          ON CONFLICT (artifact_id) DO UPDATE SET uri=EXCLUDED.uri,storage_key=EXCLUDED.storage_key,kind=EXCLUDED.kind,content_hash=EXCLUDED.content_hash,media_type=EXCLUDED.media_type,size_bytes=EXCLUDED.size_bytes,checksum_verified=true,status='READY',encryption_mode=EXCLUDED.encryption_mode,encryption_key_id=EXCLUDED.encryption_key_id,integrity_manifest_id=EXCLUDED.integrity_manifest_id,metadata=EXCLUDED.metadata`,
+          [randomUUID(), projectId, artifactId, stored.uri, stored.key, kind, stored.sha256, contentType.toLowerCase(), stored.sizeBytes, stored.encryptionMode || 'NONE', stored.encryptionKeyId || null, existingManifest.id, JSON.stringify({ ...metadata, tenantId: resolvedTenantId, contentIdentity: `sha256:${stored.sha256}`, manifestDigest: auth.digest })]);
       });
       await this._recordLineage(artifactId, inputVersionIds, createdBy);
       if (this.repository.provenanceGraph) await this.repository.provenanceGraph().ensureArtifactChain({ artifactId, actor: createdBy, reason: 'artifact-storage-ready' });
@@ -97,9 +137,14 @@ class ArtifactStorageService {
   }
 
   async openArtifact({ artifactId, projectId, expectedVersionId }) {
-    const result = await this.repository.db.pool.query(`SELECT a.*, e.project_id, p.tenant_id, s.storage_key, s.status, s.content_hash AS stored_hash
+    const result = await this.repository.db.pool.query(`SELECT a.*, e.project_id, p.tenant_id, s.storage_key, s.status, s.content_hash AS stored_hash,
+      s.encryption_mode, s.encryption_key_id, s.integrity_manifest_id,
+      m.id AS manifest_id, m.sha256 AS manifest_sha256, m.size_bytes AS manifest_size_bytes, m.media_type AS manifest_media_type, m.manifest_mac,
+      m.kind AS manifest_kind, m.storage_key AS manifest_storage_key, m.encryption_mode AS manifest_encryption_mode, m.encryption_key_id AS manifest_encryption_key_id
       FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id
-      LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE a.id=$1 AND e.project_id=$2`, [artifactId, projectId]);
+      LEFT JOIN storage_objects s ON s.artifact_id=a.id
+      LEFT JOIN artifact_integrity_manifests m ON m.id=s.integrity_manifest_id
+      WHERE a.id=$1 AND e.project_id=$2`, [artifactId, projectId]);
     const artifact = result.rows[0];
     if (!artifact) {
       this.observability?.metrics.inc('forge_artifact_io_total', { outcome: 'not_found' });
@@ -109,17 +154,38 @@ class ArtifactStorageService {
     if (!artifact.storage_key || !artifact.content_hash) throw Object.assign(new Error('Artifact has no trusted storage record'), { code: 'ARTIFACT_NOT_FOUND' });
     if (artifact.status && artifact.status !== 'READY') throw Object.assign(new Error(`Artifact storage is ${artifact.status.toLowerCase()}`), { code: artifact.status === 'MISSING' ? 'ARTIFACT_NOT_FOUND' : 'ARTIFACT_CORRUPT' });
     if (artifact.stored_hash && artifact.stored_hash !== artifact.content_hash) throw Object.assign(new Error('Artifact storage checksum metadata mismatch'), { code: 'ARTIFACT_CORRUPT' });
+    try {
+      await this._assertManifest({
+        manifest_id: artifact.manifest_id,
+        manifest_sha256: artifact.manifest_sha256,
+        manifest_mac: artifact.manifest_mac,
+        tenant_id: artifact.tenant_id,
+        project_id: artifact.project_id,
+        artifact_id: artifact.id,
+        version_id: artifact.version_id,
+        kind: artifact.manifest_kind || artifact.kind,
+        storage_key: artifact.manifest_storage_key || artifact.storage_key,
+        manifest_size_bytes: artifact.manifest_size_bytes || artifact.size_bytes,
+        manifest_media_type: artifact.manifest_media_type || artifact.media_type,
+        encryption_mode: artifact.manifest_encryption_mode || artifact.encryption_mode,
+        encryption_key_id: artifact.manifest_encryption_key_id || artifact.encryption_key_id,
+      });
+    } catch (error) {
+      await this.repository.db.pool.query("UPDATE storage_objects SET status='CORRUPT',checksum_verified=false WHERE artifact_id=$1", [artifactId]).catch(() => {});
+      throw error;
+    }
     const started = Date.now();
     try {
       const download = () => this.storage.download({ key: artifact.storage_key, expectedSha256: artifact.content_hash });
       const resolved = await (this.observability ? this.observability.withSpan(`artifact.download:${artifact.kind}`, { artifactId }, download) : download());
+      if (artifact.encryption_mode && artifact.encryption_mode !== 'NONE' && resolved.encryptionMode && artifact.encryption_mode !== resolved.encryptionMode) throw Object.assign(new Error('Artifact storage encryption metadata mismatch'), { code: 'STORAGE_ENCRYPTION_MISMATCH' });
       this.observability?.metrics.inc('forge_artifact_io_total', { outcome: 'download' });
       this.observability?.metrics.observe('forge_artifact_download_duration_seconds', { stage: artifact.kind }, (Date.now() - started) / 1000);
       this.observability?.metrics.inc('forge_artifact_bytes_total', { outcome: 'download' }, resolved.sizeBytes || 0);
-      return { ...resolved, artifactId: artifact.id, versionId: artifact.version_id, kind: artifact.kind, mediaType: artifact.media_type, metadata: artifact.metadata || {} };
+      return { ...resolved, artifactId: artifact.id, versionId: artifact.version_id, kind: artifact.kind, mediaType: artifact.media_type, metadata: artifact.metadata || {}, integrityManifestId: artifact.manifest_id };
     } catch (error) {
       const code = error.code === 'ARTIFACT_NOT_FOUND' ? 'ARTIFACT_NOT_FOUND' : 'ARTIFACT_CORRUPT';
-      await this.repository.db.pool.query('UPDATE storage_objects SET status=$1 WHERE artifact_id=$2', [code === 'ARTIFACT_NOT_FOUND' ? 'MISSING' : 'CORRUPT', artifactId]).catch(() => {});
+      await this.repository.db.pool.query('UPDATE storage_objects SET status=$1,checksum_verified=false WHERE artifact_id=$2', [code === 'ARTIFACT_NOT_FOUND' ? 'MISSING' : 'CORRUPT', artifactId]).catch(() => {});
       if (this.repository.provenanceGraph) await this.repository.provenanceGraph().ensureArtifactChain({ artifactId, actor: 'artifact-gateway', reason: `storage-${code.toLowerCase()}` }).catch(() => {});
       this.observability?.metrics.inc('forge_artifact_io_total', { outcome: code === 'ARTIFACT_NOT_FOUND' ? 'missing' : 'corrupt' });
       throw Object.assign(error, { code });
