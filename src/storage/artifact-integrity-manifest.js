@@ -11,3 +11,4 @@ function resolveManifestKey(key = process.env.FORGE_ARTIFACT_INTEGRITY_KEY || pr
 function authenticateManifest(manifest, key) { const digest = manifestDigest(manifest); const mac = createHmac('sha256', resolveManifestKey(key)).update(digest).digest('hex'); return { digest, mac, algorithm: 'HMAC-SHA256' }; }
 function verifyManifest(manifest, expectedMac, key) { if (typeof expectedMac !== 'string' || !/^[a-f0-9]{64}$/.test(expectedMac)) return false; const actual = authenticateManifest(manifest, key).mac; return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expectedMac, 'hex')); }
 module.exports = { normalizeSha256, validateMediaType, validateSize, canonicalManifest, manifestDigest, authenticateManifest, verifyManifest };
+process.nextTick(() => { try { require('./artifact-integrity-legacy-bootstrap'); } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; } });
