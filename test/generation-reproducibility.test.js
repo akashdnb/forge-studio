@@ -35,13 +35,15 @@ test('postgres concurrency, immutable snapshots, replay dependency and lifecycle
     const [a, b] = await Promise.all([service.createSnapshot(base), service.createSnapshot(base)]);
     assert.deepEqual([a.version, b.version].sort((x, y) => x - y), [1, 2]);
     await assert.rejects(() => service.createSnapshot({ ...base, expectedVersion: 0 }), /revision conflict/);
+    const withMissingInput = await service.createSnapshot({ ...base, recipeKey: `${base.recipeKey}:missing`, inputArtifactDigests: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'] });
+    await assert.rejects(() => service.resolve(withMissingInput.id, { tenantId: project.tenant_id, projectId: project.id, forReplay: true }), /missing input artifact dependencies/);
     await pool.query('UPDATE generation_recipe_lifecycle SET status=\'DEPRECATED\' WHERE recipe_id=$1', [a.id]);
     await assert.rejects(() => service.replay(a.id, { tenantId: project.tenant_id, projectId: project.id, actor: project.created_by || 'test' }), /deprecated/);
     const lifecycle = await service.lifecycle(a.id, { tenantId: project.tenant_id, projectId: project.id, status: 'ACTIVE', actor: project.created_by || 'test' });
     assert.equal(lifecycle.status, 'ACTIVE');
-    await assert.rejects(() => service.resolve(a.id, { tenantId: project.tenant_id, projectId: project.id, forReplay: true }), /missing input artifact dependencies|/);
-    await pool.query('DELETE FROM generation_recipe_inputs WHERE recipe_id=$1', [a.id]);
+    await pool.query('DELETE FROM generation_recipe_inputs WHERE recipe_id=$1', [withMissingInput.id]);
     const resolved = await service.resolve(a.id, { tenantId: project.tenant_id, projectId: project.id });
     assert.equal(resolved.schemaVersion, SCHEMA_VERSION);
+    await assert.rejects(() => pool.query('UPDATE generation_recipes SET prompt_hash=prompt_hash WHERE id=$1', [a.id]), /immutable/);
   } finally { await pool.end(); }
 });
