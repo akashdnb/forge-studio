@@ -1,0 +1,5 @@
+'use strict';
+const {TenantTransferService,FORMAT,SCHEMA_VERSION}=require('./tenant-transfer-service');
+const {sha256,canonical,redact,verifyEvidence,signEvidence}=require('./tenant-transfer-crypto');
+async function createTransferHandlers({pool,storage,observability}={}){const service=new TenantTransferService({pool,storage,observability});return{'forge:transfer:export':(payload,job)=>service.processExport({transferId:payload.transferId,workerId:job?.worker_id||'worker'}),'forge:transfer:import':async payload=>{const row=(await pool.query('SELECT tenant_id FROM forge_transfer_imports WHERE id=$1',[payload.transferId])).rows[0];return row?service.validateImport({transferId:payload.transferId,tenantId:row.tenant_id}):null},'forge:transfer:apply':async payload=>{const row=(await pool.query('SELECT tenant_id FROM forge_transfer_imports WHERE id=$1',[payload.transferId])).rows[0];return row?service.applyImport({transferId:payload.transferId,tenantId:row.tenant_id,actor:'worker'}):null}}}
+module.exports={TenantTransferService,createTransferHandlers,FORMAT,SCHEMA_VERSION,redact,canonical,sha256,verifyEvidence,signEvidence};
