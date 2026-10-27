@@ -1,0 +1,30 @@
+name: Forge public runner
+on:
+  workflow_dispatch:
+    inputs:
+      attempt_id: { required: true, type: string }
+      manifest_url: { required: true, type: string }
+      worker_type: { required: true, type: string }
+      capacity_class: { required: true, type: string }
+permissions:
+  contents: read
+concurrency:
+  group: forge-public-${{ inputs.attempt_id }}
+  cancel-in-progress: false
+jobs:
+  execute:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fetch and execute signed Forge manifest
+        env:
+          MANIFEST_URL: ${{ inputs.manifest_url }}
+          WORKER_TYPE: ${{ inputs.worker_type }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+          CALLBACK_URL: ${{ secrets.FORGE_RUNNER_CALLBACK_URL }}
+          CALLBACK_TOKEN: ${{ secrets.FORGE_RUNNER_CALLBACK_TOKEN }}
+        run: node runner.js
