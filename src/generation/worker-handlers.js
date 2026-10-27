@@ -1,17 +1,15 @@
+const { Pool } = require('pg');
 const { createStorageFromEnv } = require('../storage');
 const { createGenerationJobHandler, createGenerationProviderRegistry } = require('./generation-worker');
 
-function createGenerationHandlers({ pool, storage = null, providerRegistry = null, config = {}, metrics = null, logger = console } = {}) {
-  if (!pool) throw new TypeError('pool is required');
-  const effectiveStorage = storage || createStorageFromEnv();
-  const registry = providerRegistry || createGenerationProviderRegistry();
-  const handler = createGenerationJobHandler({ pool, storage: effectiveStorage, providerRegistry: registry, config, metrics, logger });
-  return {
-    'workflow:assets': handler,
-    'generation:image': handler,
-    'generation:video': handler,
-    'generation:text': handler,
-  };
+let pool;
+let handler;
+function getHandler() {
+  if (handler) return handler;
+  if (!process.env.DATABASE_URL) throw Object.assign(new Error('DATABASE_URL is required for generation handlers'), { code: 'PROVIDER_NOT_CONFIGURED', retryable: false });
+  pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number.parseInt(process.env.PG_POOL_MAX || '5', 10) });
+  handler = createGenerationJobHandler({ pool, storage: createStorageFromEnv(), providerRegistry: createGenerationProviderRegistry() });
+  return handler;
 }
-
-module.exports = { createGenerationHandlers };
+const lazy = async (payload, job) => getHandler()(payload, job);
+module.exports = { handlers: { 'workflow:assets': lazy, 'generation:image': lazy, 'generation:video': lazy, 'generation:text': lazy } };
