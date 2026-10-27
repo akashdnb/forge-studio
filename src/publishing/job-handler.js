@@ -29,6 +29,7 @@ async function publishRun({ pool, storage, publisher, logger, now, payload, job 
   if (!run) throw Object.assign(new Error(`Unknown publish run ${runId}`), { retryable: false, code: 'NOT_FOUND' });
   if (run.status === 'PUBLISHED') return { publishRunId: runId, externalId: run.external_id, externalUrl: run.external_url, alreadyPublished: true };
   if (['CANCELLED', 'RECONCILIATION_REQUIRED'].includes(run.status)) throw Object.assign(new Error(`Publish run is terminal: ${run.status}`), { retryable: false, code: run.status });
+  assertReleaseGate(run);
 
   const leaseToken = randomUUID();
   const claimed = await pool.query(
@@ -47,21 +48,24 @@ async function publishRun({ pool, storage, publisher, logger, now, payload, job 
     throw Object.assign(new Error('Publish run is already owned by another worker'), { retryable: true, code: 'PUBLISH_RACE' });
   }
 
-  assertReleaseGate(run);
-  if (await jobIsCancelled(pool, job.id)) {
-    const error = Object.assign(new Error('Publish job was cancelled'), { code: 'JOB_CANCELLED', retryable: false, terminalState: 'CANCELLED' });
-    await pool.query(`UPDATE publish_runs SET status='CANCELLED',lease_token=NULL,lease_until=NULL,error=$1::jsonb,finished_at=$2 WHERE id=$3 AND lease_token=$4`, [safeError(error), now(), runId, leaseToken]);
-    throw error;
-  }
-
-  const artifact = await materializeTrustedArtifact({ storage, run });
+  let artifact = null;
+  let cancellation = null;
+  let leaseRenewal = null;
   const controller = new AbortController();
-  const cancellation = watchCancellation(pool, job.id, controller, 2000);
-  const leaseRenewal = setInterval(() => {
-    pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {});
-  }, 30000);
-  leaseRenewal.unref?.();
   try {
+    if (await jobIsCancelled(pool, job.id)) {
+      const error = Object.assign(new Error('Publish job was cancelled'), { code: 'JOB_CANCELLED', retryable: false, terminalState: 'CANCELLED' });
+      await pool.query(`UPDATE publish_runs SET status='CANCELLED',lease_token=NULL,lease_until=NULL,error=$1::jsonb,finished_at=$2 WHERE id=$3 AND lease_token=$4`, [safeError(error), now(), runId, leaseToken]);
+      throw error;
+    }
+
+    artifact = await materializeTrustedArtifact({ storage, run });
+    cancellation = watchCancellation(pool, job.id, controller, 2000);
+    leaseRenewal = setInterval(() => {
+      pool.query(`UPDATE publish_runs SET lease_until=now()+interval '30 minutes' WHERE id=$1 AND lease_token=$2 AND status='UPLOADING'`, [runId, leaseToken]).catch(() => {});
+    }, 30000);
+    leaseRenewal.unref?.();
+
     const started = await pool.query(
       `UPDATE publish_runs SET status='UPLOADING',started_at=COALESCE(started_at,$1),attempt=$2,last_provider_status=NULL,last_provider_reason=NULL
        WHERE id=$3 AND status IN ('QUEUED','UPLOADING') AND lease_token=$4 RETURNING id`,
@@ -84,14 +88,19 @@ async function publishRun({ pool, storage, publisher, logger, now, payload, job 
     const terminal = cancelled || error.terminalState === 'FAILED' || error.terminalState === 'CANCELLED' || error.terminalState === 'RECONCILIATION_REQUIRED' || (error.retryable !== true && ![408, 429, 500, 502, 503, 504].includes(error.status));
     const terminalState = cancelled ? 'CANCELLED' : (error.terminalState || (terminal ? 'FAILED' : null));
     const maxed = Number(job.attempts || 1) >= Number(job.max_attempts || 3);
-    await pool.query(`UPDATE publish_runs SET last_provider_status=$1,last_provider_reason=$2 WHERE id=$3 AND lease_token=$4`, [error.status || null, error.providerReason || error.code || null, runId, leaseToken]);
+    await pool.query(`UPDATE publish_runs SET last_provider_status=$1,last_provider_reason=$2 WHERE id=$3 AND lease_token=$4`, [error.status || null, error.providerReason || error.code || null, runId, leaseToken]).catch(() => {});
     if (terminalState === 'RECONCILIATION_REQUIRED') await pool.query(`UPDATE publish_runs SET status='RECONCILIATION_REQUIRED',lease_token=NULL,lease_until=NULL,error=$1::jsonb,finished_at=$2 WHERE id=$3 AND lease_token=$4`, [safeError(error), now(), runId, leaseToken]);
     else if (terminalState === 'CANCELLED') await pool.query(`UPDATE publish_runs SET status='CANCELLED',lease_token=NULL,lease_until=NULL,error=$1::jsonb,finished_at=$2 WHERE id=$3 AND lease_token=$4`, [safeError(error), now(), runId, leaseToken]);
     else if (terminal || maxed) await pool.query(`UPDATE publish_runs SET status='FAILED',lease_token=NULL,lease_until=NULL,error=$1::jsonb,finished_at=$2 WHERE id=$3 AND lease_token=$4`, [safeError(error), now(), runId, leaseToken]);
     else await pool.query(`UPDATE publish_runs SET status='UPLOADING',error=$1::jsonb,lease_until=now()+interval '30 minutes' WHERE id=$2 AND lease_token=$3`, [safeError(error), runId, leaseToken]);
     logger.error?.(`YouTube publish ${runId} failed: ${error.message}`);
     throw Object.assign(error, { retryable: terminalState ? false : error.retryable !== false });
-  } finally { clearInterval(cancellation); clearInterval(leaseRenewal); await fsp.rm(artifact.path, { force: true }).catch(() => {}); }
+  } finally {
+    if (cancellation) clearInterval(cancellation);
+    if (leaseRenewal) clearInterval(leaseRenewal);
+    if (artifact?.path) await fsp.rm(artifact.path, { force: true }).catch(() => {});
+    if (!artifact) await pool.query('UPDATE publish_runs SET lease_token=NULL,lease_until=NULL WHERE id=$1 AND lease_token=$2', [runId, leaseToken]).catch(() => {});
+  }
 }
 
 function assertReleaseGate(run) {
