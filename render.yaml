@@ -37,6 +37,16 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_COST_ENFORCEMENT_ENABLED
+        value: "true"
+      - key: FORGE_USAGE_RESERVATION_TTL_MS
+        value: "900000"
+      - key: FORGE_USAGE_RECOVERY_INTERVAL_MS
+        value: "60000"
+      - key: FORGE_USAGE_PRICING_JSON
+        sync: false
+      - key: FORGE_USAGE_BUDGETS_JSON
+        sync: false
       - key: FORGE_GITHUB_ACTIONS_ENABLED
         value: "true"
       - key: FORGE_GITHUB_ACTIONS_MODE
