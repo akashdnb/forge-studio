@@ -3,7 +3,9 @@ const { buildDiff: buildBaseDiff, sha, canonical } = require('./version-diff');
 async function buildDiff(options = {}) {
   const report = await buildBaseDiff(options);
   const { pool } = options;
-  const ids = [...new Set([report.sourceVersionId, report.targetVersionId, ...(report.sourceGraph || []).map((x) => x.id), ...(report.targetGraph || []).map((x) => x.id)])];
+  const sourceIds = new Set([report.sourceVersionId, ...(report.sourceGraph || []).map((x) => x.id)]);
+  const targetIds = new Set([report.targetVersionId, ...(report.targetGraph || []).map((x) => x.id)]);
+  const ids = [...new Set([...sourceIds, ...targetIds])];
   const [workflowStages, workflowRuns, configJobs, budgets, reservations] = await Promise.all([
     pool.query(`SELECT s.workflow_id,s.stage,s.status,s.input_version_ids,s.output_version_ids,s.output_artifact_ids,s.error,s.started_at,s.finished_at FROM episode_workflow_stages s JOIN episode_workflows w ON w.id=s.workflow_id WHERE w.episode_id=$1 AND (s.input_version_ids ?| $2::text[] OR s.output_version_ids ?| $2::text[]) ORDER BY s.workflow_id,s.stage`, [report.episodeId, ids]),
     pool.query('SELECT id,status,current_stage,last_safe_stage,failure_stage,failure,requested_stages,created_at,updated_at FROM episode_workflows WHERE episode_id=$1 ORDER BY created_at,id', [report.episodeId]),
@@ -18,11 +20,14 @@ async function buildDiff(options = {}) {
     const id = sha({ category, path, identity, before, after });
     items.push({ id: id.slice(0, 32), category, path, changeType: before == null ? 'ADDED' : after == null ? 'REMOVED' : 'CHANGED', sourceId: identity, targetId: identity, before, after, evidence: { sourceVersionId: report.sourceVersionId, targetVersionId: report.targetVersionId } });
   };
-  for (const row of evidence.workflowStages) add('workflow-stage', `${row.workflow_id}:${row.stage}`, null, row, `${row.workflow_id}:${row.stage}`);
-  for (const row of evidence.workflowRuns) add('workflow-state', row.id, null, { status: row.status, currentStage: row.current_stage, lastSafeStage: row.last_safe_stage, failureStage: row.failure_stage }, row.id);
-  for (const row of evidence.configurationSnapshots) add('configuration', `job/${row.id}`, null, row, row.id);
-  for (const row of evidence.budgets) add('budget', `budget/${row.id}`, null, row, String(row.id));
-  for (const row of evidence.reservations) add('usage-reservation', `reservation/${row.id}`, null, row, row.id);
+  const side = (row, idsSet) => (row.input_version_ids || []).some((id) => idsSet.has(id)) || (row.output_version_ids || []).some((id) => idsSet.has(id));
+  const sourceStages = new Map(workflowStages.rows.filter((x) => side(x, sourceIds)).map((x) => [`${x.workflow_id}:${x.stage}`, x]));
+  const targetStages = new Map(workflowStages.rows.filter((x) => side(x, targetIds)).map((x) => [`${x.workflow_id}:${x.stage}`, x]));
+  for (const key of [...new Set([...sourceStages.keys(), ...targetStages.keys()])].sort()) add('workflow-stage', key, sourceStages.get(key) || null, targetStages.get(key) || null, key);
+  for (const row of workflowRuns.rows) add('workflow-state', row.id, null, { status: row.status, currentStage: row.current_stage, lastSafeStage: row.last_safe_stage, failureStage: row.failure_stage }, row.id);
+  for (const row of configJobs.rows) add('configuration', `job/${row.id}`, null, row, row.id);
+  for (const row of budgets.rows) add('budget', `budget/${row.id}`, null, row, String(row.id));
+  for (const row of reservations.rows) add('usage-reservation', `reservation/${row.id}`, null, row, row.id);
   items.sort((a, b) => a.category.localeCompare(b.category) || a.path.localeCompare(b.path) || a.changeType.localeCompare(b.changeType) || a.id.localeCompare(b.id));
   const enriched = { ...report, items, evidence: { ...(report.evidence || {}), ...evidence }, summary: { total: items.length, added: items.filter((x) => x.changeType === 'ADDED').length, removed: items.filter((x) => x.changeType === 'REMOVED').length, changed: items.filter((x) => x.changeType === 'CHANGED').length } };
   delete enriched.reportHash;
