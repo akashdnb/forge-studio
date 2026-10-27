@@ -1,0 +1,23 @@
+'use strict';
+
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+
+test('credential access migration has a unique monotonic version',()=>{
+  const files=fs.readdirSync(path.join(__dirname,'..','migrations')).filter(name=>/^\d+_.+\.sql$/.test(name));
+  const versions=files.map(name=>Number(name.split('_',1)[0]));
+  const unique=new Set(versions);
+  assert.equal(unique.size,versions.length);
+  assert.ok(files.includes('111_credential_access_attestations.sql'));
+  assert.equal(Math.max(...versions),111);
+});
+
+test('credential access migration has no plaintext secret columns',()=>{
+  const sql=fs.readFileSync(path.join(__dirname,'..','migrations','111_credential_access_attestations.sql'),'utf8');
+  assert.doesNotMatch(sql,/password|secret|plaintext|material/i);
+  assert.match(sql,/token_hash/);
+  assert.match(sql,/attestation_signature/);
+  assert.match(sql,/fencing_token/);
+});
