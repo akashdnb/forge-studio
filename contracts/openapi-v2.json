@@ -1,0 +1,66 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Forge Studio API",
+    "version": "2.0.0",
+    "description": "Current versioned contract for the long-form production control plane. Durable workflow, artifact, approval, usage and security semantics are preserved by the compatibility adapter."
+  },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque token" } },
+    "schemas": {
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } }, "requestId": { "type": "string" } } },
+      "Collection": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": {} } } }
+    }
+  },
+  "paths": {
+    "/v2/projects": {
+      "get": { "summary": "List projects", "responses": { "200": { "description": "Project collection" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" } } },
+      "post": { "summary": "Create project", "responses": { "201": { "description": "Project created" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/v2/episodes": {
+      "get": { "summary": "List episodes", "parameters": [{ "$ref": "#/components/parameters/ProjectId" }, { "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/Offset" }], "responses": { "200": { "description": "Episode collection" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" } } },
+      "post": { "summary": "Create episode", "responses": { "201": { "description": "Episode created" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/v2/episodes/{episodeId}": { "get": { "summary": "Get episode", "parameters": [{ "$ref": "#/components/parameters/EpisodeId" }], "responses": { "200": { "description": "Episode" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } } },
+    "/v2/episodes/{episodeId}/workflow": { "post": { "summary": "Start durable episode workflow", "parameters": [{ "$ref": "#/components/parameters/EpisodeId" }, { "$ref": "#/components/parameters/IdempotencyKey" }], "responses": { "202": { "description": "Workflow accepted" }, "400": { "$ref": "#/components/responses/BadRequest" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/research": { "get": { "summary": "List research packages", "parameters": [{ "$ref": "#/components/parameters/EpisodeId" }], "responses": { "200": { "description": "Research packages" } } }, "post": { "summary": "Persist research package", "responses": { "201": { "description": "Research package persisted" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
+    "/v2/episodes/{episodeId}/timeline": { "get": { "summary": "List timeline snapshots", "responses": { "200": { "description": "Timeline snapshots" } } }, "post": { "summary": "Persist timeline snapshot", "responses": { "201": { "description": "Timeline persisted" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
+    "/v2/episodes/{episodeId}/transitions": { "post": { "summary": "Transition episode state", "responses": { "200": { "description": "State updated" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/artifacts": { "post": { "summary": "Register immutable artifact", "responses": { "201": { "description": "Artifact registered" }, "400": { "$ref": "#/components/responses/BadRequest" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/provider-runs": { "post": { "summary": "Create provider run", "responses": { "201": { "description": "Provider run recorded" }, "400": { "$ref": "#/components/responses/BadRequest" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/costs": { "get": { "summary": "Get episode cost", "responses": { "200": { "description": "Cost summary" } } }, "post": { "summary": "Record provider cost", "responses": { "201": { "description": "Cost recorded" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
+    "/v2/episodes/{episodeId}/qa": { "post": { "summary": "Record QA result", "responses": { "201": { "description": "QA recorded" }, "400": { "$ref": "#/components/responses/BadRequest" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/approvals": { "post": { "summary": "Record approval decision", "responses": { "201": { "description": "Approval recorded" }, "400": { "$ref": "#/components/responses/BadRequest" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/render": { "put": { "summary": "Select current render", "responses": { "200": { "description": "Render selected" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/publish": { "get": { "summary": "List publish runs", "responses": { "200": { "description": "Publish runs" } } }, "post": { "summary": "Publish approved render", "responses": { "202": { "description": "Publish accepted" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/episodes/{episodeId}/shorts/handoff": { "post": { "summary": "Create Forge to Shorts handoff", "responses": { "200": { "description": "Versioned handoff manifest" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/jobs": { "get": { "summary": "List durable jobs", "parameters": [{ "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "description": "Job collection" }, "403": { "$ref": "#/components/responses/Forbidden" } } } },
+    "/v2/jobs/{jobId}": { "get": { "summary": "Get durable job", "responses": { "200": { "description": "Durable job" }, "404": { "$ref": "#/components/responses/NotFound" } } } },
+    "/v2/versions/{versionId}/invalidation-plan": { "post": { "summary": "Plan downstream invalidation", "responses": { "200": { "description": "Invalidation plan" }, "409": { "$ref": "#/components/responses/Conflict" } } } },
+    "/v2/usage/health": { "get": { "summary": "Usage enforcement health", "responses": { "200": { "description": "Usage enforcement status" }, "403": { "$ref": "#/components/responses/Forbidden" } } } },
+    "/v2/usage/episodes/{episodeId}": { "get": { "summary": "Episode usage summary", "responses": { "200": { "description": "Usage summary" }, "403": { "$ref": "#/components/responses/Forbidden" } } } },
+    "/v2/usage/projects/{projectId}": { "get": { "summary": "Project usage summary", "responses": { "200": { "description": "Usage summary" }, "403": { "$ref": "#/components/responses/Forbidden" } } } },
+    "/v2/usage/providers/{provider}": { "get": { "summary": "Provider usage summary", "responses": { "200": { "description": "Usage summary" }, "403": { "$ref": "#/components/responses/Forbidden" } } } }
+  },
+  "components": {
+    "responses": {
+      "BadRequest": { "description": "Validation or malformed request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Authentication required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "Tenant/RBAC authorization failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "Durable state/revision conflict", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "parameters": {
+      "EpisodeId": { "name": "episodeId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 256 } },
+      "ProjectId": { "name": "projectId", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 256 } },
+      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
+      "Offset": { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "schema": { "type": "string", "minLength": 8, "maxLength": 255, "pattern": "^[A-Za-z0-9._:-]+$" } }
+    },
+    "schemas": {
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } }, "requestId": { "type": "string" } } }
+    }
+  }
+}
