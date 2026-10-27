@@ -8,13 +8,15 @@ const integration = enabled ? test : test.skip;
 let pool;
 let projectId;
 let episodeId;
+let tenantId;
 
 integration('transactional outbox preserves per-aggregate ordering under concurrent writers', async () => {
   process.env.FORGE_EVENT_SECRET_KEY ||= 'integration-test-secret-0123456789';
   pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 8 });
   projectId = `it-project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   episodeId = `it-episode-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const tenantId = `tenant-${projectId}`;
+  tenantId = `tenant-${projectId}`;
+  await pool.query('INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3)', [tenantId, 'transactional-outbox-test', 'integration']);
   await pool.query('INSERT INTO projects(id,name,created_by,tenant_id) VALUES($1,$2,$3,$4)', [projectId, 'transactional-outbox-test', 'integration', tenantId]);
   await pool.query('INSERT INTO episodes(id,project_id,title,created_by) VALUES($1,$2,$3,$4)', [episodeId, projectId, 'outbox test', 'integration']);
 
@@ -36,7 +38,6 @@ integration('transactional outbox preserves per-aggregate ordering under concurr
 
 integration('outbox leases recover and stale replays are suppressed by the consumer cursor', async () => {
   const delivery = new TransactionalOutboxDelivery({ pool, config: { leaseSeconds: 1 } });
-  const tenantId = `tenant-${projectId}`;
   const sub = await delivery.createSubscription({ tenantId, projectId, endpointUrl: 'https://example.com/events', eventTypes: [], ordered: true, secret: 'integration-test-secret-0123456789', createdBy: 'integration' });
   await pool.query(`SELECT forge_capture_event('job.state.changed',$1,$2,'job','replay-job',$3::jsonb)`, [projectId, episodeId, JSON.stringify({ jobId: 'replay-job', projectId, kind: 'integration', status: 'SUCCEEDED' })]);
   await delivery.fanout(20, 'integration-worker-a');
@@ -61,14 +62,15 @@ test.after(async () => {
   if (projectId) {
     await pool.query('DELETE FROM forge_event_delivery_attempts WHERE delivery_id IN (SELECT id FROM forge_event_deliveries WHERE project_id=$1)', [projectId]);
     await pool.query('DELETE FROM forge_event_dlq WHERE delivery_id IN (SELECT id FROM forge_event_deliveries WHERE project_id=$1)', [projectId]);
-    await pool.query('DELETE FROM forge_event_consumer_cursors WHERE tenant_id=$1', [`tenant-${projectId}`]);
+    await pool.query('DELETE FROM forge_event_consumer_cursors WHERE tenant_id=$1', [tenantId]);
     await pool.query('DELETE FROM forge_event_deliveries WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM forge_outbox WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM forge_events WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM forge_event_subscriptions WHERE project_id=$1', [projectId]);
-    await pool.query('DELETE FROM forge_event_order_counters WHERE tenant_id=$1', [`tenant-${projectId}`]);
+    await pool.query('DELETE FROM forge_event_order_counters WHERE tenant_id=$1', [tenantId]);
     await pool.query('DELETE FROM episodes WHERE id=$1', [episodeId]);
     await pool.query('DELETE FROM projects WHERE id=$1', [projectId]);
+    await pool.query('DELETE FROM tenants WHERE id=$1', [tenantId]);
   }
   await pool.end();
 });
