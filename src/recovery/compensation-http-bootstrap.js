@@ -1,0 +1,6 @@
+'use strict';
+const extended=require('../extended-http-api');
+const {CompensationSagaService}=require('./compensation-saga');
+const {installCompensationRoutes}=require('./compensation-http');
+const original=extended.createExtendedApiServer;
+extended.createExtendedApiServer=function createExtendedApiServerWithCompensation(options={}){const result=original(options);if(!result?.server||!options.repository)return result;const originalListeners=result.server.listeners.bind(result.server);result.server.listeners=function compensationAwareListeners(event){const listeners=originalListeners(event);if(event!=='request'||!listeners.length)return listeners;const base=listeners[0],pool=options.repository.db.pool,service=new CompensationSagaService({pool});const shim={_listeners:[],on(_event,fn){this._listeners.push(fn)},listeners(){return this._listeners}};installCompensationRoutes(shim,{pool,service,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,apiToken:process.env.API_BEARER_TOKEN||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});const route=shim.listeners('request')[0];const wrapped=(req,res)=>req.url?.startsWith('/internal/compensation/')||req.url?.startsWith('/v1/compensation/')?route(req,res):base(req,res);return[wrapped,...listeners.slice(1)]};return result};
