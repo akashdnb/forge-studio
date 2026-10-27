@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS cost_events (
   episode_id text REFERENCES episodes(id) ON DELETE RESTRICT,
   run_id text,
   job_id text REFERENCES forge_jobs(id) ON DELETE RESTRICT,
-  provider_run_id text REFERENCES provider_runs(id) ON DELETE RESTRICT,
+  provider_run_id text,
   category text NOT NULL CHECK (category IN ('provider','runner','media','storage','publishing','workflow')),
   provider_type text NOT NULL,
   provider text NOT NULL,
