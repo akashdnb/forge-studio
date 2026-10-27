@@ -37,12 +37,14 @@ Duplicate callbacks and retries are safe because side effects have deterministic
 All operator routes require tenant-scoped owner authorization.
 
 - `GET /internal/compensation/health`
+- `GET /internal/compensation/metrics`
 - `GET /v1/compensation/plans/:planId`
 - `POST /internal/compensation/trigger` — body `{workflowId, reason}`
 - `POST /internal/compensation/approve` — body `{planId, stepId, projectId, reason, expiresMinutes}`
+- `POST /internal/compensation/complete` — body `{planId, stepId, projectId, evidence}` for an already-approved `NON_COMPENSATABLE` step after the operator has completed the external reversal
 - `POST /internal/compensation/recover` — body `{staleAfterSeconds}`
 
-A published destination, missing provider reversal contract, or other irreversible stage must remain quarantined until an owner approves the specific step.
+A published destination, missing provider reversal contract, or other irreversible stage must remain quarantined until an owner approves the specific step and, where necessary, manually completes the external reversal. Approval alone never claims that an irreversible action has been reversed.
 
 ## Worker configuration
 
@@ -64,7 +66,8 @@ The worker preloads the compensation bootstrap. No separate saga worker is requi
 4. For transient failures, let the fenced retry/backoff run or call `/internal/compensation/recover`.
 5. For irreversible steps, create an owner approval for only that step; never approve a different tenant/project scope.
 6. For `QUARANTINED`, investigate the external system and retain the original evidence. Do not mutate immutable versions/artifacts to make the incident disappear.
-7. Confirm cost reservations are released/settled and that the compensation plan reaches `COMPENSATED` or remains explicitly `QUARANTINED`/`PARTIAL`.
+7. After an approved external reversal, call `/internal/compensation/complete` with evidence so the plan can close without pretending the action was automatically reversible.
+8. Confirm cost reservations are released/settled and that the compensation plan reaches `COMPENSATED` or remains explicitly `QUARANTINED`/`PARTIAL`.
 
 ## Validation
 
