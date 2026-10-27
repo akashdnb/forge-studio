@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS forge_event_intake (
   endpoint_id text NOT NULL REFERENCES forge_inbound_webhook_endpoints(id) ON DELETE RESTRICT,
   tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
   project_id text REFERENCES projects(id) ON DELETE RESTRICT,
+  external_event_id text NOT NULL,
   source_identity text NOT NULL,
   provider_identity text,
   schema_name text NOT NULL,
@@ -30,13 +31,14 @@ CREATE TABLE IF NOT EXISTS forge_event_intake (
   last_observed_at timestamptz NOT NULL DEFAULT now(),
   duplicate_count integer NOT NULL DEFAULT 0 CHECK (duplicate_count >= 0),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-  CONSTRAINT forge_event_intake_dedup_uk UNIQUE(endpoint_id, deduplication_key)
+  CONSTRAINT forge_event_intake_event_identity_uk UNIQUE(endpoint_id, external_event_id)
 );
 
 CREATE INDEX IF NOT EXISTS forge_event_intake_scope_idx ON forge_event_intake(tenant_id, project_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS forge_event_intake_state_idx ON forge_event_intake(processing_state, received_at);
 CREATE INDEX IF NOT EXISTS forge_event_intake_quarantine_idx ON forge_event_intake(tenant_id, processing_state, quarantine_reason) WHERE processing_state='QUARANTINED';
 CREATE INDEX IF NOT EXISTS forge_event_intake_payload_idx ON forge_event_intake(endpoint_id, payload_hash);
+CREATE INDEX IF NOT EXISTS forge_event_intake_dedup_idx ON forge_event_intake(endpoint_id, deduplication_key);
 CREATE INDEX IF NOT EXISTS forge_event_intake_retention_idx ON forge_event_intake(retention_until) WHERE retention_until IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS forge_event_replay_claims (
@@ -72,13 +74,14 @@ BEGIN
      OR NEW.endpoint_id <> OLD.endpoint_id
      OR NEW.tenant_id <> OLD.tenant_id
      OR COALESCE(NEW.project_id,'') <> COALESCE(OLD.project_id,'')
+     OR NEW.external_event_id <> OLD.external_event_id
      OR NEW.source_identity <> OLD.source_identity
      OR COALESCE(NEW.provider_identity,'') <> COALESCE(OLD.provider_identity,'')
      OR NEW.schema_name <> OLD.schema_name
      OR NEW.schema_version <> OLD.schema_version
      OR NEW.payload_hash <> OLD.payload_hash
      OR NEW.deduplication_key <> OLD.deduplication_key
-     OR COALESCE(NEW.event_id,'') <> COALESCE(OLD.event_id,'')
+     OR (OLD.event_id IS NOT NULL AND NEW.event_id IS DISTINCT FROM OLD.event_id)
   THEN RAISE EXCEPTION 'inbound intake identity is immutable' USING ERRCODE='23514';
   END IF;
   RETURN NEW;
