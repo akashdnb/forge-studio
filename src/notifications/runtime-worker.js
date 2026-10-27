@@ -1,6 +1,7 @@
 'use strict';
 
 const { NotificationOrchestrator } = require('./notification-orchestrator');
+const { processEscalations } = require('./escalation-runtime');
 
 function startNotificationRuntime({ pool, logger = console, intervalMs = Number(process.env.FORGE_NOTIFICATION_POLL_MS || 1000), workerId = process.env.FORGE_WORKER_ID || 'forge-notification-runtime' } = {}) {
   const orchestrator = new NotificationOrchestrator({ pool, logger, workerId });
@@ -8,7 +9,7 @@ function startNotificationRuntime({ pool, logger = console, intervalMs = Number(
   async function tick() {
     if (stopped || running) return;
     running = true;
-    try { return await orchestrator.tick({ materializeLimit: Number(process.env.FORGE_NOTIFICATION_MATERIALIZE_BATCH || 100), claimLimit: Number(process.env.FORGE_NOTIFICATION_DELIVERY_BATCH || 20) }); }
+    try { const result=await orchestrator.tick({ materializeLimit: Number(process.env.FORGE_NOTIFICATION_MATERIALIZE_BATCH || 100), claimLimit: Number(process.env.FORGE_NOTIFICATION_DELIVERY_BATCH || 20) }); result.escalated=(await processEscalations({orchestrator,limit:Number(process.env.FORGE_NOTIFICATION_ESCALATION_BATCH||50)})).escalated; return result; }
     catch (error) { logger.error?.(JSON.stringify({ event:'notification.runtime_tick_failed',code:error.code,message:error.message })); }
     finally { running = false; }
   }
