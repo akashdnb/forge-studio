@@ -1,0 +1,51 @@
+'use strict';
+const http=require('node:http');
+const {Pool}=require('pg');
+const {URL}=require('node:url');
+const {authenticate,hasRole}=require('../security/http-security');
+const {DistributedRateLimiter,RateLimitError}=require('./distributed-rate-limiter');
+require('./emergency-patch');
+if(process.env.DATABASE_URL){
+ const installed=Symbol.for('forge.distributed-rate-limit.bootstrap');
+ if(!globalThis[installed]){
+  const pool=new Pool({connectionString:process.env.DATABASE_URL,max:Number.parseInt(process.env.PG_RATE_LIMIT_POOL_MAX||'6',10),idleTimeoutMillis:30000,connectionTimeoutMillis:5000});
+  const limiter=new DistributedRateLimiter({pool});
+  globalThis[installed]={pool,limiter};
+  const originalOn=http.Server.prototype.on;
+  http.Server.prototype.on=function(event,listener){
+   if(event!=='request'||typeof listener!=='function')return originalOn.call(this,event,listener);
+   const wrapped=async(request,response)=>{
+    const pathname=new URL(request.url||'/','http://localhost').pathname;
+    if(pathname.startsWith('/internal/rate-limits/'))return handleOperator(request,response,pathname);
+    const auth=authenticate(request,{apiToken:process.env.API_BEARER_TOKEN||null,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});
+    const bypassScope=trustedBypassScope(request);
+    const tenantId=auth?.tenantId||null;
+    const projectId=await limiter.projectId(tenantId,request.url||'/').catch(()=>null);
+    const requestKey=String(request.headers['x-idempotency-key']||request.headers['x-request-id']||`${request.method||'GET'}:${request.socket.remoteAddress||'unknown'}:${request.url||'/'}:${Date.now()}`);
+    try{
+      const decision=await limiter.check({tenantId,projectId,method:request.method,url:request.url,requestKey,bypassScope});
+      response.setHeader('x-forge-rate-limit-route',decision.routeClass||'unknown');
+      response.setHeader('x-forge-rate-limit-request-key',requestKey.slice(0,96));
+      if(decision.failOpen)response.setHeader('x-forge-rate-limit-degraded','fail-open');
+      if(decision.reused)response.setHeader('x-forge-rate-limit-reused','true');
+      if(decision.allowed&&!decision.reused&&!decision.bypassed){
+        let released=false;const release=async()=>{if(released)return;released=true;await limiter.release(requestKey).catch(()=>{})};
+        response.once('finish',release);response.once('close',release);
+      }
+      return listener(request,response);
+    }catch(error){
+      if(error instanceof RateLimitError){response.statusCode=error.statusCode;response.setHeader('content-type','application/json; charset=utf-8');response.setHeader('cache-control','no-store');response.setHeader('retry-after',String(error.details?.retryAfter||1));response.end(JSON.stringify({error:{code:error.code,message:error.code==='RATE_LIMITED'?'Rate limit exceeded':'Rate limiting temporarily unavailable'},requestId:request.headers['x-request-id']||null}));return}
+      response.statusCode=503;response.setHeader('content-type','application/json; charset=utf-8');response.end(JSON.stringify({error:{code:'RATE_LIMIT_UNAVAILABLE'}}));
+    }
+   };
+   return originalOn.call(this,event,wrapped);
+  };
+  http.Server.prototype[installed]=true;
+ }
+}
+function trustedBypassScope(request){const scope=String(request.headers['x-forge-internal-scope']||'');const token=String(request.headers['x-forge-internal-token']||'');const expected=process.env.FORGE_RATE_LIMIT_INTERNAL_TOKEN||'';if(!scope||!expected||token!==expected)return null;if(!/^[a-z][a-z0-9._:-]{0,63}$/.test(scope))return null;return scope}
+async function readJson(request){return new Promise((resolve,reject)=>{let size=0;const chunks=[];request.on('data',c=>{size+=c.length;if(size>262144){reject(Object.assign(new Error('body too large'),{statusCode:413}));request.destroy();return}chunks.push(c)});request.on('end',()=>{try{resolve(chunks.length?JSON.parse(Buffer.concat(chunks).toString('utf8')):{})}catch(e){reject(Object.assign(new Error('invalid JSON'),{statusCode:400}))}});request.on('error',reject)})}
+async function operatorAuth(request,response){const auth=authenticate(request,{apiToken:process.env.API_BEARER_TOKEN||null,authSecret:process.env.FORGE_AUTH_SIGNING_SECRET||null,staticActor:process.env.FORGE_STATIC_ACTOR_ID||null,staticTenant:process.env.FORGE_STATIC_TENANT_ID||null});if(!auth||!hasRole(auth,'OWNER')){response.statusCode=403;response.setHeader('content-type','application/json');response.end(JSON.stringify({error:{code:'FORBIDDEN'}}));return null}return auth}
+async function handleOperator(request,response,pathname){const auth=await operatorAuth(request,response);if(!auth)return;const {limiter}=globalThis[Symbol.for('forge.distributed-rate-limit.bootstrap')];try{if(pathname==='/internal/rate-limits/health'&&request.method==='GET')return send(response,200,await limiter.health());if(pathname==='/internal/rate-limits/policies'&&request.method==='GET'){const u=new URL(request.url,'http://localhost');const tenantId=u.searchParams.get('tenantId')||auth.tenantId;if(tenantId!==auth.tenantId)return send(response,403,{error:{code:'TENANT_ISOLATION'}});return send(response,200,{items:await limiter.policiesList(tenantId,u.searchParams.get('projectId'))})}if(pathname==='/internal/rate-limits/policies'&&request.method==='PUT'){const body=await readJson(request);if(body.tenantId&&body.tenantId!==auth.tenantId)return send(response,403,{error:{code:'TENANT_ISOLATION'}});const row=await limiter.upsertPolicy({...body,tenantId:body.tenantId||auth.tenantId,actor:auth.actor,requestId:request.headers['x-request-id']||null});return send(response,200,{policy:row})}if(pathname==='/internal/rate-limits/usage'&&request.method==='GET'){const u=new URL(request.url,'http://localhost');const tenantId=u.searchParams.get('tenantId')||auth.tenantId;if(tenantId!==auth.tenantId)return send(response,403,{error:{code:'TENANT_ISOLATION'}});return send(response,200,{items:await limiter.usage(tenantId,u.searchParams.get('projectId'))})}if(pathname==='/internal/rate-limits/reset'&&request.method==='POST'){const body=await readJson(request);if(body.tenantId&&body.tenantId!==auth.tenantId)return send(response,403,{error:{code:'TENANT_ISOLATION'}});return send(response,200,await limiter.reset({tenantId:body.tenantId||auth.tenantId,projectId:body.projectId||null,routeClass:body.routeClass||'*',actor:auth.actor,reason:body.reason}))}if(pathname==='/internal/rate-limits/emergency'&&request.method==='POST'){const body=await readJson(request);if(body.tenantId&&body.tenantId!==auth.tenantId)return send(response,403,{error:{code:'TENANT_ISOLATION'}});return send(response,200,{policy:await limiter.emergency({tenantId:body.tenantId||auth.tenantId,projectId:body.projectId||null,actor:auth.actor,reason:body.reason,minutes:body.minutes})})}if(pathname==='/internal/rate-limits/metrics'&&request.method==='GET')return send(response,200,{metrics:limiter.metrics});return send(response,404,{error:{code:'NOT_FOUND'}})}catch(e){return send(response,e.statusCode||500,{error:{code:e.code||'INTERNAL_ERROR',message:e.statusCode?e.message:'Request could not be completed'}})}}
+function send(response,status,body){response.statusCode=status;response.setHeader('content-type','application/json; charset=utf-8');response.setHeader('cache-control','no-store');response.end(JSON.stringify(body))}
+module.exports=globalThis[Symbol.for('forge.distributed-rate-limit.bootstrap')]||null;
