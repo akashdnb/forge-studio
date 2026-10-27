@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const { Pool } = require('pg');
 const { RecoveryControlPlane } = require('./recovery-control');
 const { canonicalize, sha256, verifyDatabaseInvariants } = require('./recovery-verifier');
-const { allocateGeneration, recordIntegrity, coverage, rpo, targetHash } = require('./recovery-assurance');
+const { allocateGeneration, recordIntegrity, coverage, rpo, targetHash, verify: verifySignature } = require('./recovery-assurance');
 const { retryBounded } = require('./recovery-retry');
 const { redactDatabaseUrl } = require('./backup-service');
 
@@ -28,8 +28,17 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
     return { ...result, generation, coverage: cover, rpoSeconds, signedIntegrityId: signed.id, signatureKeyId: signed.keyId };
   }
 
+  async verifyBackupEvidence(tenantId, backupId) {
+    const result = await this.pool.query(`SELECT r.canonical_payload,r.payload_sha256,r.algorithm,r.key_id,r.signature FROM forge_recovery_integrity_records r WHERE r.tenant_id=$1 AND r.backup_id=$2 AND r.evidence_type='BACKUP_COMMIT'`, [tenantId, backupId]);
+    if (!result.rowCount) throw Object.assign(new Error('signed recovery evidence is missing'), { code: 'RECOVERY_EVIDENCE_MISSING' });
+    const check = verifySignature(result.rows[0].canonical_payload, result.rows[0]);
+    if (!check.ok) throw Object.assign(new Error('signed recovery evidence verification failed'), { code: check.code || 'RECOVERY_EVIDENCE_INVALID' });
+    return result.rows[0];
+  }
+
   async requestProductionRestoreApproval({ tenantId, actor, backupId, targetDatabaseUrl, expiresMinutes = 30, reason = 'disaster-recovery' } = {}) {
     await this.assertTenant(tenantId);
+    await this.verifyBackupEvidence(tenantId, backupId);
     const production = process.env.FORGE_PRODUCTION_DATABASE_URL;
     if (!production || targetDatabaseUrl !== production) throw Object.assign(new Error('production target must match FORGE_PRODUCTION_DATABASE_URL exactly'), { code: 'PRODUCTION_TARGET_MISMATCH' });
     const backup = await this.pool.query(`SELECT id,tenant_id,status,integrity_status,signed_integrity_id,backup_generation,manifest_sha256,archive_sha256,artifact_archive_sha256,content_root FROM forge_backup_records WHERE id=$1`, [backupId]);
@@ -64,6 +73,7 @@ class AssuredRecoveryControlPlane extends RecoveryControlPlane {
       const archive = await this.backup.verifyBackup({ archivePath: options.archivePath, signal: options.signal });
       extracted = await this.backup.extract(options.archivePath);
       const backupId = extracted.metadata.backupId;
+      await this.verifyBackupEvidence(options.tenantId, backupId);
       const record = await this.loadAuthorizedRecoveryPoint(options.tenantId, backupId);
       const fence = await this.recoveryEpoch();
       operationId = crypto.randomUUID();
