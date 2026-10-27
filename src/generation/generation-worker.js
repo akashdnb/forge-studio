@@ -30,7 +30,12 @@ function fail(message, code = 'GENERATION_FAILED', retryable = false, details = 
 }
 
 function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
-function canonical(value) { return JSON.stringify(value, Object.keys(value || {}).sort()); }
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+  return value;
+}
+function canonical(value) { return JSON.stringify(stable(value)); }
 function assertNotAborted(signal) { if (signal?.aborted) throw fail('Generation job was cancelled', 'CANCELLED'); }
 
 function strictBase64(value) {
@@ -177,6 +182,7 @@ class GenerationWorker {
   async execute(payload = {}, job = {}) {
     const episodeId = payload.episodeId || job.episode_id;
     if (!episodeId) throw fail('Generation job requires episodeId', 'INVALID_JOB');
+    if (Number.isInteger(job.attempts) && job.attempts > this.config.maxAttempts) throw fail(`Generation retry budget exceeded (${this.config.maxAttempts})`, 'RETRY_BUDGET_EXHAUSTED');
     const controller = new AbortController();
     const cancelWatcher = this.#watchCancellation(job.id, controller);
     try {
@@ -204,11 +210,17 @@ class GenerationWorker {
   }
 
   async #executeOne({ episodeId, projectId, request, provider, identity, inputs, job, signal }) {
-    const runId = `generation-run:${identity}`;
-    const idempotencyKey = `generation:${identity}`;
+    const attempt = job.attempts || 1;
+    const runId = `generation-run:${identity}:attempt:${attempt}`;
+    const idempotencyKey = `generation:${identity}:attempt:${attempt}`;
     const versionId = `generation:${identity}`;
     const artifactId = `generation-artifact:${identity}`;
-    let run = await this.repository.createProviderRun({ id: runId, episodeId, capability: request.capability, provider: provider.name || 'unnamed', model: provider.model || null, inputVersionIds: request.inputVersionIds, idempotencyKey, request: { ...request, metadata: undefined }, attempt: job.attempts || 1 });
+    const existingArtifact = await this.repository.db.pool.query('SELECT id,version_id,content_hash FROM artifacts WHERE id=$1 AND episode_id=$2', [artifactId, episodeId]);
+    if (existingArtifact.rows[0]) {
+      if (existingArtifact.rows[0].version_id !== versionId) throw fail('Existing generation artifact has conflicting immutable version identity', 'IDEMPOTENCY_CONFLICT');
+      return { artifactId, versionId, providerRunId: null, checksum: existingArtifact.rows[0].content_hash, idempotent: true, deterministic: provider.name === 'deterministic-local' };
+    }
+    let run = await this.repository.createProviderRun({ id: runId, episodeId, capability: request.capability, provider: provider.name || 'unnamed', model: provider.model || null, inputVersionIds: request.inputVersionIds, idempotencyKey, request: { ...request, metadata: undefined }, attempt });
     if (run.status === 'SUCCEEDED') {
       const artifactIds = run.result_artifact_ids || run.resultArtifactIds || [];
       if (artifactIds.length) return { artifactId: artifactIds[0], versionId, providerRunId: run.id, idempotent: true, deterministic: provider.name === 'deterministic-local' };
@@ -218,7 +230,7 @@ class GenerationWorker {
     if (run.status === 'FAILED' || run.status === 'CANCELLED') throw fail(`Generation provider run is already ${run.status}`, 'IDEMPOTENCY_CONFLICT');
     run = await this.repository.transitionProviderRun({ id: run.id, status: 'RUNNING' });
     try {
-      const output = await provider.execute(Object.freeze({ prompt: request.prompt, text: request.text, parameters: request.parameters }), { runId: run.id, episodeId, capability: request.capability, attempt: job.attempts || 1, inputVersionIds: request.inputVersionIds, idempotencyKey, timeoutMs: this.config.timeoutMs, signal });
+      const output = await provider.execute(Object.freeze({ prompt: request.prompt, text: request.text, parameters: request.parameters }), { runId: run.id, episodeId, capability: request.capability, attempt, inputVersionIds: request.inputVersionIds, idempotencyKey, timeoutMs: this.config.timeoutMs, signal });
       assertNotAborted(signal);
       const normalized = await this.#validateOutput(output, request.capability, signal);
       const metadata = { schemaVersion: 'forge-generation-v1', immutable: true, provider: provider.name || 'unnamed', model: provider.model || null, inputVersionIds: request.inputVersionIds, inputChecksums: Object.fromEntries(inputs.versions.map((version) => [version.id, version.content_hash])), generationIdentity: identity, providerMetadata: sanitizeProviderMetadata(output?.metadata || {}), requestMetadata: request.metadata, validation: normalized.validation, deterministic: provider.name === 'deterministic-local' };
@@ -226,17 +238,16 @@ class GenerationWorker {
       if (!existingVersion.rows[0]) await this.repository.db.pool.query('INSERT INTO version_records(id,episode_id,kind,payload,content_hash,created_by) VALUES($1,$2,$3,$4::jsonb,$5,$6)', [versionId, episodeId, request.capability === 'text' ? 'generated-text' : 'generated-media', JSON.stringify({ capability: request.capability, provider: provider.name || 'unnamed', metadata }), normalized.checksum, job.payload?.actor || 'worker']);
       else if (existingVersion.rows[0].episode_id !== episodeId || existingVersion.rows[0].content_hash !== normalized.checksum) throw fail('Immutable generation version identity conflicts with an existing output', 'IDEMPOTENCY_CONFLICT');
       for (const dependency of request.inputVersionIds) await this.repository.db.pool.query('INSERT INTO version_dependencies(episode_id,version_id,depends_on_version_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [episodeId, versionId, dependency]);
-      let artifact;
-      if (request.capability === 'text') {
-        artifact = await this.repository.registerArtifact({ id: artifactId, episodeId, kind: 'package', versionId, content: normalized.content, contentHash: normalized.checksum, mediaType: 'text/plain', providerRunId: run.id, source: 'generation', inputVersionIds: request.inputVersionIds, metadata, createdBy: job.payload?.actor || 'worker' });
-      } else {
-        artifact = await this.storageService.putArtifact({ episodeId, projectId, versionId, artifactId, kind: request.capability, content: normalized.content, contentType: normalized.mediaType, expectedSha256: normalized.checksum, providerRunId: run.id, source: 'generation', inputVersionIds: request.inputVersionIds, metadata, createdBy: job.payload?.actor || 'worker' });
-      }
+      const artifact = await this.storageService.putArtifact({ episodeId, projectId, versionId, artifactId, kind: request.capability === 'text' ? 'package' : request.capability, content: Buffer.isBuffer(normalized.content) ? normalized.content : Buffer.from(normalized.content, 'utf8'), contentType: normalized.mediaType, expectedSha256: normalized.checksum, providerRunId: run.id, source: 'generation', inputVersionIds: request.inputVersionIds, metadata, createdBy: job.payload?.actor || 'worker' });
       const finalRun = await this.repository.transitionProviderRun({ id: run.id, status: 'SUCCEEDED', patch: { resultArtifactIds: [artifact.id], usage: sanitizeUsage(output?.usage), estimatedCost: output?.estimatedCost ?? null, actualCost: output?.actualCost ?? null, currency: output?.currency || 'USD' } });
+      this.logger.info?.({ event: 'generation.succeeded', providerRunId: finalRun.id, episodeId, capability: request.capability, provider: provider.name || 'unnamed', attempt, artifactId: artifact.id, checksum: normalized.checksum, sizeBytes: normalized.validation.sizeBytes || null, deterministic: provider.name === 'deterministic-local' });
       return { artifactId: artifact.id, versionId, providerRunId: finalRun.id, checksum: normalized.checksum, mediaType: normalized.mediaType, validation: normalized.validation, deterministic: provider.name === 'deterministic-local', idempotent: false };
     } catch (error) {
+      const retryable = error?.retryable === true && attempt < this.config.maxAttempts;
+      if (error && error.retryable && !retryable) error.retryable = false;
       const safeError = sanitizeError(error);
-      await this.repository.transitionProviderRun({ id: run.id, status: 'FAILED', patch: { error: safeError } }).catch(() => {});
+      await this.repository.transitionProviderRun({ id: run.id, status: error?.code === 'CANCELLED' ? 'CANCELLED' : 'FAILED', patch: { error: safeError } }).catch(() => {});
+      this.logger.warn?.({ event: 'generation.failed', providerRunId: run.id, episodeId, capability: request.capability, provider: provider.name || 'unnamed', attempt, code: safeError.code, retryable: safeError.retryable, retryAfterMs: safeError.retryAfterMs });
       throw error;
     }
   }
@@ -272,7 +283,7 @@ class GenerationWorker {
     const timer = setInterval(async () => {
       if (controller.signal.aborted) return;
       try { const row = await this.repository.db.pool.query('SELECT status FROM forge_jobs WHERE id=$1', [jobId]); if (row.rows[0]?.status === 'CANCELLED') controller.abort(); }
-      catch (error) { this.logger.warn?.('Generation cancellation poll failed', error.message); }
+      catch (error) { this.logger.warn?.({ event: 'generation.cancellation_poll_failed', message: error.message }); }
     }, 500);
     timer.unref?.();
     return timer;
