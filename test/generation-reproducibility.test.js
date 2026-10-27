@@ -1,6 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { GenerationRecipeService, canonicalJson, redact, sha256, assertCompatibility, SCHEMA_VERSION } = require('../src/generation-reproducibility/service');
+
+test('migration ordering keeps generation registry after the existing schema', () => {
+  const migrations = fs.readdirSync(path.join(__dirname, '..', 'migrations')).filter(name => /^\d+_[a-z0-9_-]+\.sql$/.test(name)).sort();
+  assert.ok(migrations.includes('008_generation_reproducibility.sql'));
+  assert.equal(migrations.at(-1), '008_generation_reproducibility.sql');
+});
 
 test('canonical serialization is stable and secrets/PII are redacted', () => {
   assert.equal(canonicalJson({ b: 2, a: 1 }), canonicalJson({ a: 1, b: 2 }));
