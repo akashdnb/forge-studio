@@ -25,7 +25,7 @@ test('manifest hashing is deterministic and secret-free', () => {
   const a = canonicalManifest(input), b = canonicalManifest(input);
   assert.equal(a.manifestHash, b.manifestHash);
   assert.equal(a.secret, undefined);
-  assert.equal(a.requiredConfig.API_TOKEN, true);
+  assert.equal(a.requiredConfig.API_TOKEN, '[REDACTED]');
   assert.ok(!JSON.stringify(a).includes('do-not-store'));
 });
 
