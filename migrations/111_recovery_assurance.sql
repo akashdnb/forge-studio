@@ -1,0 +1,65 @@
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS forge_recovery_generation_state (
+  tenant_id text PRIMARY KEY REFERENCES tenants(id) ON DELETE RESTRICT,
+  next_generation bigint NOT NULL CHECK (next_generation > 0),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS forge_recovery_integrity_records (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  backup_id text NOT NULL REFERENCES forge_backup_records(id) ON DELETE RESTRICT,
+  generation bigint NOT NULL CHECK (generation > 0),
+  evidence_type text NOT NULL,
+  canonical_payload jsonb NOT NULL,
+  payload_sha256 char(64) NOT NULL,
+  algorithm text NOT NULL CHECK (algorithm = 'HMAC-SHA256'),
+  key_id text NOT NULL,
+  signature text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (backup_id, evidence_type)
+);
+CREATE INDEX IF NOT EXISTS forge_recovery_integrity_tenant_idx ON forge_recovery_integrity_records(tenant_id, generation DESC);
+
+CREATE OR REPLACE FUNCTION forge_recovery_integrity_immutable() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'forge recovery integrity evidence is immutable';
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS forge_recovery_integrity_no_update ON forge_recovery_integrity_records;
+CREATE TRIGGER forge_recovery_integrity_no_update BEFORE UPDATE OR DELETE ON forge_recovery_integrity_records FOR EACH ROW EXECUTE FUNCTION forge_recovery_integrity_immutable();
+
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS backup_generation bigint CHECK (backup_generation IS NULL OR backup_generation > 0);
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS coverage_status text NOT NULL DEFAULT 'PENDING' CHECK (coverage_status IN ('PENDING','COMPLETE','INCOMPLETE'));
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS dependency_complete boolean NOT NULL DEFAULT false;
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS encryption_algorithm text NOT NULL DEFAULT 'AES-256-GCM';
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS key_version text;
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS last_known_good boolean NOT NULL DEFAULT false;
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS signed_integrity_id text;
+ALTER TABLE forge_backup_records ADD COLUMN IF NOT EXISTS rpo_seconds integer CHECK (rpo_seconds IS NULL OR rpo_seconds >= 0);
+CREATE UNIQUE INDEX IF NOT EXISTS forge_backup_records_tenant_generation_idx ON forge_backup_records(tenant_id, backup_generation) WHERE tenant_id IS NOT NULL AND backup_generation IS NOT NULL;
+CREATE INDEX IF NOT EXISTS forge_backup_records_lkg_idx ON forge_backup_records(tenant_id, created_at DESC) WHERE last_known_good = true AND status = 'SUCCEEDED';
+
+ALTER TABLE forge_restore_operations ADD COLUMN IF NOT EXISTS approval_id text;
+ALTER TABLE forge_restore_operations ADD COLUMN IF NOT EXISTS production_restore boolean NOT NULL DEFAULT false;
+ALTER TABLE forge_restore_operations ADD COLUMN IF NOT EXISTS started_at timestamptz;
+ALTER TABLE forge_restore_operations ADD COLUMN IF NOT EXISTS rpo_seconds integer CHECK (rpo_seconds IS NULL OR rpo_seconds >= 0);
+ALTER TABLE forge_restore_operations ADD COLUMN IF NOT EXISTS rto_ms bigint CHECK (rto_ms IS NULL OR rto_ms >= 0);
+
+CREATE TABLE IF NOT EXISTS forge_recovery_restore_approvals (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  backup_id text NOT NULL REFERENCES forge_backup_records(id) ON DELETE RESTRICT,
+  target_database_hash char(64) NOT NULL,
+  purpose text NOT NULL CHECK (purpose IN ('PRODUCTION_RESTORE','DISASTER_DRILL')),
+  status text NOT NULL CHECK (status IN ('APPROVED','CONSUMED','REVOKED','EXPIRED')),
+  approved_by text NOT NULL,
+  approved_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  evidence_hash char(64) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS forge_recovery_restore_approvals_lookup_idx ON forge_recovery_restore_approvals(tenant_id, backup_id, status, expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS forge_recovery_restore_approvals_active_idx ON forge_recovery_restore_approvals(tenant_id, backup_id, target_database_hash) WHERE status='APPROVED';
+
+COMMIT;
