@@ -2,6 +2,7 @@ BEGIN;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS dispatch_token text;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS dispatch_generation integer NOT NULL DEFAULT 0;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS scheduled_at timestamptz;
+ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS timeout_at timestamptz;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS last_schedule_reason text;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS blocked_reason text;
 ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS cancellation_requested_at timestamptz;
