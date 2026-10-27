@@ -1,4 +1,5 @@
 BEGIN;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS artifact_delivery_grants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -88,33 +89,10 @@ CREATE INDEX IF NOT EXISTS artifact_delivery_evidence_scope_idx ON artifact_deli
 
 CREATE OR REPLACE FUNCTION forge_artifact_delivery_grant_immutable_guard() RETURNS trigger AS $$
 BEGIN
-  IF OLD.id IS DISTINCT FROM NEW.id
-     OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id
-     OR OLD.project_id IS DISTINCT FROM NEW.project_id
-     OR OLD.artifact_id IS DISTINCT FROM NEW.artifact_id
-     OR OLD.artifact_version_id IS DISTINCT FROM NEW.artifact_version_id
-     OR OLD.content_hash IS DISTINCT FROM NEW.content_hash
-     OR OLD.subject_actor IS DISTINCT FROM NEW.subject_actor
-     OR OLD.purpose IS DISTINCT FROM NEW.purpose
-     OR OLD.audience IS DISTINCT FROM NEW.audience
-     OR OLD.action IS DISTINCT FROM NEW.action
-     OR OLD.nonce IS DISTINCT FROM NEW.nonce
-     OR OLD.token_hash IS DISTINCT FROM NEW.token_hash
-     OR OLD.key_epoch IS DISTINCT FROM NEW.key_epoch
-     OR OLD.issued_at IS DISTINCT FROM NEW.issued_at
-     OR OLD.not_before IS DISTINCT FROM NEW.not_before
-     OR OLD.expires_at IS DISTINCT FROM NEW.expires_at
-     OR OLD.max_bytes IS DISTINCT FROM NEW.max_bytes
-     OR OLD.range_start IS DISTINCT FROM NEW.range_start
-     OR OLD.range_end IS DISTINCT FROM NEW.range_end
-     OR OLD.max_uses IS DISTINCT FROM NEW.max_uses
-     OR OLD.created_by IS DISTINCT FROM NEW.created_by
-     OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+  IF OLD.id IS DISTINCT FROM NEW.id OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id OR OLD.project_id IS DISTINCT FROM NEW.project_id OR OLD.artifact_id IS DISTINCT FROM NEW.artifact_id OR OLD.artifact_version_id IS DISTINCT FROM NEW.artifact_version_id OR OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.subject_actor IS DISTINCT FROM NEW.subject_actor OR OLD.purpose IS DISTINCT FROM NEW.purpose OR OLD.audience IS DISTINCT FROM NEW.audience OR OLD.action IS DISTINCT FROM NEW.action OR OLD.nonce IS DISTINCT FROM NEW.nonce OR OLD.token_hash IS DISTINCT FROM NEW.token_hash OR OLD.key_epoch IS DISTINCT FROM NEW.key_epoch OR OLD.issued_at IS DISTINCT FROM NEW.issued_at OR OLD.not_before IS DISTINCT FROM NEW.not_before OR OLD.expires_at IS DISTINCT FROM NEW.expires_at OR OLD.max_bytes IS DISTINCT FROM NEW.max_bytes OR OLD.range_start IS DISTINCT FROM NEW.range_start OR OLD.range_end IS DISTINCT FROM NEW.range_end OR OLD.max_uses IS DISTINCT FROM NEW.max_uses OR OLD.created_by IS DISTINCT FROM NEW.created_by OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
     RAISE EXCEPTION 'artifact delivery grant authorization fields are immutable';
   END IF;
-  IF NEW.use_count < OLD.use_count OR NEW.use_count > NEW.max_uses THEN
-    RAISE EXCEPTION 'artifact delivery grant use counter is invalid';
-  END IF;
+  IF NEW.use_count < OLD.use_count OR NEW.use_count > NEW.max_uses THEN RAISE EXCEPTION 'artifact delivery grant use counter is invalid'; END IF;
   IF OLD.status='REVOKED' AND NEW.status<>'REVOKED' THEN RAISE EXCEPTION 'revoked grant cannot be reactivated'; END IF;
   IF OLD.status='EXHAUSTED' AND NEW.status<>'EXHAUSTED' THEN RAISE EXCEPTION 'exhausted grant cannot be reactivated'; END IF;
   IF OLD.status='EXPIRED' AND NEW.status NOT IN ('EXPIRED','REVOKED') THEN RAISE EXCEPTION 'expired grant cannot be reactivated'; END IF;
