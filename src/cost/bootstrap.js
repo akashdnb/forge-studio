@@ -1,4 +1,6 @@
 'use strict';
+require('../usage/billing-worker-hook');
+require('../usage/billing-operator-bootstrap');
 require('../storage/artifact-lifecycle-bootstrap');
 const { UsageAccountingService } = require('../usage/usage-accounting');
 const { WorkflowScheduler } = require('../scheduling/workflow-scheduler');
