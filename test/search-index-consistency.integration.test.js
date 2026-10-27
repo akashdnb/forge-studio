@@ -61,7 +61,7 @@ test('failure injection leaves resumable failed generation state', async t => {
   const tenant = await pool.query(`SELECT id FROM tenants ORDER BY id LIMIT 1`);
   if (!tenant.rowCount) return t.skip('no tenant fixture');
   const tenantId=tenant.rows[0].id;
-  const service=new LockedSearchIndexConsistencyService({pool,failureInjector:async ({point})=>{if(point==='before_row') throw new Error('INJECTED_SEARCH_REBUILD_FAILURE');},batchSize:1});
+  const service=new LockedSearchIndexConsistencyService({pool,failureInjector:async ({point})=>{if(point==='before_batch') throw new Error('INJECTED_SEARCH_REBUILD_FAILURE');},batchSize:1});
   const generation=await service.createRebuild({tenantId,actor:'search-test'});
   await assert.rejects(()=>service.runBatch({tenantId,actor:'search-test',generationId:generation.generation_id}),/INJECTED_SEARCH_REBUILD_FAILURE/);
   const state=await service.getGeneration({tenantId,generationId:generation.generation_id});
