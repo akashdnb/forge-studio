@@ -15,6 +15,11 @@ async function migrate() {
   await pool.query(sql);
 }
 
+async function cleanup(key) {
+  await pool.query('DELETE FROM forge_api_idempotency_events WHERE idempotency_key=$1', [key]);
+  await pool.query('DELETE FROM forge_api_idempotency_keys WHERE idempotency_key=$1', [key]);
+}
+
 test('PostgreSQL idempotency registry serializes concurrent identical requests', { skip }, async () => {
   await migrate();
   const key = `pg-concurrency-${Date.now()}`;
@@ -32,25 +37,25 @@ test('PostgreSQL idempotency registry serializes concurrent identical requests',
   const row = (await pool.query('SELECT status,response_body FROM forge_api_idempotency_keys WHERE idempotency_key=$1', [key])).rows[0];
   assert.equal(row.status, 'COMMITTED');
   assert.deepEqual(row.response_body, first);
-  await pool.query('DELETE FROM forge_api_idempotency_events WHERE idempotency_key=$1', [key]);
-  await pool.query('DELETE FROM forge_api_idempotency_keys WHERE idempotency_key=$1', [key]);
+  await cleanup(key);
   await pool.end();
   pool = null;
 });
 
-test('PostgreSQL mismatched reuse fails closed and failed transaction leaves no committed outcome', { skip }, async () => {
-  if (!pool) await migrate();
+test('PostgreSQL rollback is retryable and committed reuse fails closed', { skip }, async () => {
+  await migrate();
   const tenant = `tenant-failure-${Date.now()}`;
   const key = `pg-failure-${Date.now()}`;
   const base = { tenantId: tenant, operation: 'test.failure', idempotencyKey: key, requestHash: 'b'.repeat(64), actor: 'test', requestId: 'req-fail' };
   await assert.rejects(() => withIdempotencyTransaction(pool, base, async () => { throw new Error('synthetic crash before commit'); }), /synthetic crash/);
   const count = await pool.query('SELECT count(*)::int AS count FROM forge_api_idempotency_keys WHERE idempotency_key=$1', [key]);
   assert.equal(count.rows[0].count, 0);
-  await assert.rejects(() => withIdempotencyTransaction(pool, { ...base, requestHash: 'c'.repeat(64) }, async () => ({ ok: true })), /different request fingerprint/);
   const success = await withIdempotencyTransaction(pool, base, async () => ({ ok: true, committed: true }));
   assert.deepEqual(success, { ok: true, committed: true });
-  await pool.query('DELETE FROM forge_api_idempotency_events WHERE idempotency_key=$1', [key]);
-  await pool.query('DELETE FROM forge_api_idempotency_keys WHERE idempotency_key=$1', [key]);
+  const replay = await withIdempotencyTransaction(pool, base, async () => { throw new Error('side effect must not execute'); });
+  assert.deepEqual(replay, success);
+  await assert.rejects(() => withIdempotencyTransaction(pool, { ...base, requestHash: 'c'.repeat(64) }, async () => ({ ok: false })), /different request fingerprint/);
+  await cleanup(key);
   await pool.end();
   pool = null;
 });
