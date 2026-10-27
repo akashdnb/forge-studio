@@ -1,2 +1,2 @@
-const { installClientContracts } = require('./client-contracts');
+const { installClientContracts } = require('./client-contracts-core');
 installClientContracts();
