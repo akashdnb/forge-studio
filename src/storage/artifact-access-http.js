@@ -41,7 +41,8 @@ async function handleArtifactAccess(request, response, { gateway, apiToken }) {
       if (request.method !== 'POST') return sendJson(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST required' }, requestId }, requestId);
       const actor = bearerActor(request, apiToken);
       if (!actor) return sendJson(response, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid bearer token is required' }, requestId }, requestId);
-      const issued = await gateway.issueToken({ artifactId: route.artifactId, actor, action: request.headers.range ? 'stream' : 'download', purpose: request.headers['x-forge-artifact-purpose'] || 'user', recovery: request.headers['x-forge-artifact-recovery'] === 'true' });
+      const action = route.url.searchParams.get('action') === 'stream' ? 'stream' : 'download';
+      const issued = await gateway.issueToken({ artifactId: route.artifactId, actor, action, purpose: route.url.searchParams.get('purpose') || 'user', recovery: route.url.searchParams.get('recovery') === 'true' });
       return sendJson(response, 201, { item: issued }, requestId);
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'GET required' }, requestId }, requestId);
@@ -67,7 +68,7 @@ async function handleArtifactAccess(request, response, { gateway, apiToken }) {
       ...(delivery.contentRange ? { 'content-range': delivery.contentRange } : {}),
       'x-request-id': requestId,
     });
-    delivery.stream.on('error', () => { if (!response.headersSent) response.destroy(); else response.destroy(); });
+    delivery.stream.on('error', () => response.destroy());
     delivery.stream.pipe(response);
     return true;
   } catch (error) {
