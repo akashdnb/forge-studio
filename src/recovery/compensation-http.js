@@ -1,0 +1,56 @@
+'use strict';
+
+const { URL } = require('node:url');
+const { authenticate, hasRole } = require('../security/http-security');
+
+function send(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+async function readJson(req, maxBytes = 65536) {
+  let total = 0; const chunks = [];
+  for await (const chunk of req) { total += chunk.length; if (total > maxBytes) throw Object.assign(new Error('request body too large'), { code: 'REQUEST_TOO_LARGE' }); chunks.push(chunk); }
+  if (!chunks.length) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function installCompensationRoutes(server, { pool, service, authSecret, apiToken, staticActor, staticTenant }) {
+  server.on('request', async (request, response) => {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (!pathname.startsWith('/internal/compensation/') && !pathname.startsWith('/v1/compensation/')) return;
+    const auth = authenticate(request, { authSecret, apiToken, staticActor, staticTenant });
+    if (!auth) return send(response, 401, { error: { code: 'UNAUTHORIZED' } });
+    try {
+      const ownerOnly = pathname.includes('/operator/') || pathname.endsWith('/health');
+      if (ownerOnly && !hasRole(auth, 'OWNER')) return send(response, 403, { error: { code: 'COMPENSATION_OPERATOR_REQUIRED' } });
+      if (request.method === 'GET' && pathname.endsWith('/health')) return send(response, 200, await service.health({ tenantId: auth.tenantId }));
+      const planMatch = pathname.match(/\/compensation\/plans\/([^/]+)(?:\/([^/]+))?/);
+      if (request.method === 'GET' && planMatch) {
+        const plan = await service.getPlan(planMatch[1], auth.tenantId);
+        return plan ? send(response, 200, plan) : send(response, 404, { error: { code: 'NOT_FOUND' } });
+      }
+      if (request.method === 'POST' && pathname.endsWith('/trigger')) {
+        const body = await readJson(request);
+        const plan = await service.triggerForWorkflow({ workflowId: body.workflowId, actor: auth.actor, trigger: 'OPERATOR', reason: { reason: body.reason || 'operator trigger' } });
+        if (plan.tenant_id !== auth.tenantId) return send(response, 404, { error: { code: 'NOT_FOUND' } });
+        return send(response, 202, plan);
+      }
+      if (request.method === 'POST' && pathname.endsWith('/approve')) {
+        const body = await readJson(request);
+        const approval = await service.approve({ planId: body.planId, stepId: body.stepId || null, tenantId: auth.tenantId, projectId: body.projectId, actor: auth.actor, reason: body.reason || 'operator approval', expiresMinutes: body.expiresMinutes });
+        return send(response, 201, approval);
+      }
+      if (request.method === 'POST' && pathname.endsWith('/recover')) {
+        const body = await readJson(request);
+        const result = { leasesRecovered: await service.recoverExpiredLeases(), staleWorkflows: await service.recoverStaleWorkflows({ staleAfterSeconds: body.staleAfterSeconds, actor: auth.actor }) };
+        return send(response, 202, result);
+      }
+      return send(response, 404, { error: { code: 'NOT_FOUND' } });
+    } catch (error) {
+      const status = ['TENANT_SCOPE_VIOLATION', 'COMPENSATION_PLAN_IMMUTABLE', 'COMPENSATION_APPROVAL_REQUIRED'].includes(error.code) ? 409 : error.code === 'UNAUTHORIZED' ? 401 : 400;
+      return send(response, status, { error: { code: error.code || 'COMPENSATION_OPERATION_FAILED', message: error.message } });
+    }
+  });
+}
+
+module.exports = { installCompensationRoutes };
