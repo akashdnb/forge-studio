@@ -43,6 +43,8 @@ services:
         value: "8080"
       - key: PG_POOL_MAX
         value: "5"
+      - key: FORGE_EVENT_SECRET_KEY
+        sync: false
       - key: FORGE_SECRET_ENCRYPTION_KEY
         sync: false
       - key: FORGE_REQUIRE_SECRET_ENCRYPTION
@@ -96,6 +98,8 @@ services:
       - key: FORGE_RECONCILIATION_SCAN_LIMIT
         value: "50"
       - key: FORGE_RECONCILIATION_RECENT_MINUTES
+        value: "60"
+      - key: FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES
         value: "60"
       - key: FORGE_RECONCILIATION_PARTIAL_MAX_AGE_MINUTES
         value: "60"
@@ -223,6 +227,31 @@ services:
         value: "8090"
       - key: FORGE_EVENT_PORT
         value: "8090"
+      - key: DATABASE_URL
+        sync: false
+      - key: FORGE_EVENT_SECRET_KEY
+        sync: false
+      - key: FORGE_AUTH_SIGNING_SECRET
+        sync: false
+      - key: API_BEARER_TOKEN
+        sync: false
+      - key: FORGE_STATIC_ACTOR_ID
+        sync: false
+      - key: FORGE_STATIC_TENANT_ID
+        sync: false
+  - type: web
+    name: forge-studio-inbound-webhook-api
+    runtime: docker
+    plan: starter
+    dockerCommand: node src/events/inbound-server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8091"
+      - key: FORGE_INBOUND_WEBHOOK_PORT
+        value: "8091"
       - key: DATABASE_URL
         sync: false
       - key: FORGE_EVENT_SECRET_KEY
