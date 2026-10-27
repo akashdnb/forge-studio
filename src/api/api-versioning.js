@@ -1,3 +1,4 @@
+require('./contract-governance').installApiContractGovernance();
 const { createHash } = require('node:crypto');
 
 const SUPPORTED_VERSIONS = Object.freeze(['1', '2']);
