@@ -41,13 +41,13 @@ function createUsageOperatorServer({ ledger, token = process.env.FORGE_USAGE_OPE
         if (body.tenantId && body.tenantId !== tenantId) throw Object.assign(new Error('tenantId cannot differ from x-tenant-id'), { statusCode: 403 });
         return send(res, 200, await ledger.reconcile({ tenantId, source: body.source, windowStart: body.windowStart, windowEnd: body.windowEnd, externalEvents: body.externalEvents || [] }));
       }
-      if (req.method === 'POST' && path[0] === 'v1' && path[1] === 'usage' && path[2] === 'adjustments') {
-        const body = await json(req);
-        return send(res, 201, await ledger.requestAdjustment({ ...body, tenantId, requestedBy: req.headers['x-actor-id'] || 'operator' }));
-      }
       if (req.method === 'POST' && path[0] === 'v1' && path[1] === 'usage' && path[2] === 'adjustments' && path[3] && path[4] === 'decision') {
         const body = await json(req);
         return send(res, 200, await ledger.decideAdjustment({ adjustmentId: path[3], approve: body.approve === true, actor: req.headers['x-actor-id'] || 'operator', note: body.note || '' }));
+      }
+      if (req.method === 'POST' && path[0] === 'v1' && path[1] === 'usage' && path[2] === 'adjustments') {
+        const body = await json(req);
+        return send(res, 201, await ledger.requestAdjustment({ ...body, tenantId, requestedBy: req.headers['x-actor-id'] || 'operator' }));
       }
       return send(res, 404, { error: { code: 'NOT_FOUND', message: 'Route not found' } });
     } catch (error) {
