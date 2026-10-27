@@ -2,14 +2,23 @@
 
 const { ArtifactIntegrityControlPlane } = require('./artifact-integrity-control-plane');
 const { verifyAndRebuildContentReference } = require('./artifact-integrity-repair');
+const { verifyArtifactManifests, rebuildArtifactIntegrityManifest } = require('./artifact-integrity-manifest-scanner');
 const { createStorageFromEnv } = require('./index');
 
 function createArtifactIntegrityHandlers({ pool, storage = createStorageFromEnv(), workerId = 'artifact-integrity-worker' } = {}) {
   if (!pool) throw new TypeError('pool is required');
   const service = () => new ArtifactIntegrityControlPlane({ pool, storage, logger: console });
   return {
-    'workflow:artifact-integrity-scan': async (payload = {}) => service().scan({ tenantId: payload.tenantId, projectId: payload.projectId || null, limit: payload.limit || Number(process.env.FORGE_ARTIFACT_INTEGRITY_SCAN_LIMIT || 100), actor: workerId }),
-    'workflow:artifact-integrity-rebuild': async (payload = {}) => verifyAndRebuildContentReference(service(), { tenantId: payload.tenantId, artifactId: payload.artifactId, actor: workerId }),
+    'workflow:artifact-integrity-scan': async (payload = {}) => {
+      const result = await service().scan({ tenantId: payload.tenantId, projectId: payload.projectId || null, limit: payload.limit || Number(process.env.FORGE_ARTIFACT_INTEGRITY_SCAN_LIMIT || 100), actor: workerId });
+      const manifests = await verifyArtifactManifests({ pool, tenantId: payload.tenantId, projectId: payload.projectId || null, limit: payload.limit || Number(process.env.FORGE_ARTIFACT_INTEGRITY_SCAN_LIMIT || 100), actor: workerId });
+      return { ...result, manifestScanned: manifests.scanned, manifestVerified: manifests.verified, manifestInvalid: manifests.invalid, encryptionMismatch: manifests.encryptionMismatch };
+    },
+    'workflow:artifact-integrity-rebuild': async (payload = {}) => {
+      const reference = await verifyAndRebuildContentReference(service(), { tenantId: payload.tenantId, artifactId: payload.artifactId, actor: workerId });
+      const manifest = await rebuildArtifactIntegrityManifest({ pool, tenantId: payload.tenantId, artifactId: payload.artifactId, actor: workerId });
+      return { ...reference, manifest };
+    },
   };
 }
 
