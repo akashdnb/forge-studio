@@ -24,10 +24,8 @@ CREATE TABLE IF NOT EXISTS forge_resource_policies (
   CHECK ((scope_type='TENANT' AND project_id IS NULL) OR (scope_type='PROJECT' AND project_id IS NOT NULL)),
   UNIQUE(scope_type, tenant_id, project_id, effective_version)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS forge_resource_policy_active_uq
-  ON forge_resource_policies(scope_type,tenant_id,COALESCE(project_id,'')) WHERE active;
-CREATE INDEX IF NOT EXISTS forge_resource_policy_lookup_idx
-  ON forge_resource_policies(tenant_id,project_id,active,effective_version DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS forge_resource_policy_active_uq ON forge_resource_policies(scope_type,tenant_id,COALESCE(project_id,'')) WHERE active;
+CREATE INDEX IF NOT EXISTS forge_resource_policy_lookup_idx ON forge_resource_policies(tenant_id,project_id,active,effective_version DESC);
 
 CREATE TABLE IF NOT EXISTS forge_resource_policy_history (
   id BIGSERIAL PRIMARY KEY,
@@ -60,14 +58,12 @@ CREATE TABLE IF NOT EXISTS forge_resource_reservations (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   UNIQUE(job_id,attempt)
 );
-CREATE INDEX IF NOT EXISTS forge_resource_reservation_scope_idx
-  ON forge_resource_reservations(tenant_id,project_id,status,expires_at);
-CREATE INDEX IF NOT EXISTS forge_resource_reservation_job_idx
-  ON forge_resource_reservations(job_id,status);
+CREATE INDEX IF NOT EXISTS forge_resource_reservation_scope_idx ON forge_resource_reservations(tenant_id,project_id,status,expires_at);
+CREATE INDEX IF NOT EXISTS forge_resource_reservation_job_idx ON forge_resource_reservations(job_id,status);
 
 CREATE TABLE IF NOT EXISTS forge_resource_usage_windows (
   tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id TEXT REFERENCES projects(id) ON DELETE RESTRICT,
+  project_id TEXT NOT NULL DEFAULT '',
   window_start TIMESTAMPTZ NOT NULL,
   cpu_ms BIGINT NOT NULL DEFAULT 0 CHECK (cpu_ms >= 0),
   jobs_completed BIGINT NOT NULL DEFAULT 0 CHECK (jobs_completed >= 0),
@@ -76,7 +72,7 @@ CREATE TABLE IF NOT EXISTS forge_resource_usage_windows (
 
 CREATE TABLE IF NOT EXISTS forge_resource_fairness (
   tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  project_id TEXT REFERENCES projects(id) ON DELETE RESTRICT,
+  project_id TEXT NOT NULL DEFAULT '',
   virtual_finish NUMERIC(30,9) NOT NULL DEFAULT 0,
   last_served_at TIMESTAMPTZ,
   served_jobs BIGINT NOT NULL DEFAULT 0,
@@ -106,7 +102,7 @@ CREATE INDEX IF NOT EXISTS forge_resource_audit_scope_idx ON forge_resource_audi
 CREATE OR REPLACE FUNCTION forge_resource_scope_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE ptenant TEXT;
 BEGIN
-  IF NEW.project_id IS NOT NULL THEN
+  IF NEW.project_id IS NOT NULL AND NEW.project_id<>'' THEN
     SELECT tenant_id INTO ptenant FROM projects WHERE id=NEW.project_id;
     IF ptenant IS NULL OR ptenant<>NEW.tenant_id THEN RAISE EXCEPTION 'resource tenant/project mismatch'; END IF;
   END IF;
@@ -120,7 +116,6 @@ CREATE TRIGGER forge_resource_reservation_scope_guard BEFORE INSERT OR UPDATE ON
 DROP TRIGGER IF EXISTS forge_resource_fairness_scope_guard ON forge_resource_fairness;
 CREATE TRIGGER forge_resource_fairness_scope_guard BEFORE INSERT OR UPDATE ON forge_resource_fairness FOR EACH ROW EXECUTE FUNCTION forge_resource_scope_guard();
 
--- Seed an unbounded tenant policy for legacy tenants. Explicit plans can replace it with an effective version.
 INSERT INTO forge_resource_policies(scope_type,tenant_id,effective_version,cpu_ms_limit,concurrency_limit,job_count_limit,queue_weight,priority_class,burst_allowance,aging_seconds,max_reservation_seconds,created_by)
 SELECT 'TENANT',t.id,1,0,100,0,1,100,0,60,3600,'migration'
 FROM tenants t
