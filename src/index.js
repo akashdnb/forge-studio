@@ -18,5 +18,7 @@ module.exports = {
   ...require('./persistence/postgres-repository'),
   ...require('./persistence/production-repository'),
   ...require('./persistence/job-queue'),
+  ...require('./persistence/api-idempotency'),
+  ...require('./persistence/idempotency-diagnostics'),
   ...require('./publishing/youtube-publisher'),
 };
