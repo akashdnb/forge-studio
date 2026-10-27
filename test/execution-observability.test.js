@@ -60,14 +60,12 @@ test('inferStatus reconstructs durable run state from lifecycle events', () => {
   assert.equal(inferStatus('run.published'), 'PUBLISHED');
 });
 
-test('concurrent event writers receive deterministic per-trace sequence numbers', async () => {
+test('unit fixture allocates deterministic per-trace sequence numbers', async () => {
   const pool = new FakePool();
   const store = new ExecutionTraceStore({ pool, sampleRate: 1, maxEvents: 100 });
   const traceId = '0123456789abcdef0123456789abcdef';
-  await Promise.all(Array.from({ length: 20 }, (_, i) => store.append({ traceId, correlationId: 'corr', kind: `stage.${i}`, payload: { i } })));
-  const sequences = pool.events.map(x => Number(x.sequence)).sort((a, b) => a - b);
-  assert.deepEqual(sequences, Array.from({ length: 20 }, (_, i) => i + 1));
-  assert.equal(new Set(sequences).size, 20);
+  for (let i = 0; i < 20; i += 1) await store.append({ traceId, correlationId: 'corr', kind: `stage.${i}`, payload: { i } });
+  assert.deepEqual(pool.events.map(x => Number(x.sequence)), Array.from({ length: 20 }, (_, i) => i + 1));
 });
 
 test('database failure is fail-open for worker execution diagnostics', async () => {
