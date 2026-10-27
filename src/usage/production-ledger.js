@@ -18,7 +18,18 @@ class ProductionUsageLedger extends ImmutableUsageLedger {
     return { valid: true, eventCount: rows.length, lastIntegrityHash: previous };
   }
 
-  async reserve(input) { return super.reserve({ ...input, currency: input.currency || 'USD' }); }
+  async reserve(input) {
+    const result = await super.reserve({ ...input, currency: input.currency || 'USD' });
+    const policyRows = (await this.pool.query(`SELECT * FROM usage_quota_policies WHERE tenant_id=$1 AND dimension=$2 AND enabled=true`, [input.tenantId, input.dimension])).rows;
+    let softExceeded = false;
+    for (const policy of policyRows) {
+      if (policy.soft_limit == null) continue;
+      const total = Number((await this.pool.query(`SELECT COALESCE(SUM(quantity),0)::numeric total FROM usage_ledger_events WHERE tenant_id=$1 AND dimension=$2 AND event_type='USAGE'`, [input.tenantId, input.dimension])).rows[0].total)
+        + Number((await this.pool.query(`SELECT COALESCE(SUM(quantity),0)::numeric total FROM usage_quota_reservations WHERE tenant_id=$1 AND dimension=$2 AND status='HELD' AND expires_at>now()`, [input.tenantId, input.dimension])).rows[0].total);
+      if (total > Number(policy.soft_limit)) softExceeded = true;
+    }
+    return { ...result, softExceeded };
+  }
 
   async decideAdjustment({ adjustmentId, approve, actor, note = '' }) {
     return this.tx(async (c) => {
@@ -29,6 +40,18 @@ class ProductionUsageLedger extends ImmutableUsageLedger {
       const result = await this._append(c, { tenantId: row.tenant_id, projectId: row.project_id, dimension: 'billing-adjustment', quantity: 0, unit: 'adjustment', rate: 0, amount: Number(row.amount), currency: row.currency, pricingVersion: 'adjustment', providerType: 'billing', provider: 'forge', operation: 'adjustment', eventType: 'ADJUSTMENT', source: 'operator', idempotencyKey: `adjustment:${adjustmentId}`, metadata: { adjustmentId, actor, reason: row.reason, targetEventId: row.target_event_id } });
       return (await c.query(`UPDATE usage_adjustment_requests SET status='APPLIED',approved_by=$2,approval_note=$3,applied_event_id=$4,decided_at=now() WHERE adjustment_id=$1 RETURNING *`, [adjustmentId, actor, note, result.event.event_id])).rows[0];
     });
+  }
+
+  async expireReservations({ limit = 100 } = {}) {
+    const rows = (await this.pool.query(`SELECT * FROM usage_quota_reservations WHERE status='HELD' AND expires_at < now() ORDER BY expires_at LIMIT $1`, [limit])).rows;
+    let expired = 0;
+    for (const row of rows) await this.tx(async (c) => {
+      const current = (await c.query('SELECT * FROM usage_quota_reservations WHERE reservation_id=$1 FOR UPDATE', [row.reservation_id])).rows[0];
+      if (!current || current.status !== 'HELD') return;
+      const event = await this._append(c, { tenantId: current.tenant_id, projectId: current.project_id, runId: current.run_id, dimension: current.dimension, quantity: 0, unit: current.dimension, rate: 0, amount: 0, currency: current.currency || 'USD', pricingVersion: 'reservation-release', providerType: 'quota', provider: 'forge', operation: 'expire', eventType: 'RELEASE', source: 'quota-recovery', idempotencyKey: `reservation-expire:${current.reservation_id}`, metadata: { reason: 'ttl_expired' } });
+      await c.query(`UPDATE usage_quota_reservations SET status='EXPIRED',released_event_id=$2 WHERE reservation_id=$1 AND status='HELD'`, [current.reservation_id, event.event.event_id]); expired += 1;
+    });
+    return { expired };
   }
 
   async refreshRollup({ tenantId, periodStart, periodEnd, dimension, currency, recalculationVersion = 1 }) {
