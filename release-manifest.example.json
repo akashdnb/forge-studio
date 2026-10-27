@@ -1,0 +1,15 @@
+{
+  "releaseId": "forge-0.7.0-CHANGE_ME",
+  "commitSha": "CHANGE_ME",
+  "appVersion": "0.7.0",
+  "schemaVersion": "009",
+  "minSchemaVersion": "009",
+  "maxSchemaVersion": "009",
+  "compatibilityWindow": { "workerSchema": ["009"] },
+  "requiredConfig": { "DATABASE_URL": true },
+  "requiredIndexes": ["forge_release_manifests_status_idx", "forge_worker_fences_release_idx"],
+  "featureFlags": {},
+  "workerContracts": { "payloadVersion": "forge-job-v1" },
+  "dependencyRequirements": {},
+  "rollbackPolicy": { "mode": "CLASSIFY", "immutableArtifacts": true, "requiresForwardSchema": true }
+}
