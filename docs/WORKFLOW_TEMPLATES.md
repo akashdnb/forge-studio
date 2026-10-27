@@ -31,19 +31,24 @@ Jobs carry `executionPlanId`, `planStageId`, `templateVersionId`, tenant identit
 - `POST /v1/workflow-templates/:templateId/deactivate` — disable the template.
 - `POST /v1/workflow-templates/:templateId/rollback` — activate a prior immutable version.
 - `GET /v1/workflow-templates/:templateId/diff?from=<version>&to=<version>` — inspect definition changes.
+- `POST /v1/workflow-templates/:versionId/migrate-queued` — migrate queued jobs only after full stage compatibility validation.
 - `GET /v1/execution-plans/:planId` — inspect the compiled snapshot and stage state.
 - `POST /v1/execution-plans/:planId/dispatch` — operator re-dispatch of a compatible queued plan.
+- `POST /v1/execution-plans/:planId/stages/:stageId/approval` — persist an approval/decision gate against a concrete output version.
 
 Mutations require the existing authenticated API boundary. `X-Tenant-Id` may be supplied by a trusted identity gateway; otherwise the API uses the actor identifier, matching the current project tenancy backfill.
 
 ## Operational controls
 
-Activate only after dry-run validation and a release preflight. Rollback changes the active pointer; it never rewrites a version or an in-flight execution snapshot. A queued job must retain the original template version unless an explicit compatibility migration is implemented and audited.
+Activate only after dry-run validation and a release preflight. Rollback changes the active pointer; it never rewrites a version or an in-flight execution snapshot. Queued-job migration is transactional: every queued job must have the same stage ID, runtime stage, capability, input/output contracts and retry policy in the target version or the migration is rejected before any update.
+
+Approval-required stages remain blocked until a durable approval record exists for the plan stage and target version. QA/publish stages therefore participate in the same frozen plan rather than bypassing existing release gates.
 
 Useful diagnostics:
 
 - `forge_workflow_templates`, `forge_workflow_template_versions` and `forge_workflow_template_events` for template lifecycle.
 - `forge_execution_plans` / `forge_execution_plan_stages` for frozen execution state.
+- `approvals` for durable execution-plan gates.
 - `forge_jobs` for durable dispatch, leases, retries and budget admission.
 - `audit_events` for plan compilation and existing provenance evidence.
 
@@ -56,6 +61,8 @@ Recommended alerts/metrics:
 - plan/job retry and timeout rates;
 - tenant-isolation failures;
 - template-version/job hash mismatches.
+
+The runtime metrics hook exports `forge_workflow_template_{validation,activation,plan_compile,plan_dispatch}_total` and matching duration histograms through the existing Prometheus-compatible observability registry.
 
 ## Configuration
 
