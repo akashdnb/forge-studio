@@ -53,4 +53,30 @@ CREATE TRIGGER provider_run_disabled_guard
 BEFORE INSERT OR UPDATE OF provider ON provider_runs
 FOR EACH ROW EXECUTE FUNCTION forge_guard_disabled_provider();
 
+CREATE OR REPLACE FUNCTION forge_apply_worker_control() RETURNS trigger AS $$
+BEGIN
+  IF NEW.resource_type='worker' AND NEW.enabled=false THEN
+    UPDATE forge_jobs j
+       SET status='QUEUED',
+           worker_id='FENCED:' || NEW.resource_id || ':' || NEW.updated_at::text,
+           leased_until=NULL,
+           dispatch_token=NULL,
+           dispatch_generation=dispatch_generation+1,
+           available_at=now(),
+           updated_at=now(),
+           last_schedule_reason=NEW.reason
+     FROM projects p
+    WHERE j.status='RUNNING'
+      AND j.worker_id=NEW.resource_id
+      AND j.project_id=p.id
+      AND p.tenant_id=NEW.tenant_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS worker_control_fence ON ops_controls;
+CREATE TRIGGER worker_control_fence
+AFTER INSERT OR UPDATE OF enabled,reason ON ops_controls
+FOR EACH ROW EXECUTE FUNCTION forge_apply_worker_control();
+
 COMMIT;
