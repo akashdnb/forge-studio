@@ -1,0 +1,53 @@
+name: Forge PostgreSQL Hardening
+
+on:
+  pull_request:
+    paths:
+      - 'migrations/**'
+      - 'src/persistence/**'
+      - 'scripts/verify-database-hardening.js'
+      - 'test/**'
+      - '.github/workflows/db-hardening.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'migrations/**'
+      - 'src/persistence/**'
+      - 'scripts/verify-database-hardening.js'
+      - 'test/**'
+      - '.github/workflows/db-hardening.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: forge
+          POSTGRES_USER: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://forge:forge@localhost:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: npm run migrate
+      - run: node --test test/database-hardening.test.js test/postgres-integrity.integration.test.js
+      - run: node scripts/verify-database-hardening.js
