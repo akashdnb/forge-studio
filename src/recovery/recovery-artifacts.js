@@ -1,0 +1,65 @@
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const { pipeline } = require('node:stream/promises');
+const { Writable, Readable } = require('node:stream');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const execFileAsync = promisify(execFile);
+
+function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+async function fileSha256(file) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(file), new Writable({ write(chunk, _encoding, cb) { hash.update(chunk); cb(); } }));
+  return hash.digest('hex');
+}
+
+class RecoveryArtifactArchive {
+  constructor({ storage, pool, backupDir = process.env.FORGE_BACKUP_DIR || '.forge-backups', maxBytes = 512 * 1024 * 1024, concurrency = 4, commandRunner = execFileAsync }) {
+    if (!storage?.download || !storage?.upload) throw new TypeError('storage backend with download/upload is required');
+    this.storage = storage; this.pool = pool; this.backupDir = path.resolve(backupDir); this.maxBytes = maxBytes; this.concurrency = Math.max(1, Math.min(16, Number(concurrency) || 4)); this.commandRunner = commandRunner;
+  }
+  async listArtifacts(tenantId) {
+    const result = await this.pool.query(`SELECT a.id,a.episode_id,a.kind,a.version_id,a.content_hash,a.media_type,a.input_version_ids,e.project_id,p.tenant_id,s.storage_key,s.content_hash AS stored_hash,s.size_bytes FROM artifacts a JOIN episodes e ON e.id=a.episode_id JOIN projects p ON p.id=e.project_id LEFT JOIN storage_objects s ON s.artifact_id=a.id WHERE p.tenant_id=$1 ORDER BY a.id`, [tenantId]);
+    return result.rows;
+  }
+  async snapshot({ tenantId, backupId, signal }) {
+    const rows = await this.listArtifacts(tenantId);
+    const root = path.join(this.backupDir, `${backupId}.artifacts`); await fsp.mkdir(root, { recursive: true, mode: 0o700 });
+    const manifest = []; let totalBytes = 0; let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' });
+        const index = cursor++; if (index >= rows.length) return;
+        const row = rows[index]; if (!row.storage_key || !row.content_hash) throw Object.assign(new Error(`artifact ${row.id} has no trusted content-addressed storage record`), { code: 'ARTIFACT_UNBACKUPABLE' });
+        const object = await this.storage.download({ key: row.storage_key, expectedSha256: row.content_hash, maxBytes: this.maxBytes });
+        const safe = `${row.content_hash}.bin`; const file = path.join(root, safe); await pipeline(object.stream, fs.createWriteStream(file, { flags: 'wx', mode: 0o600 }));
+        const stat = await fsp.stat(file); totalBytes += stat.size; if (totalBytes > this.maxBytes) throw Object.assign(new Error('artifact backup exceeds configured byte bound'), { code: 'ARTIFACT_BACKUP_TOO_LARGE' });
+        manifest[index] = { id: row.id, projectId: row.project_id, tenantId: row.tenant_id, episodeId: row.episode_id, versionId: row.version_id, kind: row.kind, mediaType: row.media_type || 'application/octet-stream', storageKey: row.storage_key, contentHash: row.content_hash, storedHash: row.stored_hash, sizeBytes: stat.size, file: safe };
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker));
+    manifest.sort((a, b) => a.id.localeCompare(b.id));
+    const manifestPath = path.join(root, 'manifest.json'); await fsp.writeFile(manifestPath, JSON.stringify({ format: 'forge-artifacts-v1', backupId, tenantId, artifacts: manifest, root: sha256(JSON.stringify(manifest)) }, null, 2), { mode: 0o600 });
+    const archive = path.join(this.backupDir, `${backupId}.artifacts.tar.gz`);
+    await this.commandRunner('tar', ['-czf', archive, '-C', root, '.']);
+    const info = await fsp.stat(archive); const archiveSha256 = await fileSha256(archive); await fsp.rm(root, { recursive: true, force: true });
+    return { archive, archiveSha256, bytes: info.size, artifactBytes: totalBytes, manifest, root: sha256(JSON.stringify(manifest)) };
+  }
+  async extract(archive) {
+    const root = path.join(this.backupDir, `.artifact-restore-${crypto.randomUUID()}`); await fsp.mkdir(root, { recursive: true, mode: 0o700 });
+    try { await this.commandRunner('tar', ['-xzf', archive, '-C', root]); const manifest = JSON.parse(await fsp.readFile(path.join(root, 'manifest.json'), 'utf8')); if (manifest.format !== 'forge-artifacts-v1') throw Object.assign(new Error('unsupported artifact backup format'), { code: 'INCOMPATIBLE_ARTIFACT_FORMAT' }); if (sha256(JSON.stringify(manifest.artifacts)) !== manifest.root) throw Object.assign(new Error('artifact manifest checksum mismatch'), { code: 'ARTIFACT_MANIFEST_CORRUPT' }); return { root, manifest }; }
+    catch (error) { await fsp.rm(root, { recursive: true, force: true }); throw error; }
+  }
+  async restore({ archive, targetStorage, tenantId, signal }) {
+    if (!targetStorage?.upload) throw new TypeError('isolated target storage is required');
+    const extracted = await this.extract(archive); let cursor = 0; const rows = extracted.manifest.artifacts.filter((item) => item.tenantId === tenantId); const worker = async () => {
+      while (true) { if (signal?.aborted) throw Object.assign(new Error('Recovery operation cancelled'), { code: 'CANCELLED' }); const index = cursor++; if (index >= rows.length) return; const item = rows[index]; const file = path.join(extracted.root, item.file); const actual = await fileSha256(file); if (actual !== item.contentHash) throw Object.assign(new Error(`artifact ${item.id} checksum mismatch during restore`), { code: 'CHECKSUM_MISMATCH' }); const result = await targetStorage.upload({ stream: fs.createReadStream(file), tenantId: item.tenantId, projectId: item.projectId, kind: item.kind, contentType: item.mediaType, expectedSha256: item.contentHash, metadata: { recoveryBackup: extracted.manifest.backupId, immutableContentHash: item.contentHash } }); if (result.sha256 !== item.contentHash) throw Object.assign(new Error(`artifact ${item.id} restored under a different content identity`), { code: 'CHECKSUM_MISMATCH' }); }
+    };
+    try { await Promise.all(Array.from({ length: Math.min(this.concurrency, Math.max(1, rows.length)) }, worker)); return { restored: rows.length, root: extracted.manifest.root }; }
+    finally { await fsp.rm(extracted.root, { recursive: true, force: true }).catch(() => {}); }
+  }
+}
+
+module.exports = { RecoveryArtifactArchive, sha256, fileSha256 };
