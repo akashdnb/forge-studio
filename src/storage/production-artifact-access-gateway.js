@@ -34,6 +34,10 @@ class ProductionArtifactAccessGateway extends ArtifactAccessGateway {
     }
     return this._authorize(artifactId, { actor, action, purpose, recovery });
   }
+
+  async _audit(artifact, actor, action, details) {
+    await this.repository.db.pool.query(`INSERT INTO audit_events(project_id,episode_id,actor,action,target_type,target_id,details) VALUES($1,$2,$3,$4,'artifact',$5,$6::jsonb)`, [artifact.project_id, artifact.episode_id, actor, action, artifact.id, JSON.stringify({ ...details, artifactVersionId: artifact.version_id })]);
+  }
 }
 
 module.exports = { ProductionArtifactAccessGateway };
