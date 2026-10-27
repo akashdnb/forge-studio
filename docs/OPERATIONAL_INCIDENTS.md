@@ -140,4 +140,4 @@ Stop rollout on failed/blocked checkpoints. Use release-safety preflight, schema
 - `FORGE_OPS_PG_POOL_MAX` — operations API pool size.
 - Existing durable event delivery settings continue to control webhook retries, leases, timeout and concurrency.
 
-Migration `022_operational_incidents.sql` must be applied before enabling the worker detector in production.
+Migration `023_operational_incidents.sql` must be applied before enabling the worker detector in production.
