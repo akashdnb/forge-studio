@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { SecretCipher } = require('../src/runtime/runtime-policy');
 const { CredentialAccessService } = require('../src/providers/credential-access-service');
 const { ProviderCredentialRegistry, confirmToken } = require('../src/providers/credential-registry');
+const { ProviderContractService } = require('../src/providers/provider-contract-service');
 
 function key() { return Buffer.alloc(32, 9).toString('base64'); }
 
@@ -15,10 +16,12 @@ if (process.env.FORGE_CREDENTIAL_ACCESS_INTEGRATION === 'true') {
     const cipher = new SecretCipher(key());
     const access = new CredentialAccessService({ pool, secretCipher:cipher, signingSecret:'credential-access-test-signing-secret', region:'test-region', executionEpoch:'test-epoch' });
     const registry = new ProviderCredentialRegistry({ pool, secretCipher:cipher });
+    const contracts = new ProviderContractService({ pool, signingSecret:'provider-contract-test-signing-secret' });
     const tenantA=`credential-access-a-${Date.now()}`; const tenantB=`credential-access-b-${Date.now()}`;
     await pool.query("INSERT INTO tenants(id,name,created_by) VALUES($1,$2,'credential-access-test'),($3,$4,'credential-access-test')",[tenantA,'credential-access-a',tenantB,'credential-access-b']);
     try {
       await registry.upsertCapability({provider:'access-test-provider',capability:'text-generation',model:'test-model',actor:'credential-access-test'});
+      await contracts.upsert({actor:'credential-access-test',contract:{provider:'access-test-provider',contractVersion:'1',capability:'text-generation',operations:['script'],models:['test-model'],regions:['test-region'],credentialRequirements:{capabilities:['text-generation']}}});
       const created=await registry.create({tenantId:tenantA,provider:'access-test-provider',credentialName:'default',material:{apiKey:'tenant-a-secret'},capabilities:[{capability:'text-generation',model:'test-model'}],actor:'credential-access-test'});
       const base={tenantId:tenantA,provider:'access-test-provider',model:'test-model',purpose:'workflow:script',capability:'text-generation',operation:'script',workflowId:'wf-1',jobId:'job-1',attemptId:'attempt-1'};
       const [a,b]=await Promise.all([access.acquire(base),access.acquire(base)]);
@@ -52,6 +55,8 @@ if (process.env.FORGE_CREDENTIAL_ACCESS_INTEGRATION === 'true') {
       await pool.query('DELETE FROM forge_provider_credential_audit WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
       await pool.query('DELETE FROM forge_provider_credentials WHERE tenant_id IN ($1,$2)',[tenantA,tenantB]);
       await pool.query('DELETE FROM tenants WHERE id IN ($1,$2)',[tenantA,tenantB]);
+      await pool.query("DELETE FROM forge_provider_contracts WHERE provider='access-test-provider'");
+      await pool.query("DELETE FROM forge_provider_capabilities WHERE provider='access-test-provider'");
       await pool.end();
     }
   });
