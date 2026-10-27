@@ -37,7 +37,7 @@ const RETENTION_PAGE_SQL = `SELECT id FROM usage_events
 
 function assertBoundedQueryShape(sql, { allowOffset = false } = {}) {
   const normalized = sql.replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!/\blimit\s+\$\d+\b/.test(normalized)) throw new Error('Critical query must have a bound LIMIT');
+  if (!/\blimit\s+(\$\d+|\d+)\b/.test(normalized)) throw new Error('Critical query must have a bound LIMIT');
   if (!allowOffset && /\boffset\s+\$\d+\b/.test(normalized)) throw new Error('Critical query must use keyset pagination, not OFFSET');
   return true;
 }
