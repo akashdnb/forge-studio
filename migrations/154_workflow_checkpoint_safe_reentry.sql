@@ -22,11 +22,11 @@ ALTER TABLE forge_workflow_checkpoints
   ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 UPDATE forge_workflow_checkpoints c
-SET checkpoint_epoch=c.execution_epoch,
-    release_epoch=p.release_epoch,
-    execution_snapshot_id=p.execution_snapshot_id
+SET checkpoint_epoch=COALESCE(c.checkpoint_epoch,c.execution_epoch),
+    release_epoch=COALESCE(c.release_epoch,p.release_epoch),
+    execution_snapshot_id=COALESCE(c.execution_snapshot_id,p.execution_snapshot_id)
 FROM forge_execution_plans p
-WHERE p.id=c.plan_id AND c.checkpoint_epoch IS NULL;
+WHERE p.id=c.plan_id AND (c.checkpoint_epoch IS NULL OR c.release_epoch IS NULL OR c.execution_snapshot_id IS NULL);
 
 ALTER TABLE forge_workflow_checkpoints ALTER COLUMN checkpoint_epoch SET NOT NULL;
 
