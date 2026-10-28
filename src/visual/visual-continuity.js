@@ -105,12 +105,32 @@ function buildContinuity(scenes) {
   return { scenes: result, warnings, anchors: Object.fromEntries([...entityState.entries()].sort(([a],[b]) => a.localeCompare(b))) };
 }
 
+function candidateValue(candidate, key) {
+  if (candidate == null || typeof candidate !== 'object') return null;
+  if (candidate[key] !== undefined && candidate[key] !== null && candidate[key] !== '') return candidate[key];
+  if (candidate.continuityAnchors?.[key] !== undefined && candidate.continuityAnchors?.[key] !== null && candidate.continuityAnchors?.[key] !== '') return candidate.continuityAnchors[key];
+  if (candidate.metadata?.[key] !== undefined && candidate.metadata?.[key] !== null && candidate.metadata?.[key] !== '') return candidate.metadata[key];
+  if (candidate.metadata?.continuityAnchors?.[key] !== undefined && candidate.metadata?.continuityAnchors?.[key] !== null && candidate.metadata?.continuityAnchors?.[key] !== '') return candidate.metadata.continuityAnchors[key];
+  return null;
+}
+function comparableValue(value) {
+  if (value && typeof value === 'object') return String(firstDefined(value.entityId, value.id, value.label, value.name, '')).toLowerCase();
+  return value == null ? '' : String(value).toLowerCase();
+}
+function continuityScore(candidate, requirement, priorShot = null) {
+  const anchors = { ...(priorShot?.continuityAnchors || {}), ...(requirement.continuityAnchors || {}) };
+  const keys = ['subject', 'location', 'style', 'lighting', 'palette'];
+  const comparable = keys.map((key) => [key, comparableValue(anchors[key]), comparableValue(candidateValue(candidate, key))]).filter(([, expected, actual]) => expected && actual);
+  if (!comparable.length) return priorShot && candidateValue(candidate, 'location') && comparableValue(candidateValue(candidate, 'location')) === comparableValue(priorShot.location) ? 1 : 0.5;
+  const matches = comparable.filter(([, expected, actual]) => expected === actual).length;
+  return Number((matches / comparable.length).toFixed(6));
+}
 function candidateScore(candidate, requirement, usedIds = new Set(), priorShot = null) {
   const haystack = tokens([candidate.description, candidate.prompt, candidate.subject, candidate.location, ...(candidate.tags || []), candidate.role].join(' '));
   const wanted = tokens([requirement.narrationText, requirement.intent, requirement.location, ...(requirement.roles || [])].join(' '));
   const overlap = wanted.length ? wanted.filter((word) => haystack.includes(word)).length / wanted.length : 0;
   const role = requirement.roles?.some((r) => String(candidate.role || '').toUpperCase() === String(r).toUpperCase()) ? 1 : 0;
-  const continuity = priorShot && candidate.location && priorShot.location && String(candidate.location) === String(priorShot.location) ? 1 : 0.5;
+  const continuity = continuityScore(candidate, requirement, priorShot);
   const duration = candidate.durationSeconds ? Math.min(1, Number(candidate.durationSeconds) / Math.max(0.25, requirement.durationSeconds || 1)) : 0.5;
   const repetitionPenalty = usedIds.has(candidate.id) ? 1 : 0;
   return Number((overlap * 0.45 + role * 0.2 + continuity * 0.15 + duration * 0.1 - repetitionPenalty * 0.1).toFixed(6));
@@ -125,7 +145,7 @@ function selectBroll({ scenes, assets = [] }) {
     const rule = inferBrollRule(`${narrationText} ${intent}`);
     for (const shot of scene.shots) {
       if (!['B_ROLL','CUTAWAY','DETAIL','ESTABLISHING','SCREEN','ARCHIVAL','MONTAGE'].includes(shot.shotType) && !shot.brollCoverage.length) continue;
-      const requirement = { narrationText, intent, location: shot.location, roles: [...rule.roles, ...shot.brollCoverage], durationSeconds: shot.durationSeconds };
+      const requirement = { narrationText, intent, location: shot.location, roles: [...rule.roles, ...shot.brollCoverage], durationSeconds: shot.durationSeconds, continuityAnchors: shot.continuityAnchors };
       const ranked = assets.map((asset) => ({ asset, score: candidateScore(asset, requirement, used, shot) })).sort((a, b) => b.score - a.score || String(a.asset.id).localeCompare(String(b.asset.id)));
       const best = ranked.find((entry) => entry.score >= 0.2 && !used.has(entry.asset.id)) || ranked.find((entry) => entry.score >= 0.15) || null;
       const selection = { sceneId: scene.id, shotId: shot.id, requirement, rule: rule.roles, selectedAssetId: best?.asset.id || null, suitabilityScore: best?.score || 0, ranked: ranked.slice(0, 5).map((entry) => ({ assetId: entry.asset.id, score: entry.score })) };
@@ -154,7 +174,7 @@ function buildVisualRecipe({ episodeId, scenePlanVersionId, plan, assets = [], n
 }
 
 function scoreAssets(assets, requirement) {
-  return assets.map((asset) => ({ id: asset.id, versionId: asset.versionId, score: candidateScore(asset, requirement), reason: { semantic: tokens([asset.description, asset.prompt, asset.subject, ...(asset.tags || [])].join(' ')).filter((t) => tokens(requirement.narrationText).includes(t)).length, role: asset.role || null, continuity: asset.location === requirement.location ? 1 : 0 }, contentHash: asset.contentHash || null })).sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
+  return assets.map((asset) => ({ id: asset.id, versionId: asset.versionId, score: candidateScore(asset, requirement), reason: { semantic: tokens([asset.description, asset.prompt, asset.subject, ...(asset.tags || [])].join(' ')).filter((t) => tokens(requirement.narrationText).includes(t)).length, role: asset.role || null, continuity: continuityScore(asset, requirement), }, contentHash: asset.contentHash || null })).sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
 }
 
 function applyRecipeToTimeline(timeline, recipe, assetById = new Map()) {
