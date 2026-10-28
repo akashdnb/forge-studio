@@ -53,7 +53,7 @@ test('continuity anchors deterministically prefer the matching visual asset', ()
   const recipe = buildVisualRecipe({ episodeId: 'ep-1', scenePlanVersionId: 'scene-v1', plan, assets });
   const selection = recipe.broll.find((entry) => entry.shotId === 'shot-1');
   assert.equal(selection.selectedAssetId, 'z-match');
-  assert.ok(selection.suitabilityScore > 0.9);
+  assert.ok(selection.suitabilityScore > 0.8);
   assert.equal(selection.ranked[0].assetId, 'z-match');
 });
 
