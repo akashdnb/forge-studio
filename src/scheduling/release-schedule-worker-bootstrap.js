@@ -1,21 +1,65 @@
 'use strict';
 
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { WorkflowScheduler } = require('./workflow-scheduler');
 const { JobQueue } = require('../persistence/job-queue');
 const { PublishService } = require('../publishing/publish-service');
 const { createReleaseScheduleService } = require('./release-scheduler');
+const { enqueueMissingReleaseJob } = require('./release-schedule-reconciliation-fence');
 
 const INSTALLED = Symbol.for('forge.release.schedule.worker.installed');
 if (!WorkflowScheduler.prototype[INSTALLED]) {
   const originalHeartbeat = WorkflowScheduler.prototype.heartbeat;
   const schedulerServices = new WeakMap();
+  const schedulerContexts = new WeakMap();
   WorkflowScheduler.prototype.heartbeat = async function releaseScheduleHeartbeat(...args) {
     const result = await originalHeartbeat.apply(this, args);
     let service = schedulerServices.get(this);
-    if (!service) { service = createReleaseScheduleService({ pool: this.pool, queue: this.queue, workerId: `${this.schedulerId}:release-calendar` }); schedulerServices.set(this, service); }
+    let context = schedulerContexts.get(this);
+    if (!service) {
+      context = new AsyncLocalStorage();
+      const pool = this.pool;
+      const poolProxy = {
+        query: (...queryArgs) => {
+          const store = context.getStore();
+          return (store?.client || pool).query(...queryArgs);
+        },
+        connect: (...connectArgs) => pool.connect(...connectArgs),
+      };
+      let queueProxy;
+      service = createReleaseScheduleService({
+        pool: poolProxy,
+        queue: (queueProxy = {
+          enqueue: (...enqueueArgs) => {
+            const [request] = enqueueArgs;
+            const store = context.getStore();
+            if (store?.mode === 'reconcile' && request?.kind === 'publish:scheduled' && request?.payload?.releaseExecutionId) {
+              return enqueueMissingReleaseJob({
+                pool,
+                queue: this.queue,
+                gate: service.gate,
+                transactionContext: context,
+                row: { id: request.payload.releaseExecutionId },
+                workerId: request.createdBy || `${this.schedulerId}:release-calendar`,
+                priority: Number(request.priority ?? 100),
+              }).then((result) => {
+                if (result.outcome === 'ENQUEUED') return result.job;
+                if (result.outcome === 'STALE') throw Object.assign(new Error('release gate changed during reconciliation job insertion'), { code: 'GATE_CHANGED', retryable: false });
+                if (result.outcome === 'RETRY') throw result.error;
+                throw Object.assign(new Error('reconciliation enqueue lost its execution fence'), { code: 'RECONCILIATION_RACE', retryable: true });
+              });
+            }
+            return this.queue.enqueue(...enqueueArgs);
+          },
+        }),
+        workerId: `${this.schedulerId}:release-calendar`,
+      });
+      schedulerServices.set(this, service);
+      schedulerContexts.set(this, context);
+    }
     try {
       const tick = await service.tick({ limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_TICK_LIMIT || '25', 10) });
-      const reconciliation = await service.reconcile({ limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_RECONCILE_LIMIT || '100', 10) });
+      const reconciliation = await context.run({ mode: 'reconcile' }, () => service.reconcile({ limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_RECONCILE_LIMIT || '100', 10) }));
       this.releaseCalendarLastRun = { at: new Date().toISOString(), tick, reconciliation };
     } catch (error) {
       this.releaseCalendarLastError = { at: new Date().toISOString(), code: error.code || 'RELEASE_SCHEDULER_ERROR', message: error.message };
