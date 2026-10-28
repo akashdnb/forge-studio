@@ -11,8 +11,10 @@ const DEPENDENCIES = Object.freeze({
   TIMELINE: ['SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS'], CAPTIONS: ['TIMELINE'],
   RENDER: ['TIMELINE', 'CAPTIONS'], QA: ['RENDER'], PACKAGING: ['QA'], PUBLISH: ['PACKAGING'],
 });
-const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [stage, `workflow:${stage.toLowerCase()}`])));
-STAGE_KIND.TIMELINE = 'workflow:timeline-manifest';
+const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [
+  stage,
+  stage === 'TIMELINE' ? 'workflow:timeline-manifest' : `workflow:${stage.toLowerCase()}`,
+])));
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
 function validateStages(stages) {
@@ -130,7 +132,7 @@ class EpisodeWorkflowIntegration {
       WHERE workflow_id=$2 AND stage=$3 AND job_id=$4 AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') RETURNING *`, [JSON.stringify(this.#error(error)), workflowId, stage, job.id]);
     if (!updated.rows[0]) return { duplicate: true };
     await this.pool.query(`UPDATE episode_workflows SET status='FAILED',failure_stage=$1,failure=$2::jsonb,updated_at=now()
-      WHERE id=$3 AND status NOT IN ('SUCCEEDED','CANCELLED')`, [stage, JSON.stringify(this.#error(error)), workflowId]);
+      WHERE id=$3 AND status NOT IN ('CANCELLED','FAILED')`, [stage, JSON.stringify(this.#error(error)), workflowId]);
     await this.#advanceEpisode(episodeId, stage, 'FAILED', error?.message || String(error));
     await this.#audit(episodeId, projectId, 'workflow', 'WORKFLOW_STAGE_FAILED', job.id, { workflowId, stage, error: this.#error(error) });
     return { accepted: true };
