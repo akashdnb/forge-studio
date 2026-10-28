@@ -24,9 +24,7 @@ function stableJson(value) {
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
 }
-function tokens(text) {
-  return [...new Set(String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(/\s+/).filter(Boolean).filter((word) => !STOPWORDS.has(word)))];
-}
+function tokens(text) { return [...new Set(String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(/\s+/).filter(Boolean).filter((word) => !STOPWORDS.has(word)))]; }
 function asArray(value) { return Array.isArray(value) ? value : value == null ? [] : [value]; }
 function firstDefined(...values) { return values.find((value) => value !== undefined && value !== null && value !== ''); }
 function normaliseSubject(value) {
@@ -61,14 +59,12 @@ function normaliseShot(raw, scene, index, previous) {
   if (subject) shot.continuityAnchors.subject = subject.entityId;
   return shot;
 }
-
 function normaliseScenes(plan) {
   const root = plan?.scenePlan || plan?.plan || plan || {};
   const scenes = asArray(root.scenes?.length ? root.scenes : root.sceneList?.length ? root.sceneList : root.sequence);
   if (!scenes.length && Array.isArray(root.shots)) return [{ id: 'scene-1', narrationText: root.narrationText || '', intent: root.intent || '', shots: root.shots }];
   return scenes.map((scene, index) => ({ ...scene, id: String(firstDefined(scene.id, scene.sceneId, `scene-${index + 1}`)), shots: asArray(scene.shots?.length ? scene.shots : scene.shotList?.length ? scene.shotList : scene.coverage) }));
 }
-
 function buildContinuity(scenes) {
   const entityState = new Map();
   const locationState = new Map();
@@ -104,7 +100,6 @@ function buildContinuity(scenes) {
   }
   return { scenes: result, warnings, anchors: Object.fromEntries([...entityState.entries()].sort(([a],[b]) => a.localeCompare(b))) };
 }
-
 function candidateValue(candidate, key) {
   if (candidate == null || typeof candidate !== 'object') return null;
   if (candidate[key] !== undefined && candidate[key] !== null && candidate[key] !== '') return candidate[key];
@@ -113,10 +108,7 @@ function candidateValue(candidate, key) {
   if (candidate.metadata?.continuityAnchors?.[key] !== undefined && candidate.metadata?.continuityAnchors?.[key] !== null && candidate.metadata?.continuityAnchors?.[key] !== '') return candidate.metadata.continuityAnchors[key];
   return null;
 }
-function comparableValue(value) {
-  if (value && typeof value === 'object') return String(firstDefined(value.entityId, value.id, value.label, value.name, '')).toLowerCase();
-  return value == null ? '' : String(value).toLowerCase();
-}
+function comparableValue(value) { if (value && typeof value === 'object') return String(firstDefined(value.entityId, value.id, value.label, value.name, '')).toLowerCase(); return value == null ? '' : String(value).toLowerCase(); }
 function continuityScore(candidate, requirement, priorShot = null) {
   const anchors = { ...(priorShot?.continuityAnchors || {}), ...(requirement.continuityAnchors || {}) };
   const keys = ['subject', 'location', 'style', 'lighting', 'palette'];
@@ -125,7 +117,16 @@ function continuityScore(candidate, requirement, priorShot = null) {
   const matches = comparable.filter(([, expected, actual]) => expected === actual).length;
   return Number((matches / comparable.length).toFixed(6));
 }
+function hasContinuityConflict(candidate, requirement, priorShot = null) {
+  const anchors = { ...(priorShot?.continuityAnchors || {}), ...(requirement.continuityAnchors || {}) };
+  return ['subject', 'location', 'style', 'lighting', 'palette'].some((key) => {
+    const expected = comparableValue(anchors[key]);
+    const actual = comparableValue(candidateValue(candidate, key));
+    return expected && actual && expected !== actual;
+  });
+}
 function candidateScore(candidate, requirement, usedIds = new Set(), priorShot = null) {
+  if (hasContinuityConflict(candidate, requirement, priorShot)) return -1;
   const haystack = tokens([candidate.description, candidate.prompt, candidate.subject, candidate.location, ...(candidate.tags || []), candidate.role].join(' '));
   const wanted = tokens([requirement.narrationText, requirement.intent, requirement.location, ...(requirement.roles || [])].join(' '));
   const overlap = wanted.length ? wanted.filter((word) => haystack.includes(word)).length / wanted.length : 0;
@@ -135,7 +136,6 @@ function candidateScore(candidate, requirement, usedIds = new Set(), priorShot =
   const repetitionPenalty = usedIds.has(candidate.id) ? 1 : 0;
   return Number((overlap * 0.45 + role * 0.2 + continuity * 0.15 + duration * 0.1 - repetitionPenalty * 0.1).toFixed(6));
 }
-
 function selectBroll({ scenes, assets = [] }) {
   const used = new Set();
   const selections = [];
@@ -156,46 +156,27 @@ function selectBroll({ scenes, assets = [] }) {
   }
   return selections;
 }
-
 function buildVisualRecipe({ episodeId, scenePlanVersionId, plan, assets = [], narrationVersionIds = [] }) {
   const scenes = normaliseScenes(plan);
   const continuity = buildContinuity(scenes);
   const broll = selectBroll({ scenes: continuity.scenes, assets });
   const recipeInput = { episodeId, scenePlanVersionId, plan, assets: assets.map((asset) => ({ id: asset.id, versionId: asset.versionId, contentHash: asset.contentHash, metadata: asset.metadata || {} })), narrationVersionIds };
-  return {
-    recipeVersion: RECIPE_VERSION,
-    recipeFingerprint: sha256(recipeInput),
-    deterministicInputs: { scenePlanVersionId, narrationVersionIds: [...narrationVersionIds].sort(), assetIds: assets.map((a) => a.id).sort() },
-    scenes: continuity.scenes,
-    continuity: { anchors: continuity.anchors, warnings: continuity.warnings },
-    broll,
-    fallbackPolicy: { preferred: 'existing-approved', generated: 'configured-provider', continuityCompatible: true, final: 'neutral-establishing', retryableProviderFailure: true },
-  };
+  return { recipeVersion: RECIPE_VERSION, recipeFingerprint: sha256(recipeInput), deterministicInputs: { scenePlanVersionId, narrationVersionIds: [...narrationVersionIds].sort(), assetIds: assets.map((a) => a.id).sort() }, scenes: continuity.scenes, continuity: { anchors: continuity.anchors, warnings: continuity.warnings }, broll, fallbackPolicy: { preferred: 'existing-approved', generated: 'configured-provider', continuityCompatible: true, final: 'neutral-establishing', retryableProviderFailure: true } };
 }
-
-function scoreAssets(assets, requirement) {
-  return assets.map((asset) => ({ id: asset.id, versionId: asset.versionId, score: candidateScore(asset, requirement), reason: { semantic: tokens([asset.description, asset.prompt, asset.subject, ...(asset.tags || [])].join(' ')).filter((t) => tokens(requirement.narrationText).includes(t)).length, role: asset.role || null, continuity: continuityScore(asset, requirement), }, contentHash: asset.contentHash || null })).sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id)));
-}
-
+function scoreAssets(assets, requirement) { return assets.map((asset) => ({ id: asset.id, versionId: asset.versionId, score: candidateScore(asset, requirement), reason: { semantic: tokens([asset.description, asset.prompt, asset.subject, ...(asset.tags || [])].join(' ')).filter((t) => tokens(requirement.narrationText).includes(t)).length, role: asset.role || null, continuity: continuityScore(asset, requirement) }, contentHash: asset.contentHash || null })).sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id))); }
 function applyRecipeToTimeline(timeline, recipe, assetById = new Map()) {
   const next = JSON.parse(JSON.stringify(timeline));
   const brollByShot = new Map(recipe.broll.map((entry) => [entry.shotId, entry]));
   const shotById = new Map(recipe.scenes.flatMap((scene) => scene.shots.map((shot) => [shot.id, shot])));
-  for (const track of next.tracks || []) {
-    for (const segment of track.segments || []) {
-      const shot = shotById.get(segment.shotId || segment.id);
-      if (!shot) continue;
-      segment.shotSpec = { shotType: shot.shotType, framing: shot.framing, cameraMotion: shot.cameraMotion, transitionIntent: shot.transitionIntent, continuityAnchors: shot.continuityAnchors };
-      const broll = brollByShot.get(shot.id);
-      if (broll?.selectedAssetId && assetById.has(broll.selectedAssetId) && track.type === 'VIDEO') {
-        segment.assetVersionId = assetById.get(broll.selectedAssetId).versionId;
-        segment.assetSuitabilityScore = broll.suitabilityScore;
-      } else if (broll?.fallback) segment.fallback = broll.fallback;
-    }
+  for (const track of next.tracks || []) for (const segment of track.segments || []) {
+    const shot = shotById.get(segment.shotId || segment.id); if (!shot) continue;
+    segment.shotSpec = { shotType: shot.shotType, framing: shot.framing, cameraMotion: shot.cameraMotion, transitionIntent: shot.transitionIntent, continuityAnchors: shot.continuityAnchors };
+    const broll = brollByShot.get(shot.id);
+    if (broll?.selectedAssetId && assetById.has(broll.selectedAssetId) && track.type === 'VIDEO') { segment.assetVersionId = assetById.get(broll.selectedAssetId).versionId; segment.assetSuitabilityScore = broll.suitabilityScore; }
+    else if (broll?.fallback) segment.fallback = broll.fallback;
   }
   next.visualRecipe = { recipeVersion: recipe.recipeVersion, recipeFingerprint: recipe.recipeFingerprint };
   next.inputVersionIds = [...new Set([...(next.inputVersionIds || []), ...recipe.deterministicInputs.assetIds, recipe.scenePlanVersionId])].sort();
   return next;
 }
-
 module.exports = { RECIPE_VERSION, stableJson, sha256, normaliseScenes, buildContinuity, selectBroll, scoreAssets, buildVisualRecipe, applyRecipeToTimeline, inferBrollRule };
