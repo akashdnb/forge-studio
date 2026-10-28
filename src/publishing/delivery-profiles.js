@@ -41,7 +41,9 @@ function compileDeliveryProfile(profileId, input = {}) {
   if (!profile) throw Object.assign(new Error(`Unknown delivery profile: ${profileId}`), { code: 'UNKNOWN_DELIVERY_PROFILE' });
   const title = sanitize(input.title, 'Forge Studio video');
   if (title.length > 100 && profile.destination === 'youtube') throw Object.assign(new Error('YouTube title exceeds 100 characters'), { code: 'INVALID_METADATA' });
-  const description = String(input.description || '').trim().slice(0, profile.destination === 'youtube' ? 5000 : 20000);
+  const rawDescription = String(input.description || '').trim();
+  if (profile.destination === 'youtube' && Buffer.byteLength(rawDescription, 'utf8') > 5000) throw Object.assign(new Error('YouTube description exceeds 500 bytes'), { code: 'INVALID_METADATA' });
+  const description = rawDescription.slice(0, profile.destination === 'youtube' ? 5000 : 20000);
   const tags = [...new Set((Array.isArray(input.tags) ? input.tags : []).map((tag) => sanitize(tag, '').slice(0, 100)).filter(Boolean))].slice(0, 30);
   const metadata = {
     title, description, tags,
