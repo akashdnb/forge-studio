@@ -26,7 +26,10 @@ before(async () => {
     '-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
     '-f', 'lavfi', '-t', '2', '-i', 'sine=frequency=880:sample_rate=48000',
-    '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
+    '-f', 'lavfi', '-t', '2', '-i', 'sine=frequency=660:sample_rate=48000',
+    '-filter_complex', '[1:a][2:a]amerge=inputs=2[a]',
+    '-map', '0:v:0', '-map', '[a]',
+    '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-ac', '2',
     '-movflags', '+faststart', badAudioPath,
   ], { stdio: 'inherit' });
 
@@ -83,22 +86,25 @@ test('rejects deterministic media whose encoded AAC stream ends before the video
   assert.ok(video && audio);
   assert.ok(Math.abs(Number(metadata.format.duration) - 4) <= 0.1);
   assert.ok(Math.abs(Number(video.duration) - 4) <= 0.1);
-  assert.ok(Number(audio.duration) < 2.2);
+  assert.equal(Number(video.nb_frames), 120);
+  assert.equal(video.r_frame_rate, '30/1');
+  assert.ok(Math.abs(Number(audio.duration) - 2) <= 0.01);
+  assert.equal(Number(audio.nb_frames), 95);
   assert.equal(Number(audio.sample_rate), 48000);
-  assert.equal(Number(audio.channels), 1);
+  assert.equal(Number(audio.channels), 2);
 
   const pcmBytes = execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-i', badAudioPath,
     '-map', '0:a:0', '-f', 's16le', '-acodec', 'pcm_s16le', '-',
   ]);
-  const pcmSamplesPerChannel = pcmBytes.length / 2;
-  assert.ok(pcmSamplesPerChannel >= 95000 && pcmSamplesPerChannel <= 100000);
+  const pcmSamplesPerChannel = pcmBytes.length / 2 / Number(audio.channels);
+  assert.ok(pcmSamplesPerChannel >= 96000 && pcmSamplesPerChannel <= 96500);
 
   const result = await validateMediaArtifact({
     artifact: artifact(badAudioPath, { contentHash: null }),
     timeoutMs: 30000,
     maxBytes: 20 * 1024 * 1024,
-    payload: { timelineMetadata: { durationSeconds: 4, durationToleranceSeconds: 0.2 } },
+    payload: { timelineMetadata: { durationSeconds: 4, durationToleranceSeconds: 0.2, audioChannels: 2 } },
   });
   const audioCheck = result.checks.find((c) => c.name === 'audio_duration');
   assert.equal(result.status, 'FAILED');
