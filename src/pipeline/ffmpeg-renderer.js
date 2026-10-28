@@ -16,6 +16,7 @@ function stableJson(v) {
   if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
   return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
 }
+
 function sha256Json(v) { return crypto.createHash('sha256').update(stableJson(v)).digest('hex'); }
 function sha256File(file) { return new Promise((resolve, reject) => { const h = crypto.createHash('sha256'); const s = require('node:fs').createReadStream(file); s.on('data', (c) => h.update(c)); s.once('error', reject); s.once('end', () => resolve(h.digest('hex'))); }); }
 function validateRenderInput(input) {
@@ -38,10 +39,7 @@ function validateRenderInput(input) {
     if (!segment.id || !Number.isFinite(Number(segment.start)) || !Number.isFinite(Number(segment.duration)) || Number(segment.duration) <= 0) throw Object.assign(new Error(`invalid timeline segment: ${segment.id || 'unknown'}`), { retryable: false });
     const start = Number(segment.start), end = start + Number(segment.duration);
     if (start < 0 || end > duration + 0.001) throw Object.assign(new Error(`timeline segment ${segment.id} falls outside the render duration`), { retryable: false });
-    if (track.type === 'CAPTIONS') {
-      if (typeof segment.text !== 'string' || !segment.text.trim()) throw Object.assign(new Error(`caption segment ${segment.id} requires non-empty text`), { retryable: false });
-      continue;
-    }
+    if (track.type === 'CAPTIONS') { if (typeof segment.text !== 'string' || !segment.text.trim()) throw Object.assign(new Error(`caption segment ${segment.id} requires non-empty text`), { retryable: false }); continue; }
     if (!RENDER_MEDIA_TRACKS.has(track.type)) continue;
     const source = segment.sourcePath || segment.path;
     if (!source || typeof source !== 'string' || path.isAbsolute(source) || source.includes('..')) throw Object.assign(new Error(`segment ${segment.id} requires a safe relative sourcePath`), { retryable: false });
