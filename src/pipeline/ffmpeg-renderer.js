@@ -138,6 +138,13 @@ function escapeFilterFilename(filePath) {
   return filePath.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
 }
 
+function continuityAnchorFilter(shotSpec = {}) {
+  const palette = String(shotSpec?.continuityAnchors?.palette || '').toLowerCase();
+  if (palette === 'cool') return 'colorbalance=rs=-0.08:gs=0:bs=0.08';
+  if (palette === 'warm') return 'colorbalance=rs=0.08:gs=0:bs=-0.08';
+  return null;
+}
+
 function buildFfmpegArgs(input, outputPath, { captionPath = null } = {}) {
   const videoTrack = input.timeline.tracks.find((t) => t.type === 'VIDEO');
   const audioTracks = input.timeline.tracks.filter((t) => RENDER_MEDIA_TRACKS.has(t.type) && t.type !== 'VIDEO');
@@ -146,7 +153,13 @@ function buildFfmpegArgs(input, outputPath, { captionPath = null } = {}) {
   let nextInput = 0;
   let cursor = 0;
 
-  const addVideo = (i, label, d) => filters.push(`[${i}:v]scale=w='round(iw*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))':h='round(ih*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))',pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},trim=duration=${d},setpts=PTS-STARTPTS[${label}]`);
+  const addVideo = (i, label, d, shotSpec = null) => {
+    const anchorFilter = continuityAnchorFilter(shotSpec);
+    const visualFilters = [`scale=w='round(iw*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))':h='round(ih*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))'`, `pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2`, 'setsar=1', `fps=${VIDEO_FPS}`];
+    if (anchorFilter) visualFilters.push(anchorFilter);
+    visualFilters.push(`trim=duration=${d}`, 'setpts=PTS-STARTPTS');
+    filters.push(`[${i}:v]${visualFilters.join(',')}[${label}]`);
+  };
   for (const [index, segment] of videoSegments.entries()) {
     const start = Number(segment.start), duration = Number(segment.duration), gap = start - cursor;
     if (gap > 0.001) {
@@ -157,7 +170,7 @@ function buildFfmpegArgs(input, outputPath, { captionPath = null } = {}) {
     }
     const source = path.resolve(input.workDir, segment.sourcePath || segment.path);
     inputs.push('-stream_loop', '-1', '-i', source);
-    addVideo(nextInput, `v${index}`, duration);
+    addVideo(nextInput, `v${index}`, duration, segment.shotSpec);
     concatLabels.push(`[v${index}]`);
     nextInput++;
     cursor = Math.max(cursor, start + duration);
