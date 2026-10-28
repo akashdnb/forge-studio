@@ -6,11 +6,12 @@ const path = require('node:path');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { buildVisualRecipe, applyRecipeToTimeline } = require('../src/visual/visual-continuity');
 const { compileTimeline } = require('../src/pipeline/timeline-manifest-compiler');
-const { renderTimeline } = require('../src/pipeline/ffmpeg-renderer');
+const { renderTimeline, sha256Json } = require('../src/pipeline/ffmpeg-renderer');
 
 const versions = {
   'asset-a': { id: 'asset-a', kind: 'asset' },
   'asset-b': { id: 'asset-b', kind: 'asset' },
+  'scene-plan:1': { id: 'scene-plan:1', kind: 'scene-plan' },
 };
 
 function makeRecipe() {
@@ -87,6 +88,16 @@ if (hasFfmpeg) {
     const red = path.join(workDir, 'red.mp4');
     const blue = path.join(workDir, 'blue.mp4');
     const output = path.join(workDir, 'legacy-output.mp4');
+    const timeline = {
+      durationSeconds: 6,
+      tracks: [{
+        type: 'VIDEO',
+        segments: [
+          { id: 'shot-a', start: 0, duration: 3, sourcePath: 'red.mp4', shotSpec: { durationSeconds: 1.25 } },
+          { id: 'shot-b', start: 3, duration: 3, sourcePath: 'blue.mp4', shotSpec: { durationSeconds: 2.75 } },
+        ],
+      }],
+    };
 
     for (const [file, color] of [[red, 'red'], [blue, 'blue']]) {
       execFileSync('ffmpeg', [
@@ -99,18 +110,9 @@ if (hasFfmpeg) {
       input: {
         workDir,
         timelineVersionId: 'legacy-proof',
-        timelineContentHash: 'legacy-proof-hash',
+        timelineContentHash: sha256Json(timeline),
         inputVersionIds: ['asset-a', 'asset-b'],
-        timeline: {
-          durationSeconds: 6,
-          tracks: [{
-            type: 'VIDEO',
-            segments: [
-              { id: 'shot-a', start: 0, duration: 3, sourcePath: 'red.mp4', shotSpec: { durationSeconds: 1.25 } },
-              { id: 'shot-b', start: 3, duration: 3, sourcePath: 'blue.mp4', shotSpec: { durationSeconds: 2.75 } },
-            ],
-          }],
-        },
+        timeline,
       },
       workDir,
       outputPath: output,
@@ -123,7 +125,6 @@ if (hasFfmpeg) {
     assert.ok(stream);
     assert.equal(stream.nb_frames, '180');
     assert.equal(stream.time_base, '1/15360');
-    assert.ok(Math.abs(Number(probe.format.duration) - 6) < 0.02);
     assert.equal(Number(probe.format.duration), 6);
   });
 } else {
