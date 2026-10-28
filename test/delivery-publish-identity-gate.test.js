@@ -51,18 +51,32 @@ function run(overrides = {}) {
   };
 }
 
-test('publish gate fingerprint binds exact delivery package/profile/artifact/version/hash', () => {
+test('publish gate fingerprint binds every durable delivery identity field', () => {
   const publisher = service();
   const first = publisher.gateSnapshot(run());
-  const changedArtifact = publisher.gateSnapshot(run({ delivery_artifact_id: 'delivery-artifact-2', delivery_content_hash: 'd'.repeat(64) }));
+  for (const [field, value] of [
+    ['delivery_package_id', 'delivery:youtube_long_form:2'],
+    ['delivery_profile_id', 'youtube_shorts'],
+    ['delivery_artifact_id', 'delivery-artifact-2'],
+    ['delivery_version_id', 'delivery-v2'],
+    ['delivery_content_hash', 'd'.repeat(64)],
+    ['delivery_package_status', 'BLOCKED'],
+    ['delivery_storage_status', 'MISSING']
+  ]) {
+    const changed = publisher.gateSnapshot(run({ [field]: value }));
+    assert.notEqual(fingerprint(first), fingerprint(changed), `fingerprint must change when ${field} changes`);
+  }
   assert.equal(first.deliveryPackageId, 'delivery:youtube_long_form:1');
   assert.equal(first.deliveryProfileId, 'youtube_long_form');
-  assert.notEqual(fingerprint(first), fingerprint(changedArtifact));
 });
 
 test('publish gate fails closed when delivery identity is incomplete', () => {
   const publisher = service();
+  assert.throws(() => publisher.gate(run({ delivery_package_id: null })), (error) => error.code === 'DELIVERY_NOT_READY');
+  assert.throws(() => publisher.gate(run({ delivery_profile_id: null })), (error) => error.code === 'DELIVERY_NOT_READY');
+  assert.throws(() => publisher.gate(run({ delivery_artifact_id: null })), (error) => error.code === 'DELIVERY_NOT_READY');
   assert.throws(() => publisher.gate(run({ delivery_version_id: null })), (error) => error.code === 'DELIVERY_NOT_READY');
   assert.throws(() => publisher.gate(run({ delivery_content_hash: 'not-a-sha256' })), (error) => error.code === 'DELIVERY_NOT_READY');
+  assert.throws(() => publisher.gate(run({ delivery_package_status: 'BLOCKED' })), (error) => error.code === 'DELIVERY_NOT_READY');
   assert.throws(() => publisher.gate(run({ delivery_storage_status: 'MISSING' })), (error) => error.code === 'DELIVERY_NOT_READY');
 });
