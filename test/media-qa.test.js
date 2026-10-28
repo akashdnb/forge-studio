@@ -25,7 +25,7 @@ before(async () => {
   execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
-    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000',
+    '-f', 'lavfi', '-t', '2', '-i', 'sine=frequency=880:sample_rate=48000',
     '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
     '-movflags', '+faststart', badAudioPath,
   ], { stdio: 'inherit' });
