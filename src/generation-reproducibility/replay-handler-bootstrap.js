@@ -34,3 +34,4 @@ if (!PersistentProductionRepository.prototype.__generationRecipeTransitionHook) 
   PersistentProductionRepository.prototype.__generationRecipeTransitionHook = true;
 }
 require('../video-production/worker-hook');
+require('../generation/provider-run-reconciliation').installJobClaimHook();
