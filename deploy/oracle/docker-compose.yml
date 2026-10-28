@@ -1,0 +1,156 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-forge}
+      POSTGRES_USER: ${POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - forge_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forge} -d ${POSTGRES_DB:-forge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [forge]
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npm", "run", "migrate"]
+    networks: [forge]
+
+  forge-api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8080"
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      RUN_MIGRATIONS_ON_START: "false"
+      FORGE_STORAGE_DRIVER: ${FORGE_STORAGE_DRIVER:-local}
+      FORGE_STORAGE_LOCAL_ROOT: /var/lib/forge/storage
+    volumes:
+      - forge_data:/var/lib/forge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose: ["8080"]
+    networks: [forge]
+
+  forge-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      NODE_ENV: production
+      PG_POOL_MAX: "5"
+      FORGE_STORAGE_DRIVER: ${FORGE_STORAGE_DRIVER:-local}
+      FORGE_STORAGE_LOCAL_ROOT: /var/lib/forge/storage
+      FORGE_RENDER_WORKDIR: /var/lib/forge
+      FORGE_RENDER_OUTPUT_DIR: /var/lib/forge/renders
+      FORGE_GITHUB_ACTIONS_ENABLED: ${FORGE_GITHUB_ACTIONS_ENABLED:-false}
+      FORGE_GITHUB_ACTIONS_MODE: ${FORGE_GITHUB_ACTIONS_MODE:-github}
+      FORGE_GITHUB_REPOSITORY: akashdnb/forge-studio
+    volumes:
+      - forge_data:/var/lib/forge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npm", "run", "worker"]
+    networks: [forge]
+
+  forge-event-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      NODE_ENV: production
+      FORGE_EVENT_PG_POOL_MAX: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npm", "run", "event-worker"]
+    networks: [forge]
+
+  forge-event-api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      NODE_ENV: production
+      PORT: "8090"
+      FORGE_EVENT_PORT: "8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose: ["8090"]
+    command: ["npm", "run", "event-api"]
+    networks: [forge]
+
+  forge-inbound-webhook:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-forge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-forge}
+      NODE_ENV: production
+      PORT: "8091"
+      FORGE_INBOUND_WEBHOOK_PORT: "8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose: ["8091"]
+    command: ["npm", "run", "inbound-webhook-api"]
+    networks: [forge]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../../public:/srv/public:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - forge-api
+      - forge-event-api
+      - forge-inbound-webhook
+    networks: [forge]
+
+volumes:
+  forge_postgres:
+  forge_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  forge:
+    driver: bridge
