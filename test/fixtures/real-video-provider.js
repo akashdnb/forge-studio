@@ -1,10 +1,15 @@
 'use strict';
 const {spawn}=require('node:child_process');
 const fs=require('node:fs/promises');
-const [, , input, output]=process.argv;
+const argv=process.argv.slice(2);
+const positional=argv.filter(arg=>!arg.startsWith('--'));
+const flagValue=(name)=>{const index=argv.indexOf(name);return index===-1?null:argv[index+1];};
+const input=flagValue('--input')||positional[0];
+const output=flagValue('--output')||positional[1];
+const metadata=flagValue('--metadata')||null;
 if(!input||!output)throw new Error('input and output paths are required');
 const request=JSON.parse(require('node:fs').readFileSync(input,'utf8'));
 const duration=Math.max(1,Math.min(10,Number(request.parameters?.durationSeconds||1)));
-const args=['-v','error','-f','lavfi','-i','color=c=black:s=320x180:r=30','-t',String(duration),'-an','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart','-y',output];
+const args=['-v','error','-f','lavfi','-i','color=c=black:s=320x180:r=30','-t',String(duration),'-an','-c:v','libx264','-pix_fmt','yuv420p','-f','mp4','-movflags','+faststart','-y',output];
 const child=spawn(process.env.FFMPEG_PATH||'ffmpeg',args,{stdio:'inherit'});
-child.on('exit',async(code)=>{if(code!==0)process.exit(code||1);await fs.writeFile(output+'.json',JSON.stringify({mediaType:'video/mp4',requestId:request.idempotencyKey||null})+'\n');});
+child.on('exit',async(code)=>{if(code!==0)process.exit(code||1);if(metadata)await fs.writeFile(metadata,JSON.stringify({mediaType:'video/mp4',requestId:request.idempotencyKey||null})+'\n');});
