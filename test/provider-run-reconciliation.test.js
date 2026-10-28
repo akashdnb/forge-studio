@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { findStaleProviderRuns, reconcileStaleProviderRun } = require('../src/generation/provider-run-reconciliation');
+const { defaultStaleAfterMs, findStaleProviderRuns, reconcileStaleProviderRun } = require('../src/generation/provider-run-reconciliation');
 
 function fakePool(run, artifacts = []) {
   const calls = [];
@@ -44,6 +44,25 @@ test('stale RUNNING provider runs fail closed and persist reconciliation evidenc
   assert.equal(result.run.error.code, 'PROVIDER_RUN_RECONCILIATION_REQUIRED'); assert.equal(result.run.error.requiresExternalProviderVerification, true);
   assert.equal(result.run.error.externalJobId, 'provider-job-2'); assert.deepEqual(result.run.error.persistedArtifactIds, ['artifact-2']); assert.equal(result.run.error.actor, 'test-reconciler');
   assert.equal(pool.calls.filter((call) => call.sql.startsWith('UPDATE provider_runs')).length, 1);
+});
+
+test('configured visual provider timeout gets a grace period before reconciliation', async () => {
+  const previousImageTimeout = process.env.FORGE_IMAGE_GENERATION_TIMEOUT_MS;
+  const previousVideoTimeout = process.env.FORGE_VIDEO_GENERATION_TIMEOUT_MS;
+  process.env.FORGE_IMAGE_GENERATION_TIMEOUT_MS = String(20 * 60 * 1000);
+  process.env.FORGE_VIDEO_GENERATION_TIMEOUT_MS = String(30 * 60 * 1000);
+  try {
+    assert.equal(defaultStaleAfterMs(), 35 * 60 * 1000);
+    const now = new Date('2026-10-28T05:00:00.000Z');
+    const run = { id: 'run-long', status: 'RUNNING', started_at: new Date('2026-10-28T04:40:00.000Z') };
+    const pool = fakePool(run);
+    const result = await reconcileStaleProviderRun(pool, { runId: 'run-long', now });
+    assert.equal(result.reconciled, false); assert.equal(result.reason, 'LEASE_NOT_EXPIRED'); assert.equal(run.status, 'RUNNING');
+    assert.equal(pool.calls.filter((call) => call.sql.startsWith('UPDATE provider_runs')).length, 0);
+  } finally {
+    if (previousImageTimeout === undefined) delete process.env.FORGE_IMAGE_GENERATION_TIMEOUT_MS; else process.env.FORGE_IMAGE_GENERATION_TIMEOUT_MS = previousImageTimeout;
+    if (previousVideoTimeout === undefined) delete process.env.FORGE_VIDEO_GENERATION_TIMEOUT_MS; else process.env.FORGE_VIDEO_GENERATION_TIMEOUT_MS = previousVideoTimeout;
+  }
 });
 
 test('fresh RUNNING provider runs are never changed', async () => {
