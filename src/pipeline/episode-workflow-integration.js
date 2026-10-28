@@ -11,7 +11,10 @@ const DEPENDENCIES = Object.freeze({
   TIMELINE: ['SCENE_PLAN', 'NARRATION', 'TRANSCRIPTION', 'ASSETS'], CAPTIONS: ['TIMELINE'],
   RENDER: ['TIMELINE', 'CAPTIONS'], QA: ['RENDER'], PACKAGING: ['QA'], PUBLISH: ['PACKAGING'],
 });
-const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [stage, `workflow:${stage.toLowerCase()}`])));
+const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [
+  stage,
+  stage === 'TIMELINE' ? 'workflow:timeline-manifest' : `workflow:${stage.toLowerCase()}`,
+])));
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
 function validateStages(stages) {
