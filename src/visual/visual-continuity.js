@@ -165,7 +165,7 @@ function applyRecipeToTimeline(timeline, recipe, assetById = new Map()) {
     for (const segment of track.segments || []) {
       const shot = shotById.get(segment.shotId || segment.id);
       if (!shot) continue;
-      segment.shotSpec = { shotType: shot.shotType, framing: shot.framing, cameraMotion: shot.cameraMotion, transitionIntent: shot.transitionIntent, continuityAnchors: shot.continuityAnchors };
+      segment.shotSpec = { shotType: shot.shotType, framing: shot.framing, cameraMotion: shot.cameraMotion, durationSeconds: shot.durationSeconds, narrationAlignment: shot.narrationAlignment, transitionIntent: shot.transitionIntent, continuityAnchors: shot.continuityAnchors };
       const broll = brollByShot.get(shot.id);
       if (broll?.selectedAssetId && assetById.has(broll.selectedAssetId) && track.type === 'VIDEO') {
         segment.assetVersionId = assetById.get(broll.selectedAssetId).versionId;
