@@ -103,7 +103,7 @@ test('continuity selection reaches final pixels in the production renderer', asy
   const stream = JSON.parse(probe.stdout.toString()).streams[0];
   assert.deepEqual(stream, { width: 1280, height: 720, r_frame_rate: '30/1', pix_fmt: 'yuv420p' });
 
-  const pixel = runTool(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', output, '-vf', 'crop=1:1:0:0,format=rgb24', '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']);
+  const pixel = runTool(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', output, '-vf', 'scale=1:1,format=rgb24', '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']);
   assert.equal(pixel.status, 0, pixel.stderr?.toString() || 'pixel decode failed');
   const [r, g, b] = pixel.stdout;
   assert.ok(b > 200 && r < 20 && g < 20, `expected the continuity-matched blue asset in final pixels, got rgb(${r},${g},${b})`);
