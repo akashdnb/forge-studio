@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnFileSync } = require('node:child_process');
+const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const { buildVisualRecipe, applyRecipeToTimeline, sha256 } = require('../src/visual/visual-continuity');
 const { renderTimeline, sha256Json } = require('../src/pipeline/ffmpeg-renderer');
@@ -18,18 +18,16 @@ function toolPath(moduleName, fallback) {
 }
 
 const ffmpegPath = toolPath('ffmpeg-static', 'ffmpeg');
-const ffprobePath = toolPath('@ffprobe-installer/ffprobe', 'ffprobe')?.path || toolPath('@ffprobe-installer/ffprobe', 'ffprobe');
+const ffprobeModule = toolPath('@ffprobe-installer/ffprobe', null);
+const ffprobePath = ffprobeModule?.path || ffprobeModule || 'ffprobe';
 
 function runTool(command, args, options = {}) {
-  return spawnFileSync(command, args, { stdio: 'pipe', ...options });
+  return spawnSync(command, args, { stdio: 'pipe', ...options });
 }
 
 function assertToolAvailable(command, args = ['-version']) {
   const result = runTool(command, args);
-  if (result.error || result.status !== 0) {
-    return false;
-  }
-  return true;
+  return !result.error && result.status === 0;
 }
 
 function createSource(output, color) {
@@ -45,12 +43,7 @@ test('continuity anchors deterministically prefer the matching visual asset', ()
       style: 'documentary',
       lighting: 'NATURAL',
       visualSubject: 'hero',
-      shots: [{
-        id: 'shot-1',
-        shotType: 'B_ROLL',
-        durationSeconds: 1,
-        continuityAnchors: { palette: 'cool' },
-      }],
+      shots: [{ id: 'shot-1', shotType: 'B_ROLL', durationSeconds: 1, continuityAnchors: { palette: 'cool' } }],
     }],
   };
   const assets = [
@@ -107,11 +100,7 @@ test('continuity selection reaches final pixels in the production renderer', asy
   timeline.inputVersionIds = ['v-blue'];
 
   const result = await renderTimeline({
-    input: {
-      timeline,
-      timelineVersionId: 'timeline-v1',
-      timelineContentHash: sha256Json(timeline),
-    },
+    input: { timeline, timelineVersionId: 'timeline-v1', timelineContentHash: sha256Json(timeline) },
     workDir,
     outputPath: output,
     ffmpegPath,
