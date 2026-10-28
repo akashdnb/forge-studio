@@ -33,7 +33,7 @@ test('renderer maps shotSpec framing to the video filter without changing timeli
   const filter = args[args.indexOf('-filter_complex') + 1];
   assert.match(filter, /\[0:v\].*scale=1280:720/);
   assert.match(filter, /\[1:v\].*crop=1280:720/);
-  assert.match(filter, /concat=n=2:v=1:0\[vout\]/);
+  assert.match(filter, /concat=n=2:v=1:a=0\[vout\]/);
 });
 
 test('representative render preserves MP4 dimensions and duration while changing framing output', { skip: !hasMediaTools() }, async () => {
