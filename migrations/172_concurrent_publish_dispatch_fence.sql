@@ -1,0 +1,88 @@
+BEGIN;
+
+ALTER TABLE publish_attempts
+  ADD COLUMN IF NOT EXISTS dispatch_fingerprint char(64);
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE UNIQUE INDEX IF NOT EXISTS publish_attempts_dispatch_fingerprint_uq
+  ON publish_attempts(dispatch_fingerprint)
+  WHERE dispatch_fingerprint IS NOT NULL
+    AND status IN ('UPLOADING','SUCCEEDED','UNCERTAIN','QUARANTINED');
+
+CREATE OR REPLACE FUNCTION forge_publish_dispatch_fence()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  request_row record;
+  stale_request boolean;
+BEGIN
+  SELECT id, tenant_id, project_id, episode_id, destination,
+         package_artifact_id, package_version_id, package_hash,
+         render_artifact_id, render_version_id, render_hash,
+         gate_fingerprint, release_epoch, created_at
+    INTO request_row
+    FROM publish_requests
+   WHERE id = NEW.request_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'publish attempt request does not exist'
+      USING ERRCODE = '23503';
+  END IF;
+
+  IF NEW.status IN ('UPLOADING','SUCCEEDED','UNCERTAIN','QUARANTINED') THEN
+    SELECT EXISTS (
+      SELECT 1
+        FROM publish_requests newer
+       WHERE newer.tenant_id = request_row.tenant_id
+         AND newer.project_id = request_row.project_id
+         AND newer.episode_id = request_row.episode_id
+         AND newer.destination = request_row.destination
+         AND newer.package_artifact_id = request_row.package_artifact_id
+         AND newer.package_version_id = request_row.package_version_id
+         AND newer.render_artifact_id = request_row.render_artifact_id
+         AND newer.render_version_id = request_row.render_version_id
+         AND newer.gate_fingerprint IS DISTINCT FROM request_row.gate_fingerprint
+         AND newer.created_at > request_row.created_at
+    ) INTO stale_request;
+
+    IF stale_request THEN
+      RAISE EXCEPTION 'publish request gate fingerprint is stale'
+        USING ERRCODE = 'P0001';
+    END IF;
+  END IF;
+
+  NEW.dispatch_fingerprint := encode(
+    digest(
+      concat_ws('|',
+        request_row.tenant_id,
+        request_row.project_id,
+        request_row.episode_id,
+        request_row.destination,
+        request_row.package_artifact_id,
+        request_row.package_version_id,
+        request_row.package_hash,
+        request_row.render_artifact_id,
+        request_row.render_version_id,
+        request_row.render_hash,
+        request_row.gate_fingerprint,
+        coalesce(request_row.release_epoch::text, '')
+      ),
+      'sha256'
+    ),
+    'hex'
+  );
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS publish_dispatch_fence ON publish_attempts;
+CREATE TRIGGER publish_dispatch_fence
+BEFORE INSERT OR UPDATE OF request_id, status
+ON publish_attempts
+FOR EACH ROW
+EXECUTE FUNCTION forge_publish_dispatch_fence();
+
+COMMIT;
