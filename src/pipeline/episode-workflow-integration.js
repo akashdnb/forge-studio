@@ -195,7 +195,10 @@ class EpisodeWorkflowIntegration {
 
   async #requireApproval(episodeId, approvalStage, inputVersionIds) {
     if (!inputVersionIds.length) throw Object.assign(new Error(`${approvalStage} approval input is missing`), { code: 'INVALID_PROVENANCE' });
-    const result = await this.pool.query(`SELECT 1 FROM approvals WHERE episode_id=$1 AND stage=$2 AND decision='APPROVED' AND target_version_id = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1`, [episodeId, approvalStage, inputVersionIds]);
+    const result = await this.pool.query(`SELECT COUNT(DISTINCT target_version_id)::int AS approved_count
+      FROM approvals
+      WHERE episode_id=$1 AND stage=$2 AND decision='APPROVED' AND target_version_id = ANY($3::text[])
+      HAVING COUNT(DISTINCT target_version_id) = $4`, [episodeId, approvalStage, inputVersionIds, new Set(inputVersionIds).size]);
     if (!result.rows[0]) throw Object.assign(new Error(`${approvalStage} approval required`), { code: 'APPROVAL_BLOCKED' });
   }
 
