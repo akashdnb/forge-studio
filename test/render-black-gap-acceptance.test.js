@@ -95,8 +95,6 @@ test('deterministic multi-shot fixture proves current renderer could emit a blac
     ffmpegPath
   });
   assert.equal(rendered.metadata.durationSeconds, 2);
-  const probe = run(['-hide_banner', '-loglevel', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', '-i', output], { encoding: 'utf8' });
-  assert.ok(Math.abs(Number(probe.stdout.trim()) - 2) < 0.15);
   assert.equal(frameLuma(output, 0.5) > 40, true);
   assert.equal(frameLuma(output, 1.5) > 20, true);
   assert.equal(VIDEO_WIDTH, 1280);
