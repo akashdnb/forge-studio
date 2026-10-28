@@ -2,6 +2,8 @@
 
 const { createHash } = require('node:crypto');
 
+const MAX_YOUTUBE_TAGS_LENGTH = 500;
+
 const PROFILES = Object.freeze({
   youtube_long_form: Object.freeze({
     id: 'youtube_long_form', destination: 'youtube', kind: 'long-form',
@@ -36,6 +38,15 @@ function sanitize(value, fallback = 'untitled') {
   const normalized = String(value || '').normalize('NFKC').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/g, '');
   return normalized.slice(0, 140) || fallback;
 }
+function youtubeTagPayloadLength(tags) {
+  if (!Array.isArray(tags)) throw Object.assign(new TypeError('YouTube tags must be an array'), { code: 'INVALID_METADATA' });
+  return tags.reduce((total, tag, index) => total + String(tag).length + (index > 0 ? 1 : 0) + (String(tag).includes(' ') ? 2 : 0), 0);
+}
+function validateYouTubeTags(tags) {
+  const payloadLength = youtubeTagPayloadLength(tags);
+  if (payloadLength > MAX_YOUTUBE_TAGS_LENGTH) throw Object.assign(new Error(`YouTube tags exceed the combined 500 character limit (${payloadLength})`), { code: 'INVALID_METADATA' });
+  return true;
+}
 function compileDeliveryProfile(profileId, input = {}) {
   const profile = PROFILES[profileId];
   if (!profile) throw Object.assign(new Error(`Unknown delivery profile: ${profileId}`), { code: 'UNKNOWN_DELIVERY_PROFILE' });
@@ -45,6 +56,7 @@ function compileDeliveryProfile(profileId, input = {}) {
   if (profile.destination === 'youtube' && Buffer.byteLength(rawDescription, 'utf8') > 5000) throw Object.assign(new Error('YouTube description exceeds 500 bytes'), { code: 'INVALID_METADATA' });
   const description = rawDescription.slice(0, profile.destination === 'youtube' ? 5000 : 20000);
   const tags = [...new Set((Array.isArray(input.tags) ? input.tags : []).map((tag) => sanitize(tag, '').slice(0, 100)).filter(Boolean))].slice(0, 30);
+  if (profile.destination === 'youtube') validateYouTubeTags(tags);
   const metadata = {
     title, description, tags,
     categoryId: String(input.categoryId || '27'),
@@ -72,4 +84,4 @@ function ffmpegArgs(profile) {
   const v = profile.video, a = profile.audio;
   return ['-y', '-i', '{INPUT}', '-map', '0:v:0', '-map', '0:a:0?', '-vf', `scale=${v.width}:${v.height}:force_original_aspect_ratio=decrease,pad=${v.width}:${v.height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${v.fps}`, '-c:v', v.codec, '-profile:v', v.profile, '-level:v', v.level, '-pix_fmt', v.pixelFormat, '-b:v', `${v.bitrateKbps}k`, '-maxrate', `${Math.round(v.bitrateKbps * 1.15)}k`, '-bufsize', `${v.bitrateKbps * 2}k`, '-g', String(v.fps * v.gopSeconds), '-c:a', a.codec, '-b:a', `${a.bitrateKbps}k`, '-ar', String(a.sampleRate), '-ac', String(a.channels), '-movflags', '+faststart', '{OUTPUT}'];
 }
-module.exports = { PROFILES, compileDeliveryProfile, ffmpegArgs, fingerprint, sanitize, stable };
+module.exports = { MAX_YOUTUBE_TAGS_LENGTH, PROFILES, compileDeliveryProfile, ffmpegArgs, fingerprint, sanitize, stable, validateYouTubeTags, youtubeTagPayloadLength };
