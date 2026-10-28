@@ -146,7 +146,7 @@ function buildFfmpegArgs(input, outputPath, { captionPath = null } = {}) {
   let nextInput = 0;
   let cursor = 0;
 
-  const addVideo = (i, label, d) => filters.push(`[${i}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},trim=duration=${d},setpts=PTS-STARTPTS[${label}]`);
+  const addVideo = (i, label, d) => filters.push(`[${i}:v]scale=w='round(iw*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))':h='round(ih*min(${VIDEO_WIDTH}/(iw*sar),${VIDEO_HEIGHT}/ih))',pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},trim=duration=${d},setpts=PTS-STARTPTS[${label}]`);
   for (const [index, segment] of videoSegments.entries()) {
     const start = Number(segment.start), duration = Number(segment.duration), gap = start - cursor;
     if (gap > 0.001) {
