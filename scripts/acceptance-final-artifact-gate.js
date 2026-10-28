@@ -68,6 +68,8 @@ async function verifyFinalArtifact({ pool, storage, episodeId, projectId, tempRo
       allowedCodecs: ['h264', 'aac'],
       minWidth: 320,
       minHeight: 180,
+      maxWidth: 3840,
+      maxHeight: 2160,
       maxFps: 60,
       requireCompleteDecode: true
     }
@@ -97,7 +99,6 @@ async function main() {
   const representativeSeed = `${seed}-happy-path`;
   const episodeId = id('episode', representativeSeed);
   const projectId = id('project', representativeSeed);
-  const root = path.resolve(process.env.FORGE_ACCEPTANCE_STORAGE || path.join(process.cwd(), `.forge-acceptance-${representativeSeed}`));
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-final-artifact-gate-'));
   const pool = new Pool({ connectionString: databaseUrl, max: 4 });
   try {
