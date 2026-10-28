@@ -1,17 +1,30 @@
 'use strict';
 
-const DEFAULT_STALE_AFTER_MS = 15 * 60 * 1000;
+const DEFAULT_PROVIDER_TIMEOUT_MS = 10 * 60 * 1000;
+const RECONCILIATION_GRACE_MS = 5 * 60 * 1000;
+const DEFAULT_STALE_AFTER_MS = DEFAULT_PROVIDER_TIMEOUT_MS + RECONCILIATION_GRACE_MS;
 const DEFAULT_SCAN_LIMIT = 25;
+
+function configuredVisualProviderTimeoutMs() {
+  const values = ['FORGE_IMAGE_GENERATION_TIMEOUT_MS', 'FORGE_VIDEO_GENERATION_TIMEOUT_MS']
+    .map((name) => Number(process.env[name] || DEFAULT_PROVIDER_TIMEOUT_MS))
+    .filter((value) => Number.isFinite(value) && value >= 1000);
+  return Math.max(DEFAULT_PROVIDER_TIMEOUT_MS, ...values);
+}
+
+function defaultStaleAfterMs() {
+  return configuredVisualProviderTimeoutMs() + RECONCILIATION_GRACE_MS;
+}
 
 function staleCutoff(now, staleAfterMs) { return new Date(new Date(now).getTime() - staleAfterMs); }
 
-function validateOptions({ staleAfterMs = DEFAULT_STALE_AFTER_MS, limit = DEFAULT_SCAN_LIMIT } = {}) {
+function validateOptions({ staleAfterMs = defaultStaleAfterMs(), limit = DEFAULT_SCAN_LIMIT } = {}) {
   if (!Number.isInteger(staleAfterMs) || staleAfterMs < 1000) throw new TypeError('staleAfterMs must be an integer >= 1000');
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('limit must be an integer between 1 and 100');
   return { staleAfterMs, limit };
 }
 
-async function findStaleProviderRuns(pool, { now = new Date(), staleAfterMs = DEFAULT_STALE_AFTER_MS, limit = DEFAULT_SCAN_LIMIT } = {}) {
+async function findStaleProviderRuns(pool, { now = new Date(), staleAfterMs = defaultStaleAfterMs(), limit = DEFAULT_SCAN_LIMIT } = {}) {
   const options = validateOptions({ staleAfterMs, limit });
   const result = await pool.query(`SELECT id, episode_id, capability, provider, model, idempotency_key,
             attempt, status, external_job_id, result_artifact_ids, started_at, finished_at, created_at
@@ -20,7 +33,7 @@ async function findStaleProviderRuns(pool, { now = new Date(), staleAfterMs = DE
   return result.rows;
 }
 
-async function reconcileStaleProviderRun(pool, { runId, now = new Date(), staleAfterMs = DEFAULT_STALE_AFTER_MS, actor = 'provider-run-reconciler' } = {}) {
+async function reconcileStaleProviderRun(pool, { runId, now = new Date(), staleAfterMs = defaultStaleAfterMs(), actor = 'provider-run-reconciler' } = {}) {
   if (!runId || typeof runId !== 'string') throw new TypeError('runId is required');
   const { staleAfterMs: ttl } = validateOptions({ staleAfterMs, limit: 1 });
   const client = await pool.connect();
@@ -36,7 +49,7 @@ async function reconcileStaleProviderRun(pool, { runId, now = new Date(), staleA
     const artifacts = await client.query(`SELECT id, version_id, content_hash, created_at FROM artifacts WHERE provider_run_id = $1 ORDER BY created_at ASC, id ASC`, [runId]);
     const reconciliation = {
       code: 'PROVIDER_RUN_RECONCILIATION_REQUIRED',
-      message: 'Worker lease expired while provider outcome remained uncertain; automatic replay is forbidden',
+      message: 'Provider outcome remained uncertain beyond its configured execution timeout and reconciliation grace; automatic replay is forbidden',
       reason: 'STALE_RUNNING_PROVIDER_RUN', actor, reconciledAt: new Date(now).toISOString(),
       requiresExternalProviderVerification: true, externalJobId: run.external_job_id || null,
       persistedArtifactIds: artifacts.rows.map((row) => row.id),
@@ -59,7 +72,7 @@ async function reconcileStaleProviderRuns(pool, options = {}) {
   return results;
 }
 
-function installJobClaimHook({ intervalClaims = 25, staleAfterMs = DEFAULT_STALE_AFTER_MS, limit = DEFAULT_SCAN_LIMIT } = {}) {
+function installJobClaimHook({ intervalClaims = 25, staleAfterMs = defaultStaleAfterMs(), limit = DEFAULT_SCAN_LIMIT } = {}) {
   const { JobQueue } = require('../persistence/job-queue');
   if (JobQueue.prototype.__providerRunReconciliationHook) return;
   if (!Number.isInteger(intervalClaims) || intervalClaims < 1) throw new TypeError('intervalClaims must be a positive integer');
@@ -77,4 +90,4 @@ function installJobClaimHook({ intervalClaims = 25, staleAfterMs = DEFAULT_STALE
   JobQueue.prototype.__providerRunReconciliationHook = true;
 }
 
-module.exports = { DEFAULT_STALE_AFTER_MS, findStaleProviderRuns, reconcileStaleProviderRun, reconcileStaleProviderRuns, installJobClaimHook };
+module.exports = { DEFAULT_PROVIDER_TIMEOUT_MS, RECONCILIATION_GRACE_MS, DEFAULT_STALE_AFTER_MS, defaultStaleAfterMs, findStaleProviderRuns, reconcileStaleProviderRun, reconcileStaleProviderRuns, installJobClaimHook };
