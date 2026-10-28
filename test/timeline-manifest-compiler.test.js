@@ -20,6 +20,29 @@ test('compiles valid timeline and calculates duration', () => {
   assert.equal(result.tracks.length, 2);
 });
 
+test('preserves visual recipe and shot intent through compilation', () => {
+  const shotSpec = {
+    shotType: 'DETAIL',
+    framing: 'CLOSE',
+    cameraMotion: 'PUSH_IN',
+    transitionIntent: 'cut',
+    continuityAnchors: { subject: 'hero', location: 'lab', palette: 'natural-documentary' },
+  };
+  const visualRecipe = { recipeVersion: 'visual-recipe-v1', recipeFingerprint: 'recipe-hash' };
+  const result = compileTimeline({
+    episodeId: 'ep1',
+    timeline: timeline({
+      visualRecipe,
+      tracks: [{ type: 'VIDEO', segments: [{ id: 'v1', start: 0, duration: 10, assetVersionId: 'asset1', shotSpec }] }],
+    }),
+    versions,
+  });
+  assert.deepEqual(result.tracks[0].segments[0].shotSpec, shotSpec);
+  assert.deepEqual(result.visualRecipe, visualRecipe);
+  assert.match(result.content, /"shotSpec"/);
+  assert.match(result.content, /"visualRecipe"/);
+});
+
 test('rejects ordering violations', () => assert.throws(() => compileTimeline({ episodeId: 'ep1', timeline: timeline({ tracks: [{ type: 'VIDEO', segments: [{ id: 'a', start: 2, duration: 5, assetVersionId: 'asset1' }, { id: 'b', start: 1, duration: 2, assetVersionId: 'asset1' }] }] }), versions }), /overlap or are out of order/));
 
 test('rejects overlaps', () => assert.throws(() => compileTimeline({ episodeId: 'ep1', timeline: timeline({ tracks: [{ type: 'VIDEO', segments: [{ id: 'a', start: 0, duration: 5, assetVersionId: 'asset1' }, { id: 'b', start: 4, duration: 6, assetVersionId: 'asset1' }] }] }), versions }), /overlap or are out of order/));
