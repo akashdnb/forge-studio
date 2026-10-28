@@ -130,7 +130,7 @@ test('final packaged MP4 survives durable storage, openArtifact retrieval, check
     policy: {
       requireVideo: true,
       requireAudio: true,
-      allowedContainers: ['mp4'],
+      allowedContainers: ['mov', 'mp4'],
       allowedCodecs: ['h264', 'aac'],
       minWidth: 320,
       minHeight: 180,
@@ -140,5 +140,7 @@ test('final packaged MP4 survives durable storage, openArtifact retrieval, check
   });
 
   assert.notEqual(validation.status, 'FAILED', JSON.stringify(validation));
-  assert.ok(validation.metadata?.container || validation.metadata?.format || validation.details, JSON.stringify(validation));
+  assert.equal(validation.metadata.format, 'mov');
+  assert.equal(validation.metadata.streams.filter((s) => s.type === 'video').length, 1);
+  assert.equal(validation.metadata.streams.filter((s) => s.type === 'audio').length, 1);
 });
