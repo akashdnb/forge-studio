@@ -25,6 +25,10 @@ test('publish dispatch fence allows one unchanged release identity and rejects s
   const fingerprint = 'c'.repeat(64);
   const changedFingerprint = 'd'.repeat(64);
   const requestIdentityValues = [ids.tenant, ids.project, ids.episode, ids.packageArtifact, ids.packageVersion, packageHash, ids.renderArtifact, ids.renderVersion, renderHash];
+  const insertRequest = async (client, requestId, idempotencyKey, gateFingerprint, createdAtSql) => client.query(
+    "INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by,created_at) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test'," + createdAtSql + ")",
+    [requestId, requestIdentityValues[0], requestIdentityValues[1], requestIdentityValues[2], idempotencyKey, requestIdentityValues[3], requestIdentityValues[4], requestIdentityValues[5], requestIdentityValues[6], requestIdentityValues[7], requestIdentityValues[8], gateFingerprint],
+  );
 
   try {
     const c = await pool.connect();
@@ -35,9 +39,9 @@ test('publish dispatch fence allows one unchanged release identity and rejects s
       await c.query("INSERT INTO episodes(id,project_id,title,created_by,state,current_render_id,approved_render_id) VALUES($1,$2,'dispatch fence','test','APPROVED',$3,$3)", [ids.episode, ids.project, ids.renderArtifact]);
       await c.query("INSERT INTO version_records(id,episode_id,kind,created_by) VALUES($1,$2,'render','test'),($3,$2,'package','test')", [ids.renderVersion, ids.episode, ids.packageVersion]);
       await c.query("INSERT INTO artifacts(id,episode_id,kind,version_id,content_hash,media_type,created_by) VALUES($1,$2,'render',$3,$4,'video/mp4','test'),($5,$2,'package',$6,$7,'application/json','test')", [ids.renderArtifact, ids.episode, ids.renderVersion, renderHash, ids.packageArtifact, ids.packageVersion, packageHash]);
-      await c.query("INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by,created_at) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test',clock_timestamp())", [ids.requestA, ...requestIdentityValues, `idem-a:${suffix}`, fingerprint]);
-      await c.query("INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by,created_at) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test',clock_timestamp())", [ids.requestB, ...requestIdentityValues, `idem-b:${suffix}`, fingerprint]);
-      await c.query("INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by,created_at) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test',clock_timestamp()+interval '1 second')", [ids.requestChanged, ...requestIdentityValues, `idem-changed:${suffix}`, changedFingerprint]);
+      await insertRequest(c, ids.requestA, `idem-a:${suffix}`, fingerprint, 'clock_timestamp()');
+      await insertRequest(c, ids.requestB, `idem-b:${suffix}`, fingerprint, 'clock_timestamp()');
+      await insertRequest(c, ids.requestChanged, `idem-changed:${suffix}`, changedFingerprint, "clock_timestamp()+interval '1 second'");
       await c.query('COMMIT');
     } finally { c.release(); }
 
