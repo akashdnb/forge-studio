@@ -31,8 +31,9 @@
 </div>
 <script>
 const $=id=>document.getElementById(id);
+const DEFAULT_API_BASE='https://forge-studio-api-secondary.onrender.com';
 const saved=JSON.parse(localStorage.getItem('forge-connection')||'null');
-$('base').value=saved?.base||location.origin;
+$('base').value=saved?.base||DEFAULT_API_BASE;
 $('token').value=saved?.token||'';
 function headers(){const h={'content-type':'application/json'};if($('token').value)h.authorization='Bearer '+$('token').value;return h}
 function base(){return $('base').value.replace(/\/$/,'')}
