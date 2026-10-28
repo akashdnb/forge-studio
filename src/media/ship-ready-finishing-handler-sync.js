@@ -9,8 +9,9 @@ function finishingVersionIdentity(config, inputVersionId) { const lineageConfig 
 async function reconcileFinalShipGate({ pool, episodeId, inputArtifactId, inputVersionId, inputChecksum, result }) {
  const current = await pool.query(`SELECT e.current_render_id, e.approved_render_id, a.version_id, a.content_hash FROM episodes e LEFT JOIN artifacts a ON a.id=$2 WHERE e.id=$1`, [episodeId, inputArtifactId]);
  const row = current.rows[0];
- const stale = !row || row.current_render_id !== inputArtifactId || row.version_id !== inputVersionId || row.content_hash !== inputChecksum;
- const identity = { inputArtifactId, inputVersionId, inputChecksum, artifactChecksums: Object.fromEntries((result.variants || []).map((variant) => [variant.variant, variant.checksum])) };
+ const acceptedInputChecksum = row?.content_hash || inputChecksum || null;
+ const stale = !row || row.current_render_id !== inputArtifactId || row.version_id !== inputVersionId || (inputChecksum != null && row.content_hash !== inputChecksum);
+ const identity = { inputArtifactId, inputVersionId, inputChecksum: acceptedInputChecksum, artifactChecksums: Object.fromEntries((result.variants || []).map((variant) => [variant.variant, variant.checksum])) };
  if (stale) {
   await pool.query(`UPDATE episodes SET final_ship_gate=jsonb_build_object('status','BLOCKED','reason','STALE_INPUT','supersededByArtifactId',$3,'staleIdentity',$4::jsonb),updated_at=now() WHERE id=$1 AND final_ship_gate->>'status'='READY_TO_SHIP' AND final_ship_gate->>'qaId'=$2`, [episodeId, result.qaId, row?.current_render_id || null, JSON.stringify(identity)]);
   throw Object.assign(new Error('Final ship gate became stale before acceptance'), { code: 'FINAL_SHIP_GATE_STALE', retryable: false });
