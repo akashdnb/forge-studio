@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PROFILES, compileDeliveryProfile, ffmpegArgs, fingerprint, sanitize } = require('../src/publishing/delivery-profiles');
+const { PROFILES, compileDeliveryProfile, ffmpegArgs, fingerprint, sanitize, validateYouTubeTags, youtubeTagPayloadLength } = require('../src/publishing/delivery-profiles');
 const { runFfmpeg, sha256File } = require('../src/packaging/delivery-worker');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -18,6 +18,15 @@ test('delivery profiles are deterministic and platform-specific', () => {
 test('profile compiler clamps metadata and keeps publish-safe defaults', () => {
   const profile = compileDeliveryProfile('youtube_long_form', { title: '  Safe title  ', description: 'x'.repeat(6000), privacyStatus: 'invalid', containsSyntheticMedia: true });
   assert.equal(profile.metadata.title, 'Safe title'); assert.equal(profile.metadata.description.length, 5000); assert.equal(profile.metadata.privacyStatus, 'private'); assert.equal(profile.metadata.containsSyntheticMedia, true); assert.equal(sanitize('a<>:"/\\|?*'), 'a');
+});
+
+test('YouTube tag payload validation matches the provider aggregate accounting', () => {
+  assert.equal(youtubeTagPayloadLength(['a'.repeat(250), 'b'.repeat(249)]), 500);
+  assert.equal(youtubeTagPayloadLength(['a'.repeat(247), 'b c']), 253);
+  assert.doesNotThrow(() => validateYouTubeTags(['a'.repeat(250), 'b'.repeat(249)]));
+  assert.throws(() => validateYouTubeTags(['a'.repeat(250), 'b'.repeat(250)]), /combined 500 character limit \(501\)/);
+  assert.throws(() => compileDeliveryProfile('youtube_long_form', { title: 'Episode', tags: ['a'.repeat(250), 'b'.repeat(250)] }), /combined 500 character limit/);
+  assert.doesNotThrow(() => compileDeliveryProfile('youtube_long_form', { title: 'Episode', tags: ['a'.repeat(250), 'b'.repeat(249)] }));
 });
 
 test('ffmpeg arguments encode exact resolution, fps, bitrate, codecs and faststart', () => {
