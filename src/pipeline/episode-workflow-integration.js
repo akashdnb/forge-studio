@@ -12,6 +12,7 @@ const DEPENDENCIES = Object.freeze({
   RENDER: ['TIMELINE', 'CAPTIONS'], QA: ['RENDER'], PACKAGING: ['QA'], PUBLISH: ['PACKAGING'],
 });
 const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [stage, `workflow:${stage.toLowerCase()}`])));
+STAGE_KIND.TIMELINE = 'workflow:timeline-manifest';
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
 function validateStages(stages) {
