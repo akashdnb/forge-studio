@@ -60,9 +60,7 @@ test('renders real MP4 with caption cues and synchronized narration', { skip: !h
 
   assert.ok(result.sizeBytes > 0);
   assert.equal(result.metadata.captionCueCount, 2);
-  const probe = execFileSync(ffmpegCommand(), ['-hide_banner', '-i', output, '-f', 'null', '-'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  assert.equal(typeof probe, 'string');
-  assert.ok(Math.abs(Number((await import('node:fs/promises')).stat(output)).size - result.sizeBytes) === 0);
+  assert.equal((await fs.stat(output)).size, result.sizeBytes);
 });
 
 test('rejects caption segments with missing text instead of silently dropping them', () => {
