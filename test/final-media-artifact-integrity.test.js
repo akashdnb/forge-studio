@@ -20,7 +20,7 @@ function fixture(root) {
     '-y', '-f', 'lavfi', '-i', 'color=c=black:s=320x180:r=30',
     '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', '1',
     '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-c:a', 'aac', '-shortest',
-    '-movflags', '+faststart', file
+    '-f', 'mp4', '-movflags', '+faststart', file
   ], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || 'ffmpeg fixture generation failed');
   return file;
