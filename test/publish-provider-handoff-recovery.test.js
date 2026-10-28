@@ -59,7 +59,7 @@ async function fixture({ timeoutAfterAccept = false, expireSession = false } = {
   const publisher = new YouTubePublisher({
     accessToken: 'fixture-token',
     fetchImpl,
-    maxAttempts: 1,
+    maxAttempts: 2,
     timeoutMs: 100,
     retryBaseMs: 0,
   });
