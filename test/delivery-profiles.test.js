@@ -20,6 +20,12 @@ test('profile compiler clamps metadata and keeps publish-safe defaults', () => {
   assert.equal(profile.metadata.title, 'Safe title'); assert.equal(profile.metadata.description.length, 5000); assert.equal(profile.metadata.privacyStatus, 'private'); assert.equal(profile.metadata.containsSyntheticMedia, true); assert.equal(sanitize('a<>:"/\\|?*'), 'a');
 });
 
+test('YouTube profile fails closed when combined tag length exceeds 500 characters', () => {
+  assert.throws(() => compileDeliveryProfile('youtube_long_form', { title: 'Episode', tags: ['a'.repeat(250), 'b'.repeat(251)] }), /combined 500 character limit/);
+  const profile = compileDeliveryProfile('youtube_long_form', { title: 'Episode', tags: ['a'.repeat(250), 'b'.repeat(250)] });
+  assert.equal(profile.metadata.tags.reduce((sum, tag) => sum + tag.length, 0), 500);
+});
+
 test('ffmpeg arguments encode exact resolution, fps, bitrate, codecs and faststart', () => {
   const profile = compileDeliveryProfile('youtube_shorts', { title: 'short' }); const args = ffmpegArgs(profile);
   assert.ok(args.includes('scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30')); assert.ok(args.includes('libx264')); assert.ok(args.includes('8000k')); assert.ok(args.includes('aac')); assert.ok(args.includes('+faststart')); assert.equal(fingerprint(profile), profile.fingerprint);
