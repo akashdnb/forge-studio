@@ -15,11 +15,7 @@ function ffmpegPath() {
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
   try { return require('ffmpeg-static'); } catch { return 'ffmpeg'; }
 }
-
-function runFfmpeg(ffmpeg, args, options = {}) {
-  return execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', ...args], { stdio: 'inherit', ...options });
-}
-
+function runFfmpeg(ffmpeg, args) { return execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', ...args], { stdio: 'inherit' }); }
 function decodedFrameHash(ffmpeg, file) {
   const frame = execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']);
   return crypto.createHash('sha256').update(frame).digest('hex');
@@ -29,7 +25,6 @@ test('continuity anchors select compatible real media and preserve its pixels th
   const ffmpeg = ffmpegPath();
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-continuity-anchor-'));
   t.after(() => fs.rm(workDir, { recursive: true, force: true }));
-
   const wrong = path.join(workDir, 'wrong.mp4');
   const right = path.join(workDir, 'right.mp4');
   runFfmpeg(ffmpeg, ['-f', 'lavfi', '-i', 'color=c=red:s=320x180:r=30', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', wrong]);
@@ -46,12 +41,7 @@ test('continuity anchors select compatible real media and preserve its pixels th
 
   const timeline = applyRecipeToTimeline({ durationSeconds: 1, tracks: [{ type: 'VIDEO', segments: [{ id: 'shot-1', start: 0, duration: 1, sourcePath: 'right.mp4', assetVersionId: 'asset-wrong' }] }] }, recipe, new Map(assets.map((asset) => [asset.id, { id: asset.id, versionId: asset.versionId }])));
   assert.equal(timeline.tracks[0].segments[0].assetVersionId, 'asset-right');
-
-  const compiled = compileTimeline({
-    episodeId: 'ep-continuity',
-    timeline,
-    versions: { 'asset-right': { kind: 'asset' }, 'scene-plan-1': { kind: 'scene_plan' } },
-  });
+  const compiled = compileTimeline({ episodeId: 'ep-continuity', timeline, versions: { 'asset-right': { kind: 'asset' }, 'asset-wrong': { kind: 'asset' }, 'scene-plan-1': { kind: 'scene_plan' } } });
   assert.equal(compiled.tracks[0].segments[0].sourceVersionId, 'asset-right');
 
   const rendered = await renderTimeline({
@@ -61,9 +51,7 @@ test('continuity anchors select compatible real media and preserve its pixels th
     ffmpegPath: ffmpeg,
   });
   assert.ok(rendered.sizeBytes > 0);
-
-  const expectedHash = decodedFrameHash(ffmpeg, right);
   const renderedHash = decodedFrameHash(ffmpeg, rendered.outputPath);
-  assert.equal(renderedHash, expectedHash, 'final decoded pixels must come from the continuity-compatible selected asset');
+  assert.equal(renderedHash, decodedFrameHash(ffmpeg, right), 'final decoded pixels must come from the continuity-compatible selected asset');
   assert.notEqual(renderedHash, decodedFrameHash(ffmpeg, wrong), 'a conflicting continuity asset must not reach final pixels');
 });
