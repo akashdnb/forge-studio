@@ -132,7 +132,7 @@ class EpisodeWorkflowIntegration {
       WHERE workflow_id=$2 AND stage=$3 AND job_id=$4 AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED') RETURNING *`, [JSON.stringify(this.#error(error)), workflowId, stage, job.id]);
     if (!updated.rows[0]) return { duplicate: true };
     await this.pool.query(`UPDATE episode_workflows SET status='FAILED',failure_stage=$1,failure=$2::jsonb,updated_at=now()
-      WHERE id=$3 AND status NOT IN ('SUCCEEDED','CANCELLED')`, [stage, JSON.stringify(this.#error(error)), workflowId]);
+      WHERE id=$3 AND status NOT IN ('CANCELLED','FAILED')`, [stage, JSON.stringify(this.#error(error)), workflowId]);
     await this.#advanceEpisode(episodeId, stage, 'FAILED', error?.message || String(error));
     await this.#audit(episodeId, projectId, 'workflow', 'WORKFLOW_STAGE_FAILED', job.id, { workflowId, stage, error: this.#error(error) });
     return { accepted: true };
@@ -195,7 +195,10 @@ class EpisodeWorkflowIntegration {
 
   async #requireApproval(episodeId, approvalStage, inputVersionIds) {
     if (!inputVersionIds.length) throw Object.assign(new Error(`${approvalStage} approval input is missing`), { code: 'INVALID_PROVENANCE' });
-    const result = await this.pool.query(`SELECT 1 FROM approvals WHERE episode_id=$1 AND stage=$2 AND decision='APPROVED' AND target_version_id = ANY($3::text[]) ORDER BY created_at DESC LIMIT 1`, [episodeId, approvalStage, inputVersionIds]);
+    const result = await this.pool.query(`SELECT COUNT(DISTINCT target_version_id)::int AS approved_count
+      FROM approvals
+      WHERE episode_id=$1 AND stage=$2 AND decision='APPROVED' AND target_version_id = ANY($3::text[])
+      HAVING COUNT(DISTINCT target_version_id) = $4`, [episodeId, approvalStage, inputVersionIds, new Set(inputVersionIds).size]);
     if (!result.rows[0]) throw Object.assign(new Error(`${approvalStage} approval required`), { code: 'APPROVAL_BLOCKED' });
   }
 
