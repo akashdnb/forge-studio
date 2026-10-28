@@ -4,6 +4,7 @@ const { WorkflowScheduler } = require('./workflow-scheduler');
 const { JobQueue } = require('../persistence/job-queue');
 const { PublishService } = require('../publishing/publish-service');
 const { createReleaseScheduleService } = require('./release-scheduler');
+const { reconcileScheduledExecutions } = require('./release-schedule-reconciliation');
 
 const INSTALLED = Symbol.for('forge.release.schedule.worker.installed');
 if (!WorkflowScheduler.prototype[INSTALLED]) {
@@ -15,7 +16,13 @@ if (!WorkflowScheduler.prototype[INSTALLED]) {
     if (!service) { service = createReleaseScheduleService({ pool: this.pool, queue: this.queue, workerId: `${this.schedulerId}:release-calendar` }); schedulerServices.set(this, service); }
     try {
       const tick = await service.tick({ limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_TICK_LIMIT || '25', 10) });
-      const reconciliation = await service.reconcile({ limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_RECONCILE_LIMIT || '100', 10) });
+      const reconciliation = await reconcileScheduledExecutions({
+        pool: this.pool,
+        queue: this.queue,
+        workerId: `${this.schedulerId}:release-calendar`,
+        limit: Number.parseInt(process.env.FORGE_RELEASE_SCHEDULER_RECONCILE_LIMIT || '100', 10),
+        gate: service.gate,
+      });
       this.releaseCalendarLastRun = { at: new Date().toISOString(), tick, reconciliation };
     } catch (error) {
       this.releaseCalendarLastError = { at: new Date().toISOString(), code: error.code || 'RELEASE_SCHEDULER_ERROR', message: error.message };
