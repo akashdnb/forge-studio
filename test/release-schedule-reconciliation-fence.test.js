@@ -41,7 +41,11 @@ function createPersistedFixture(row = fixture()) {
       if (sql.includes('SELECT id FROM episodes')) { state.episodeLocked = true; return { rows: [{ id: state.execution.episode_id }] }; }
       if (sql.includes('SELECT id FROM episode_packages')) return { rows: [{ id: 'package-a' }] };
       if (sql.startsWith('UPDATE forge_release_schedule_executions')) {
-        state.execution = { ...state.execution, publish_job_id: params[1] ?? state.execution.publish_job_id, status: params[1] ? 'QUEUED' : 'RECONCILIATION_REQUIRED' };
+        if (sql.includes("status='RECONCILIATION_REQUIRED'")) {
+          state.execution = { ...state.execution, status: 'RECONCILIATION_REQUIRED' };
+        } else {
+          state.execution = { ...state.execution, publish_job_id: params[1], status: 'QUEUED' };
+        }
         return { rows: [{ id: state.execution.id, publish_job_id: state.execution.publish_job_id }], rowCount: 1 };
       }
       if (sql.startsWith('COMMIT')) {
