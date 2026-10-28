@@ -13,7 +13,6 @@ test('YouTube description accepts the 5000-byte UTF-8 boundary', () => {
 
 test('YouTube description rejects UTF-8 text over the 5000-byte provider limit', () => {
   const description = '😀'.repeat(1251);
-  assert.equal(description.length, 1251);
   assert.equal(Buffer.byteLength(description, 'utf8'), 5004);
   assert.throws(
     () => compileDeliveryProfile('youtube_long_form', { title: 'Too large', description }),
