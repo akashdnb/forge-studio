@@ -2,88 +2,101 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { randomUUID } = require('node:crypto');
+const { Pool } = require('pg');
+const { RuntimePublishService } = require('../src/publishing/publish-service-runtime');
+const { DistributedLock } = require('../src/coordination/distributed-lock');
 
-test('publish dispatch fence allows one unchanged release identity and rejects stale fingerprints', { skip: !process.env.FORGE_RUN_PUBLISH_INTEGRATION || !process.env.DATABASE_URL }, async () => {
-  const { Pool } = require('pg');
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 6 });
-  const suffix = randomUUID();
-  const ids = {
-    tenant: `dispatch-fence-tenant:${suffix}`,
-    project: `dispatch-fence-project:${suffix}`,
-    episode: `dispatch-fence-episode:${suffix}`,
-    renderVersion: `dispatch-fence-render-version:${suffix}`,
-    packageVersion: `dispatch-fence-package-version:${suffix}`,
-    renderArtifact: `dispatch-fence-render-artifact:${suffix}`,
-    packageArtifact: `dispatch-fence-package-artifact:${suffix}`,
-    requestA: `dispatch-fence-request-a:${suffix}`,
-    requestB: `dispatch-fence-request-b:${suffix}`,
-    requestChanged: `dispatch-fence-request-changed:${suffix}`,
-  };
-  const packageHash = 'a'.repeat(64);
-  const renderHash = 'b'.repeat(64);
-  const fingerprint = 'c'.repeat(64);
-  const changedFingerprint = 'd'.repeat(64);
-  const requestIdentityValues = [ids.tenant, ids.project, ids.episode, ids.packageArtifact, ids.packageVersion, packageHash, ids.renderArtifact, ids.renderVersion, renderHash];
-  const insertRequest = async (client, requestId, idempotencyKey, gateFingerprint, createdAtSql) => client.query(
-    "INSERT INTO publish_requests(id,tenant_id,project_id,episode_id,destination,idempotency_key,package_artifact_id,package_version_id,package_hash,render_artifact_id,render_version_id,render_hash,gate_fingerprint,created_by,created_at) VALUES($1,$2,$3,$4,'youtube',$5,$6,$7,$8,$9,$10,$11,$12,'test'," + createdAtSql + ")",
-    [requestId, requestIdentityValues[0], requestIdentityValues[1], requestIdentityValues[2], idempotencyKey, requestIdentityValues[3], requestIdentityValues[4], requestIdentityValues[5], requestIdentityValues[6], requestIdentityValues[7], requestIdentityValues[8], gateFingerprint],
+const databaseUrl = process.env.DATABASE_URL;
+const skip = !databaseUrl;
+const table = 'forge_test_publish_dispatch_runs';
+const releaseTable = 'forge_test_publish_dispatch_release';
+let pool;
+
+function service(ownerId) {
+  return new RuntimePublishService({
+    pool,
+    storage: { download: async () => { throw new Error('dispatch-fence test must not materialize an artifact'); } },
+    registry: { get: () => ({ validateRequest() {}, publish: async () => ({ id: 'unused' }) }) },
+    coordinator: new DistributedLock({ pool, ownerId }),
+    logger: { warn() {} }
+  });
+}
+
+async function setup() {
+  pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  await pool.query(`CREATE TABLE IF NOT EXISTS ${table} (id text PRIMARY KEY,status text NOT NULL,delivery_state text NOT NULL,gate_fingerprint text NOT NULL,release_epoch bigint)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS ${releaseTable} (id boolean PRIMARY KEY,epoch bigint NOT NULL)`);
+  await pool.query(`TRUNCATE ${table}, ${releaseTable}`);
+  const release = (await pool.query('SELECT epoch FROM forge_release_state WHERE id=true')).rows[0];
+  if (!release) throw new Error('forge_release_state singleton is missing after migration');
+  const epoch = Number(release.epoch);
+  await pool.query(`INSERT INTO ${releaseTable}(id,epoch) VALUES(true,$1)`, [epoch]);
+  return epoch;
+}
+
+async function cleanup() {
+  await pool.query(`DROP TABLE IF EXISTS ${table}, ${releaseTable}`);
+  await pool.end();
+  pool = null;
+}
+
+test('PostgreSQL concurrent publish dispatch fence allows one authoritative dispatch and persists the winner', { skip }, async () => {
+  const epoch = await setup();
+  const runId = `dispatch-race-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await pool.query(`INSERT INTO ${table}(id,status,delivery_state,gate_fingerprint,release_epoch) VALUES($1,'QUEUED','READY_TO_PUBLISH','fp-unchanged',$2)`, [runId, epoch]);
+  const run = { id: runId, gate_fingerprint: 'fp-unchanged', release_epoch: epoch };
+  const first = service(`dispatch-fence-a-${runId}`);
+  const second = service(`dispatch-fence-b-${runId}`);
+  let authoritativeDispatches = 0;
+
+  const dispatch = async (candidate) => candidate.withPublishFence(runId, async () => {
+    await candidate.claimDispatchFence(run, { publishRunsTable: table, releaseStateTable: releaseTable });
+    authoritativeDispatches += 1;
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    await pool.query(`UPDATE ${table} SET status='PUBLISHED',delivery_state='PUBLISHED' WHERE id=$1 AND status IN ('QUEUED','UPLOADING')`, [runId]);
+    return 'published';
+  });
+
+  const results = await Promise.allSettled([dispatch(first), dispatch(second)]);
+  assert.equal(authoritativeDispatches, 1);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.match(results.find((result) => result.status === 'rejected').reason.code, /GATE_CHANGED|PUBLISH_COORDINATION_BUSY/);
+
+  const persisted = (await pool.query(`SELECT status,delivery_state,gate_fingerprint,release_epoch FROM ${table} WHERE id=$1`, [runId])).rows[0];
+  assert.deepEqual(persisted, { status: 'PUBLISHED', delivery_state: 'PUBLISHED', gate_fingerprint: 'fp-unchanged', release_epoch: String(epoch) });
+  await cleanup();
+});
+
+test('PostgreSQL dispatch fence rejects a changed gate fingerprint before provider input can be authoritative', { skip }, async () => {
+  const epoch = await setup();
+  const runId = `dispatch-stale-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await pool.query(`INSERT INTO ${table}(id,status,delivery_state,gate_fingerprint,release_epoch) VALUES($1,'QUEUED','READY_TO_PUBLISH','fp-current',$2)`, [runId, epoch]);
+  const candidate = service(`dispatch-fence-stale-${runId}`);
+  const run = { id: runId, gate_fingerprint: 'fp-stale', release_epoch: epoch };
+
+  await assert.rejects(
+    () => candidate.withPublishFence(runId, () => candidate.claimDispatchFence(run, { publishRunsTable: table, releaseStateTable: releaseTable })),
+    (error) => error.code === 'GATE_CHANGED' && error.terminalState === 'RECONCILIATION_REQUIRED'
   );
+  assert.equal((await pool.query(`SELECT status,delivery_state FROM ${table} WHERE id=$1`, [runId])).rows[0].status, 'QUEUED');
+  assert.equal((await pool.query(`SELECT status,delivery_state FROM ${table} WHERE id=$1`, [runId])).rows[0].delivery_state, 'READY_TO_PUBLISH');
+  await cleanup();
+});
 
-  try {
-    const c = await pool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query("INSERT INTO tenants(id,name,created_by) VALUES($1,$1,'test')", [ids.tenant]);
-      await c.query("INSERT INTO projects(id,name,created_by,tenant_id) VALUES($1,$1,'test',$2)", [ids.project, ids.tenant]);
-      await c.query("INSERT INTO episodes(id,project_id,title,created_by,state,current_render_id,approved_render_id) VALUES($1,$2,'dispatch fence','test','APPROVED',$3,$3)", [ids.episode, ids.project, ids.renderArtifact]);
-      await c.query("INSERT INTO version_records(id,episode_id,kind,created_by) VALUES($1,$2,'render','test'),($3,$2,'package','test')", [ids.renderVersion, ids.episode, ids.packageVersion]);
-      await c.query("INSERT INTO artifacts(id,episode_id,kind,version_id,content_hash,media_type,created_by) VALUES($1,$2,'render',$3,$4,'video/mp4','test'),($5,$2,'package',$6,$7,'application/json','test')", [ids.renderArtifact, ids.episode, ids.renderVersion, renderHash, ids.packageArtifact, ids.packageVersion, packageHash]);
-      await insertRequest(c, ids.requestA, `idem-a:${suffix}`, fingerprint, 'clock_timestamp()');
-      await insertRequest(c, ids.requestB, `idem-b:${suffix}`, fingerprint, 'clock_timestamp()');
-      await insertRequest(c, ids.requestChanged, `idem-changed:${suffix}`, changedFingerprint, "clock_timestamp()+interval '1 second'");
-      await c.query('COMMIT');
-    } finally { c.release(); }
+test('PostgreSQL dispatch fence rejects a release epoch change even when the stored run fingerprint is unchanged', { skip }, async () => {
+  const epoch = await setup();
+  const runId = `dispatch-release-change-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await pool.query(`INSERT INTO ${table}(id,status,delivery_state,gate_fingerprint,release_epoch) VALUES($1,'QUEUED','READY_TO_PUBLISH','fp-unchanged',$2)`, [runId, epoch]);
+  await pool.query(`UPDATE ${releaseTable} SET epoch=$1 WHERE id=true`, [epoch + 1]);
+  const candidate = service(`dispatch-fence-release-${runId}`);
+  const run = { id: runId, gate_fingerprint: 'fp-unchanged', release_epoch: epoch };
 
-    const attemptInsert = (attemptId, requestId) => pool.query(
-      "INSERT INTO publish_attempts(id,request_id,attempt_no,status,operation_key,provider_request_key) VALUES($1,$2,1,'UPLOADING',$3,$4)",
-      [attemptId, requestId, `operation:${attemptId}`, `provider:${attemptId}`],
-    );
-
-    const results = await Promise.allSettled([
-      attemptInsert(`attempt-a:${suffix}`, ids.requestA),
-      attemptInsert(`attempt-b:${suffix}`, ids.requestB),
-    ]);
-    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
-    assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
-    const rejected = results.find((result) => result.status === 'rejected').reason;
-    assert.equal(rejected.code, '23505');
-
-    const persisted = await pool.query("SELECT count(*)::int AS count, count(dispatch_fingerprint)::int AS fenced FROM publish_attempts WHERE request_id = ANY($1::text[])", [[ids.requestA, ids.requestB]]);
-    assert.deepEqual(persisted.rows[0], { count: 1, fenced: 1 });
-
-    await assert.rejects(
-      () => attemptInsert(`attempt-stale:${suffix}`, ids.requestA),
-      (error) => error.code === 'P0001' && /gate fingerprint is stale/.test(error.message),
-    );
-
-    const changed = await attemptInsert(`attempt-changed:${suffix}`, ids.requestChanged);
-    assert.equal(changed.rowCount, 1);
-    const releaseAttempts = await pool.query("SELECT request_id, dispatch_fingerprint, status FROM publish_attempts WHERE request_id = ANY($1::text[]) ORDER BY request_id", [[ids.requestA, ids.requestB, ids.requestChanged]]);
-    assert.equal(releaseAttempts.rows.length, 2);
-    assert.notEqual(releaseAttempts.rows[0].dispatch_fingerprint, releaseAttempts.rows[1].dispatch_fingerprint);
-  } finally {
-    const c = await pool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query('DELETE FROM publish_attempts WHERE request_id = ANY($1::text[])', [[ids.requestA, ids.requestB, ids.requestChanged]]);
-      await c.query('DELETE FROM publish_requests WHERE id = ANY($1::text[])', [[ids.requestA, ids.requestB, ids.requestChanged]]);
-      await c.query('DELETE FROM artifacts WHERE episode_id=$1', [ids.episode]);
-      await c.query('DELETE FROM version_records WHERE episode_id=$1', [ids.episode]);
-      await c.query('DELETE FROM episodes WHERE id=$1', [ids.episode]);
-      await c.query('DELETE FROM projects WHERE id=$1', [ids.project]);
-      await c.query('DELETE FROM tenants WHERE id=$1', [ids.tenant]);
-      await c.query('COMMIT');
-    } finally { c.release(); await pool.end(); }
-  }
+  await assert.rejects(
+    () => candidate.withPublishFence(runId, () => candidate.claimDispatchFence(run, { publishRunsTable: table, releaseStateTable: releaseTable })),
+    (error) => error.code === 'GATE_CHANGED' && error.terminalState === 'RECONCILIATION_REQUIRED'
+  );
+  const persisted = (await pool.query(`SELECT status,delivery_state FROM ${table} WHERE id=$1`, [runId])).rows[0];
+  assert.deepEqual(persisted, { status: 'QUEUED', delivery_state: 'READY_TO_PUBLISH' });
+  await cleanup();
 });
