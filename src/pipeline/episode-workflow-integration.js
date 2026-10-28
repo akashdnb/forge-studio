@@ -13,7 +13,7 @@ const DEPENDENCIES = Object.freeze({
 });
 const STAGE_KIND = Object.freeze(Object.fromEntries(STAGES.map((stage) => [
   stage,
-  stage === 'TIMELINE' ? 'workflow:timeline-manifest' : `workflow:${stage.toLowerCase()}`,
+  stage === 'TIMELINE' ? 'workflow:timeline-manifest' : stage === 'PACKAGING' ? 'workflow:package' : `workflow:${stage.toLowerCase()}`,
 ])));
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
