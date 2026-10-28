@@ -38,6 +38,7 @@ test('planner duration is carried into shotSpec and matches the compiled segment
   const recipe = makeRecipe();
   const timeline = applyRecipeToTimeline({
     durationSeconds: 4,
+    inputVersionIds: ['asset-a', 'asset-b', 'scene-plan:1'],
     tracks: [{
       type: 'VIDEO',
       segments: [
