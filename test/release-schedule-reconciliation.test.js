@@ -67,7 +67,6 @@ test('persisted reconciliation is idempotent and does not recreate a terminal ex
         if (row) {
           row.status = params[1] || row.status;
           row.block_reason = params[2] || row.block_reason;
-          row.publish_job_id = params[1] === 'QUEUED' ? params[1] : row.publish_job_id;
           updates.push({ id: row.id, status: row.status });
         }
         return { rowCount: 1, rows: [] };
@@ -80,13 +79,12 @@ test('persisted reconciliation is idempotent and does not recreate a terminal ex
   const first = await reconcileScheduledExecutions({ pool, queue });
   const second = await reconcileScheduledExecutions({ pool, queue });
   assert.equal(first.fixed, 2);
-  assert.equal(second.fixed, 1);
+  assert.equal(second.fixed, 0);
   assert.equal(jobs.length, 0);
   assert.equal(rows.find((row) => row.id === 'published').status, 'PUBLISHED');
   assert.equal(rows.find((row) => row.id === 'orphaned').status, 'RECONCILIATION_REQUIRED');
   assert.deepEqual(updates, [
     { id: 'published', status: 'PUBLISHED' },
-    { id: 'orphaned', status: 'RECONCILIATION_REQUIRED' },
     { id: 'orphaned', status: 'RECONCILIATION_REQUIRED' },
   ]);
 });
