@@ -186,7 +186,7 @@ function buildFfmpegArgs(input, outputPath, { captionPath = null } = {}) {
   if (audioLabels.length) filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,atrim=duration=${input.durationSeconds},aresample=48000[aout]`);
   else filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${input.durationSeconds}[aout]`);
 
-  return [...inputs, '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-t', String(input.durationSeconds), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(VIDEO_FPS), '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-map_metadata', '-1', '-y', outputPath];
+  return [...inputs, '-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-t', String(input.durationSeconds), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(VIDEO_FPS), '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-map_metadata', '-1', '-y', outputPath];
 }
 
 async function renderTimeline({ input, workDir, outputPath, ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg', timeoutMs = DEFAULT_TIMEOUT_MS }) {
