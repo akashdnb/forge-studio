@@ -11,7 +11,6 @@ const { renderTimeline, sha256Json } = require('../src/pipeline/ffmpeg-renderer'
 const versions = {
   'asset-a': { id: 'asset-a', kind: 'asset' },
   'asset-b': { id: 'asset-b', kind: 'asset' },
-  'scene-plan:1': { id: 'scene-plan:1', kind: 'scene-plan' },
 };
 
 function makeRecipe() {
@@ -36,9 +35,8 @@ function makeRecipe() {
 
 test('planner duration is carried into shotSpec and matches the compiled segment', () => {
   const recipe = makeRecipe();
-  const timeline = applyRecipeToTimeline({
+  const applied = applyRecipeToTimeline({
     durationSeconds: 4,
-    inputVersionIds: ['asset-a', 'asset-b', 'scene-plan:1'],
     tracks: [{
       type: 'VIDEO',
       segments: [
@@ -51,10 +49,24 @@ test('planner duration is carried into shotSpec and matches the compiled segment
     ['asset-b', { id: 'asset-b', versionId: 'asset-b' }],
   ]));
 
-  assert.equal(timeline.tracks[0].segments[0].shotSpec.durationSeconds, 1.25);
-  assert.equal(timeline.tracks[0].segments[1].shotSpec.durationSeconds, 2.75);
+  assert.equal(applied.tracks[0].segments[0].shotSpec.durationSeconds, 1.25);
+  assert.equal(applied.tracks[0].segments[1].shotSpec.durationSeconds, 2.75);
 
-  const compiled = compileTimeline({ episodeId: 'ep-shot-duration', timeline, versions });
+  const compiled = compileTimeline({
+    episodeId: 'ep-shot-duration',
+    timeline: {
+      durationSeconds: 4,
+      inputVersionIds: ['asset-a', 'asset-b'],
+      tracks: [{
+        type: 'VIDEO',
+        segments: [
+          { id: 'shot-a', start: 0, duration: 1.25, assetVersionId: 'asset-a', shotSpec: applied.tracks[0].segments[0].shotSpec },
+          { id: 'shot-b', start: 1.25, duration: 2.75, assetVersionId: 'asset-b', shotSpec: applied.tracks[0].segments[1].shotSpec },
+        ],
+      }],
+    },
+    versions,
+  });
   assert.deepEqual(compiled.tracks[0].segments.map((segment) => segment.duration), [1.25, 2.75]);
   assert.deepEqual(compiled.tracks[0].segments.map((segment) => segment.shotSpec.durationSeconds), [1.25, 2.75]);
   assert.equal(compiled.durationSeconds, 4);
