@@ -31,3 +31,8 @@ jobs:
           DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
           FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}
           FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-acceptance
+      - run: node scripts/acceptance-final-artifact-gate.js
+        env:
+          DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
+          FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}
+          FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-acceptance
