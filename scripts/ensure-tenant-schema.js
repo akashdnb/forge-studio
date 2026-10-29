@@ -26,9 +26,9 @@ async function main() {
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS tenant_id text');
     await pool.query('CREATE INDEX IF NOT EXISTS projects_tenant_updated_idx ON projects(tenant_id, updated_at DESC)');
 
-    // Repair tenant-column drift on tables introduced before tenant isolation was
-    // added. This is intentionally conditional so fresh databases can still run
-    // the canonical migrations that create these tables later.
+    // Repair tenant/schema drift on tables that may already exist from an older
+    // migration set. Fresh databases remain unchanged because each repair is
+    // conditional on the legacy table already being present.
     const existingTables = await pool.query(`
       SELECT
         to_regclass('public.approvals') IS NOT NULL AS approvals_exists,
@@ -39,6 +39,15 @@ async function main() {
 
     if (existingTables.rows[0].approvals_exists) {
       await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS tenant_id text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS plan_id text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS plan_stage_id text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS episode_id text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS stage text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decision text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS target_version_id text');
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS actor text');
+      await pool.query("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS evidence jsonb NOT NULL DEFAULT '{}'::jsonb");
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()');
       await pool.query(`
         UPDATE approvals a
         SET tenant_id = p.tenant_id
