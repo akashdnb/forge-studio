@@ -42,8 +42,17 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: npm install --no-save --no-audit --no-fund ffmpeg-static@5.2.0
-      - run: echo "FORGE_FFMPEG_COMMAND=$(node -p \"require('ffmpeg-static')\")" >> "$GITHUB_ENV"
+      - run: npm install --no-save --no-audit --no-fund ffmpeg-static@5.2.0 @ffprobe-installer/ffprobe@2.1.2
+      - name: Configure bundled media tools
+        run: |
+          FFMPEG_PATH="$(find node_modules -path '*/ffmpeg-static/ffmpeg' -type f | head -1)"
+          FFPROBE_PATH="$(find node_modules -path '*/@ffprobe-installer/ffprobe/bin/ffprobe' -type f | head -1)"
+          test -n "$FFMPEG_PATH"
+          test -n "$FFPROBE_PATH"
+          chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
+          echo "FORGE_FFMPEG_COMMAND=$FFMPEG_PATH" >> "$GITHUB_ENV"
+          echo "FORGE_FFMPEG_PATH=$FFMPEG_PATH" >> "$GITHUB_ENV"
+          echo "FORGE_FFPROBE_PATH=$FFPROBE_PATH" >> "$GITHUB_ENV"
       - run: node scripts/client-contract.js
       - run: node scripts/canonical-schema-bootstrap.js
       - run: node --check scripts/acceptance-entrypoint.js
