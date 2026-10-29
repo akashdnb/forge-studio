@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -32,6 +32,9 @@ jobs:
       FORGE_CREDENTIAL_INTEGRATION: "true"
       FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
       FORGE_FRESH_DB_ON_START: "true"
+      FORGE_ACCEPTANCE_SCENARIO: happy-path
+      FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}-ci
+      FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-ci-acceptance
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,21 +43,11 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: node scripts/client-contract.js
       - run: node scripts/canonical-schema-bootstrap.js
-      - name: Run project checks
-        run: |
-          set +e
-          npm run check > check.log 2>&1
-          rc=$?
-          cat check.log
-          exit $rc
-      - name: Upload project check log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: forge-check-log
-          path: check.log
-          if-no-files-found: error
+      - run: node --check scripts/acceptance-entrypoint.js
+      - run: node --check scripts/run-acceptance-v2.js
+      - run: node --check scripts/acceptance-final-artifact-gate.js
+      - run: node --test test/acceptance-final-artifact-harness.test.js
+      - run: npm run acceptance
+      - run: node scripts/acceptance-final-artifact-gate.js
       - run: node --test test/recovery-postgres.integration.test.js
       - run: node --test test/provider-credential-registry.test.js
-      - run: npm test
-      - run: npm run demo -- "Why volcanoes erupt"
