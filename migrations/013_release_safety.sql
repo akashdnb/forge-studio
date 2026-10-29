@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS forge_release_state (
 
 INSERT INTO forge_release_state(id) VALUES (true) ON CONFLICT (id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS forge_jobs (
+  id text PRIMARY KEY,
+  status text NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS forge_release_manifests (
   id text PRIMARY KEY,
   release_id text NOT NULL UNIQUE,
