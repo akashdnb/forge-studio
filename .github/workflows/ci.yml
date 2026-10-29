@@ -37,17 +37,6 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - name: Diagnose client contract
-        run: node scripts/client-contract-diagnostic.js
-      - name: Upload client contract diagnostic
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: client-contract-diagnostic
-          path: |
-            client-contract-diagnostic.json
-            client-contract-current-openapi.json
-          if-no-files-found: error
       - run: node scripts/client-contract.js
       - run: npm run migrate
       - run: npm run check
