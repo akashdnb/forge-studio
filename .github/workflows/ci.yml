@@ -1,6 +1,6 @@
 name: Forge CI
 
-on:
+"on":
   pull_request:
   push:
     branches: [main]
