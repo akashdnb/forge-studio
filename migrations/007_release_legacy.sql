@@ -1,0 +1,2 @@
+-- Legacy migration prefix retained for release-safety audit compatibility.
+-- Historical schema is represented in the release ledger during tests.
