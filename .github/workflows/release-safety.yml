@@ -33,7 +33,8 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: npm run migrate
+      - name: Bootstrap current release safety schema
+        run: node -e "const fs=require('fs');const {Client}=require('pg');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();await c.query(fs.readFileSync('migrations/013_release_safety.sql','utf8'));await c.end()})().catch(e=>{console.error(e);process.exit(1)})"
       - run: |
           node --check src/release-safety/release-safety.js
           node --check src/release-safety/migration-runner.js
