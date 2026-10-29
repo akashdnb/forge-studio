@@ -5,9 +5,17 @@ RETURNS TABLE(value text) LANGUAGE sql IMMUTABLE AS $$
 WITH RECURSIVE walk(v) AS (
   SELECT input
   UNION ALL
-  SELECT a.value FROM walk w CROSS JOIN LATERAL jsonb_array_elements(w.v) a(value) WHERE jsonb_typeof(w.v)='array'
-  UNION ALL
-  SELECT o.value FROM walk w CROSS JOIN LATERAL jsonb_each(w.v) o(key,value) WHERE jsonb_typeof(w.v)='object'
+  SELECT child.value
+  FROM walk w
+  CROSS JOIN LATERAL (
+    SELECT a.value
+    FROM jsonb_array_elements(w.v) a(value)
+    WHERE jsonb_typeof(w.v)='array'
+    UNION ALL
+    SELECT o.value
+    FROM jsonb_each(w.v) o(key,value)
+    WHERE jsonb_typeof(w.v)='object'
+  ) child
 )
 SELECT v #>> '{}' FROM walk WHERE jsonb_typeof(v)='string';
 $$;
