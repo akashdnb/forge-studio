@@ -32,6 +32,7 @@ jobs:
       FORGE_CREDENTIAL_INTEGRATION: "true"
       FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
       FORGE_FRESH_DB_ON_START: "true"
+      FORGE_STATIC_TENANT_ID: tenant:acceptance
       FORGE_ACCEPTANCE_SCENARIO: happy-path
       FORGE_ACCEPTANCE_SEED: github-ci
       FORGE_ACCEPTANCE_STORAGE: .forge-ci-acceptance
@@ -51,6 +52,7 @@ jobs:
       - run: node scripts/acceptance-final-artifact-gate.js
         env:
           DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
+          FORGE_STATIC_TENANT_ID: tenant:acceptance
           FORGE_ACCEPTANCE_SEED: github-ci-happy-path
           FORGE_ACCEPTANCE_STORAGE: .forge-ci-acceptance
       - run: node --test test/recovery-postgres.integration.test.js
