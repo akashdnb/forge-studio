@@ -34,12 +34,27 @@ jobs:
           mkdir -p "$RUNNER_TEMP/forge-acceptance-bin"
           ln -sf "$GITHUB_WORKSPACE/scripts/acceptance-ffmpeg-fixture-shim.sh" "$RUNNER_TEMP/forge-acceptance-bin/ffmpeg"
           echo "$RUNNER_TEMP/forge-acceptance-bin" >> "$GITHUB_PATH"
-      - run: npm run acceptance
+      - name: Run happy-path acceptance
+        run: |
+          set +e
+          npm run acceptance > acceptance.log 2>&1
+          rc=$?
+          cat acceptance.log
+          exit $rc
         env:
           DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
           FORGE_ACCEPTANCE_SCENARIO: happy-path
           FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}
           FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-acceptance
+      - name: Upload acceptance failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-acceptance-failure
+          path: |
+            acceptance.log
+            ${{ runner.temp }}/forge-acceptance
+          if-no-files-found: warn
       - run: node scripts/acceptance-final-artifact-gate.js
         env:
           DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
