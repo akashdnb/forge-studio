@@ -1,0 +1,70 @@
+name: generate-canonical-schema
+on:
+  push:
+    branches: ["fix/canonical-schema-from-history"]
+permissions:
+  contents: write
+jobs:
+  generate:
+    if: ${{ !contains(github.event.head_commit.message, 'chore(db): remove canonical schema generator') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v6
+      - name: Checkout last migration-chain commit
+        uses: actions/checkout@v6
+        with:
+          ref: c9611f52a2de7721bd9db8641bec4aa779016818
+          path: old
+      - name: Start PostgreSQL
+        uses: shogo82148/actions-setup-postgresql@v1
+        with:
+          postgresql-version: '16'
+      - name: Rebuild the schema from the historical chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          createdb forge_test
+          for file in $(find old/migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort -V); do
+            echo "Applying $file"
+            psql -v ON_ERROR_STOP=1 -d forge_test -f "old/migrations/$file"
+          done
+          pg_dump --schema-only --no-owner --no-privileges --dbname=forge_test > src/persistence/canonical-schema.generated.sql
+          test -s src/persistence/canonical-schema.generated.sql
+      - name: Replace bootstrap with the generated canonical schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > scripts/canonical-schema-bootstrap.js <<'NODE'
+          const { Pool } = require('pg');
+          const { readFile } = require('node:fs/promises');
+          const path = require('node:path');
+          async function main() {
+            if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+            const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+            const client = await pool.connect();
+            try {
+              if (process.env.FORGE_FRESH_DB_ON_START === 'true') {
+                await client.query('DROP SCHEMA public CASCADE');
+                await client.query('CREATE SCHEMA public');
+                await client.query('GRANT ALL ON SCHEMA public TO public');
+                console.log(JSON.stringify({ status: 'reset', schema: 'public' }));
+              }
+              const sql = await readFile(path.join(__dirname, '..', 'src', 'persistence', 'canonical-schema.generated.sql'), 'utf8');
+              await client.query(sql);
+              const tenantId = process.env.FORGE_STATIC_TENANT_ID || 'forge-default-tenant';
+              const actorId = process.env.FORGE_STATIC_ACTOR_ID || 'system';
+              await client.query('INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3) ON CONFLICT(id) DO NOTHING',[tenantId, `Forge tenant ${tenantId}`, actorId]);
+              console.log(JSON.stringify({ status: 'ok', schema: 'canonical-fresh' }));
+            } finally { client.release(); await pool.end(); }
+          }
+          main().catch(error => { console.error(`Canonical schema bootstrap failed: ${error.message}`); process.exitCode = 1; });
+          NODE
+          rm -f src/persistence/canonical-schema.sql src/persistence/canonical-schema-1.sql src/persistence/canonical-schema-2.sql src/persistence/canonical-schema-3.sql
+          rm -rf old
+          rm -f .github/workflows/generate-canonical-schema.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'chore(db): remove canonical schema generator'
+          git push origin HEAD:fix/canonical-schema-from-history
