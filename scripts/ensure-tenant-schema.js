@@ -31,10 +31,25 @@ async function main() {
     // the canonical migrations that create these tables later.
     const existingTables = await pool.query(`
       SELECT
+        to_regclass('public.approvals') IS NOT NULL AS approvals_exists,
         to_regclass('public.forge_jobs') IS NOT NULL AS forge_jobs_exists,
         to_regclass('public.project_members') IS NOT NULL AS project_members_exists,
         to_regclass('public.lifecycle_holds') IS NOT NULL AS lifecycle_holds_exists
     `);
+
+    if (existingTables.rows[0].approvals_exists) {
+      await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS tenant_id text');
+      await pool.query(`
+        UPDATE approvals a
+        SET tenant_id = p.tenant_id
+        FROM episodes e
+        JOIN projects p ON p.id = e.project_id
+        WHERE a.episode_id = e.id
+          AND a.tenant_id IS NULL
+          AND p.tenant_id IS NOT NULL
+      `);
+      await pool.query('CREATE INDEX IF NOT EXISTS approvals_tenant_idx ON approvals(tenant_id)');
+    }
 
     if (existingTables.rows[0].forge_jobs_exists) {
       await pool.query('ALTER TABLE forge_jobs ADD COLUMN IF NOT EXISTS tenant_id text');
@@ -80,7 +95,7 @@ async function main() {
       FROM information_schema.columns
       WHERE table_schema = 'public'
         AND column_name = 'tenant_id'
-        AND table_name IN ('projects', 'forge_jobs', 'project_members', 'lifecycle_holds')
+        AND table_name IN ('projects', 'approvals', 'forge_jobs', 'project_members', 'lifecycle_holds')
       ORDER BY table_name
     `);
     console.log(`Tenant schema bootstrap verified tenant_columns=${verify.rows.map((row) => `${row.table_name}.${row.column_name}`).join(',') || 'none'}`);
