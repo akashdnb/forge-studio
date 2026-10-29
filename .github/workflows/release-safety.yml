@@ -32,7 +32,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm install --no-audit --no-fund
       - run: |
           node --check src/release-safety/release-safety.js
@@ -49,5 +48,4 @@ jobs:
           node --check scripts/release-preflight.js
           node --check scripts/release-control.js
       - run: node --test test/release-safety.test.js test/release-deployment-safety.integration.test.js
-      - run: npm run migrate
       - run: npm run release:preflight -- --manifest release-manifest.example.json
