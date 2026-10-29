@@ -6,7 +6,6 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS projects (
   id text PRIMARY KEY,
   name text NOT NULL,
-  tenant_id text,
   created_by text NOT NULL,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
