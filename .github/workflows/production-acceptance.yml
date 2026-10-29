@@ -27,8 +27,9 @@ jobs:
       - run: npm install --no-save --no-audit --no-fund ffmpeg-static@5.2.0 @ffprobe-installer/ffprobe@2.1.2
       - name: Configure bundled media tools
         run: |
-          FFMPEG_PATH="$(find node_modules -path '*/ffmpeg-static/ffmpeg' -type f | head -1)"
-          FFPROBE_PATH="$(find node_modules -path '*/@ffprobe-installer/ffprobe/bin/ffprobe' -type f | head -1)"
+          FFMPEG_PATH="$(find node_modules/ffmpeg-static -type f -name ffmpeg | head -1)"
+          FFPROBE_PATH="$(find node_modules/@ffprobe-installer/ffprobe -type f -name ffprobe | head -1)"
+          printf 'ffmpeg=%s\nffprobe=%s\n' "$FFMPEG_PATH" "$FFPROBE_PATH"
           test -n "$FFMPEG_PATH"
           test -n "$FFPROBE_PATH"
           chmod +x "$FFMPEG_PATH" "$FFPROBE_PATH"
