@@ -40,7 +40,20 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: node scripts/client-contract.js
       - run: node scripts/canonical-schema-bootstrap.js
-      - run: npm run check
+      - name: Run project checks
+        run: |
+          set +e
+          npm run check > check.log 2>&1
+          rc=$?
+          cat check.log
+          exit $rc
+      - name: Upload project check log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-check-log
+          path: check.log
+          if-no-files-found: error
       - run: node --test test/recovery-postgres.integration.test.js
       - run: node --test test/provider-credential-registry.test.js
       - run: npm test
