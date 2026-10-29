@@ -26,13 +26,17 @@ WITH RECURSIVE version_closure(id) AS (
 ), artifact_closure(id) AS (
   SELECT id FROM artifact_seed
   UNION
-  SELECT md.source_artifact_id FROM media_derivatives md JOIN artifact_closure ac ON ac.id=md.artifact_id
-  UNION
-  SELECT source_artifact.id
-  FROM artifact_closure ac
-  JOIN artifacts parent_artifact ON parent_artifact.id=ac.id
-  CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(parent_artifact.input_version_ids)='array' THEN parent_artifact.input_version_ids ELSE '[]'::jsonb END) input_version(id)
-  JOIN artifacts source_artifact ON source_artifact.episode_id=p_episode_id AND source_artifact.version_id=input_version.id
+  SELECT edge.source_id
+  FROM (
+    SELECT md.source_artifact_id AS source_id, md.artifact_id AS parent_id
+    FROM media_derivatives md
+    UNION ALL
+    SELECT source_artifact.id AS source_id, parent_artifact.id AS parent_id
+    FROM artifacts parent_artifact
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(parent_artifact.input_version_ids)='array' THEN parent_artifact.input_version_ids ELSE '[]'::jsonb END) input_version(id)
+    JOIN artifacts source_artifact ON source_artifact.episode_id=p_episode_id AND source_artifact.version_id=input_version.id
+  ) edge
+  JOIN artifact_closure ac ON ac.id=edge.parent_id
 ), dedup AS (
   SELECT a.id,a.version_id FROM artifacts a JOIN artifact_closure ac ON ac.id=a.id WHERE a.episode_id=p_episode_id
 )
