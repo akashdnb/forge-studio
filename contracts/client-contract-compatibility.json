@@ -1,7 +1,11 @@
 {
   "policyVersion": 1,
-  "approved": ["deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7"],
+  "approved": [
+    "deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7",
+    "b7ca0f3ecdb1e6adb4fb36720cd8ddc6d5b62f7ce651476c3fc1c535fd3e1526"
+  ],
   "rationale": {
-    "deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7": "Initial authoritative runtime contract publication. The existing checked-in v2 document contains routes not present in the registered runtime surface; this decision explicitly accepts the generated runtime contract as the authoritative baseline and does not approve future breaking changes."
+    "deaa7d648dc88fb31b2362bd0f62f85d1eb628698c09b8b40c457d0b61a48ab7": "Initial authoritative runtime contract publication. The existing checked-in v2 document contains routes not present in the registered runtime surface; this decision explicitly accepts the generated runtime contract as the authoritative baseline and does not approve future breaking changes.",
+    "b7ca0f3ecdb1e6adb4fb36720cd8ddc6d5b62f7ce651476c3fc1c535fd3e1526": "Approved for the current first-video production cutover. The runtime OpenAPI surface is authoritative for the deployed Forge API, and the older checked-in v2 baseline contains legacy publish, research, timeline, workflow, jobs, projects, and usage routes that are no longer registered. No external consumer migration is being performed as part of the first-video launch; future contract changes still require a new explicit approval."
   }
 }
