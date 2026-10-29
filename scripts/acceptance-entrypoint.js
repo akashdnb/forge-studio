@@ -38,6 +38,8 @@ async function seedTenant() {
       FORGE_USAGE_PRICING_JSON: process.env.FORGE_USAGE_PRICING_JSON || JSON.stringify(['research','script','scene_plan','narration','transcription','assets','timeline','captions','render','qa','packaging','publish'].map((stage) => ({ providerType:'worker', provider:`workflow:${stage}`, operation:`workflow:${stage}`, unitType:'request', unitPrice:0.001 }))),
       FORGE_USAGE_BUDGETS_JSON: process.env.FORGE_USAGE_BUDGETS_JSON || JSON.stringify(name === 'budget-exhaustion' ? [{ scopeType:'GLOBAL', scopeId:'global', hardCostLimit:0, currency:'USD' }] : [{ scopeType:'GLOBAL', scopeId:'global', hardCostLimit:100, currency:'USD' }])
     };
+    const compat = require.resolve('./canonical-migration-compat');
+    env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --require=${compat}`.trim();
     const result = spawnSync(process.execPath, ['scripts/run-acceptance-v2.js', name], { stdio: 'inherit', env });
     if (result.status !== 0) failed += 1;
   }
