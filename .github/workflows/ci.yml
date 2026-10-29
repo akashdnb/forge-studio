@@ -31,6 +31,7 @@ jobs:
       FORGE_RUN_RECOVERY_INTEGRATION: "true"
       FORGE_CREDENTIAL_INTEGRATION: "true"
       FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      FORGE_FRESH_DB_ON_START: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,7 +39,7 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: node scripts/client-contract.js
-      - run: npm run migrate
+      - run: node scripts/canonical-schema-bootstrap.js
       - run: npm run check
       - run: node --test test/recovery-postgres.integration.test.js
       - run: node --test test/provider-credential-registry.test.js
