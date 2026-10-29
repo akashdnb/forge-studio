@@ -84,9 +84,9 @@ SET key_id=COALESCE(d.key_id,s.active_key_id),
     schema_hash=COALESCE(d.schema_hash,encode(digest(e.schema::text,'sha256'),'hex')),
     idempotency_key=COALESCE(d.idempotency_key,d.id),
     delivery_epoch=COALESCE(d.delivery_epoch,s.delivery_epoch)
-FROM forge_event_subscriptions s
-JOIN forge_events e ON e.id=d.event_id
-WHERE s.id=d.subscription_id;
+FROM forge_event_subscriptions s, forge_events e
+WHERE s.id=d.subscription_id
+  AND e.id=d.event_id;
 
 ALTER TABLE forge_event_deliveries
   ALTER COLUMN key_id SET NOT NULL,
