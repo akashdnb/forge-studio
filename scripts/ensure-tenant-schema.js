@@ -9,8 +9,17 @@ async function main() {
     idleTimeoutMillis: 5000,
   });
   try {
-    const table = await pool.query("SELECT to_regclass('public.projects') AS name");
-    if (!table.rows[0]?.name) return;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id text PRIMARY KEY,
+        name text NOT NULL,
+        created_by text NOT NULL,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        tenant_id text
+      )
+    `);
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS tenant_id text');
     await pool.query('CREATE INDEX IF NOT EXISTS projects_tenant_updated_idx ON projects(tenant_id, updated_at DESC)');
   } finally {
