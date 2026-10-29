@@ -41,6 +41,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm install --no-audit --no-fund
       - run: node scripts/client-contract.js
       - run: node scripts/canonical-schema-bootstrap.js
