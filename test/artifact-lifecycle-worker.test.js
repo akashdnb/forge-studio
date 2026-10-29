@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { ArtifactLifecycleWorker, parseRetentionPolicy } = require('../src/reconciliation/artifact-lifecycle-worker');
 function baseArtifact(overrides = {}) { return { id: 'a1', episode_id: 'e1', project_id: 'p1', version_id: 'v1', kind: 'render', episode_state: 'PUBLISHED', storage_key: 'tenants/forge/projects/p1/artifacts/render/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4', storage_status: 'READY', created_at: new Date(Date.now() - 120 * 86400000), ...overrides }; }
 class FakeClient {
-  constructor({ lifecycle = null, refs = {}, reachable = false, lock = true } = {}) { this.lifecycle = lifecycle || { artifact_id: 'a1', project_id: 'p1', state: 'RETAINED', reference_count: 0, quarantine_at: null }; this.refs = refs; this.reachable = reachable; this.lock = lock; this.events = []; this.updates = []; }
+  constructor({ lifecycle = null, refs = {}, reachable = false, lock = true } = {}) { this.lifecycle = lifecycle || { artifact_id: 'a1', project_id: 'p1', state: 'RETAINED', reference_count: 0, quarantine_at: null }; this.refs = refs; this.reachable = reachable; this.lock = lock; this.events = []; this.updates = []; this.release = () => {}; }
   async query(sql, params = []) {
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
     if (sql.includes('pg_try_advisory_xact_lock')) return { rows: [{ locked: this.lock }] };
