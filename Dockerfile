@@ -12,4 +12,4 @@ COPY public ./public
 RUN sed -i "s|const currentAttempt=.*;const r=|const currentAttempt=\" AND attempt=(SELECT attempts FROM forge_jobs WHERE id=job_id AND status='RUNNING')\";const r=|" src/execution/github-actions-backend.js \
     && node --check src/execution/github-actions-backend.js
 EXPOSE 8080
-CMD ["node", "src/server.js"]
+CMD ["sh", "-c", "node scripts/ensure-tenant-schema.js && node src/server.js"]
