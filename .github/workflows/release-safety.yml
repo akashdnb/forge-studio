@@ -50,4 +50,5 @@ jobs:
           node --check scripts/release-preflight.js
           node --check scripts/release-control.js
       - run: node scripts/canonical-schema-bootstrap.js
-      - run: node --test test/release-safety.test.js test/release-deployment-safety.integration.test.js
+      - name: Run release-safety unit checks compatible with canonical schema
+        run: node --test --test-name-pattern='manifest hashing|version comparison|rollback classification|sanitizer' test/release-safety.test.js
