@@ -32,7 +32,8 @@ async function main() {
     const existingTables = await pool.query(`
       SELECT
         to_regclass('public.forge_jobs') IS NOT NULL AS forge_jobs_exists,
-        to_regclass('public.project_members') IS NOT NULL AS project_members_exists
+        to_regclass('public.project_members') IS NOT NULL AS project_members_exists,
+        to_regclass('public.lifecycle_holds') IS NOT NULL AS lifecycle_holds_exists
     `);
 
     if (existingTables.rows[0].forge_jobs_exists) {
@@ -61,12 +62,25 @@ async function main() {
       await pool.query('CREATE INDEX IF NOT EXISTS project_members_tenant_idx ON project_members(tenant_id)');
     }
 
+    if (existingTables.rows[0].lifecycle_holds_exists) {
+      await pool.query('ALTER TABLE lifecycle_holds ADD COLUMN IF NOT EXISTS tenant_id text');
+      await pool.query(`
+        UPDATE lifecycle_holds h
+        SET tenant_id = p.tenant_id
+        FROM projects p
+        WHERE h.project_id = p.id
+          AND h.tenant_id IS NULL
+          AND p.tenant_id IS NOT NULL
+      `);
+      await pool.query('CREATE INDEX IF NOT EXISTS lifecycle_holds_tenant_idx ON lifecycle_holds(tenant_id)');
+    }
+
     const verify = await pool.query(`
       SELECT table_name, column_name
       FROM information_schema.columns
       WHERE table_schema = 'public'
         AND column_name = 'tenant_id'
-        AND table_name IN ('projects', 'forge_jobs', 'project_members')
+        AND table_name IN ('projects', 'forge_jobs', 'project_members', 'lifecycle_holds')
       ORDER BY table_name
     `);
     console.log(`Tenant schema bootstrap verified tenant_columns=${verify.rows.map((row) => `${row.table_name}.${row.column_name}`).join(',') || 'none'}`);
