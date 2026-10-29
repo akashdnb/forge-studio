@@ -45,8 +45,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm install --no-audit --no-fund
+      - name: Bootstrap current release safety schema
+        run: node -e "const fs=require('fs');const {Client}=require('pg');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();await c.query(fs.readFileSync('migrations/013_release_safety.sql','utf8'));await c.end()})().catch(e=>{console.error(e);process.exit(1)})"
       - run: npm run check
       - run: npm run migrate
       - run: node --test test/database-hardening.test.js test/postgres-integrity.integration.test.js
