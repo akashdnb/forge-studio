@@ -1,0 +1,1 @@
+-- Legacy duplicate migration prefix retained intentionally for audit compatibility tests.
