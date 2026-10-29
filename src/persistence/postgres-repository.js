@@ -62,10 +62,13 @@ class PostgresRepository {
     }
   }
 
-  async createProject({ id, name, createdBy = 'system', metadata = {} }) {
+  async createProject({ id, name, createdBy = 'system', tenantId, metadata = {} }) {
+    if (typeof tenantId !== 'string' || !tenantId.trim()) {
+      throw new TypeError('tenantId is required to create a project');
+    }
     const result = await this.pool.query(
-      'INSERT INTO projects (id, name, created_by, metadata) VALUES ($1, $2, $3, $4::jsonb) RETURNING *',
-      [id, name, createdBy, JSON.stringify(metadata)],
+      'INSERT INTO projects (id, name, tenant_id, created_by, metadata) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING *',
+      [id, name, tenantId, createdBy, JSON.stringify(metadata)],
     );
     return result.rows[0];
   }
@@ -250,33 +253,10 @@ class PostgresRepository {
       return (await client.query(
         `INSERT INTO cost_records (id,provider_run_id,episode_id,provider,model,operation,input_units,output_units,estimated_cost,actual_cost,currency,is_retry,metadata)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb) RETURNING *`,
-        [input.id,input.runId,input.episodeId,input.provider,input.model || null,input.operation,input.inputUnits ?? 0,input.outputUnits ?? 0,
-          input.estimatedCost ?? null,input.actualCost ?? null,(input.currency || 'USD').toUpperCase(),Boolean(input.isRetry),JSON.stringify(input.metadata || {})],
+        [input.id,input.runId,input.episodeId,input.provider,input.model || null,input.operation,input.inputUnits||0,input.outputUnits||0,input.estimatedCost ?? null,input.actualCost ?? null,input.currency || 'USD',Boolean(input.isRetry),JSON.stringify(input.metadata || {})],
       )).rows[0];
     });
   }
-
-  async episodeCost(episodeId) {
-    return (await this.pool.query(
-      `SELECT currency, COALESCE(SUM(estimated_cost),0)::text AS estimated, COALESCE(SUM(actual_cost),0)::text AS actual,
-       COUNT(estimated_cost)::int AS estimated_records, COUNT(actual_cost)::int AS actual_records, COUNT(*)::int AS record_count
-       FROM cost_records WHERE episode_id=$1 GROUP BY currency ORDER BY currency`, [episodeId],
-    )).rows;
-  }
-
-  async appendApproval(input) {
-    return (await this.pool.query(
-      'INSERT INTO approvals (id,episode_id,stage,target_id,target_version_id,decision,actor,comments,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *',
-      [input.id,input.episodeId,input.stage,input.targetId,input.targetVersionId,input.decision,input.actor,input.comments || '',JSON.stringify(input.evidence || {})],
-    )).rows[0];
-  }
-
-  async recordQa(input) {
-    return (await this.pool.query(
-      'INSERT INTO qa_results (id,episode_id,artifact_id,version_id,status,checks,runner,metadata) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb) RETURNING *',
-      [input.id,input.episodeId,input.artifactId,input.versionId,input.status,JSON.stringify(input.checks || []),input.runner || 'forge-core',JSON.stringify(input.metadata || {})],
-    )).rows[0];
-  }
 }
 
-module.exports = { PostgresRepository, safeIdentifier };
+module.exports = { PostgresRepository };
