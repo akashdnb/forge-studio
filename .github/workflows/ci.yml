@@ -49,5 +49,9 @@ jobs:
       - run: node --test test/acceptance-final-artifact-harness.test.js
       - run: npm run acceptance
       - run: node scripts/acceptance-final-artifact-gate.js
+        env:
+          DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
+          FORGE_ACCEPTANCE_SEED: github-ci-happy-path
+          FORGE_ACCEPTANCE_STORAGE: .forge-ci-acceptance
       - run: node --test test/recovery-postgres.integration.test.js
       - run: node --test test/provider-credential-registry.test.js
