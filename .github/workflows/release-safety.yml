@@ -33,6 +33,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
+      - run: npm run migrate
       - run: |
           node --check src/release-safety/release-safety.js
           node --check src/release-safety/migration-runner.js
