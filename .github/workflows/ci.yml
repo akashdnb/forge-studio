@@ -44,7 +44,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: client-contract-diagnostic
-          path: client-contract-diagnostic.json
+          path: |
+            client-contract-diagnostic.json
+            client-contract-current-openapi.json
           if-no-files-found: error
       - run: node scripts/client-contract.js
       - run: npm run migrate
