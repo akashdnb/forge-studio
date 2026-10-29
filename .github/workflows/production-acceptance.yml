@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm install --no-audit --no-fund
       - run: node --check scripts/acceptance-entrypoint.js
       - run: node --check scripts/run-acceptance-v2.js
