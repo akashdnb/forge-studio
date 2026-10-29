@@ -42,6 +42,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
+      - run: npm install --no-save --no-audit --no-fund ffmpeg-static@5.2.0
       - run: echo "FORGE_FFMPEG_COMMAND=$(node -p \"require('ffmpeg-static')\")" >> "$GITHUB_ENV"
       - run: node scripts/client-contract.js
       - run: node scripts/canonical-schema-bootstrap.js
