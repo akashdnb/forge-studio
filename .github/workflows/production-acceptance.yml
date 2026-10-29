@@ -34,6 +34,7 @@ jobs:
           test -n "$FFPROBE_PATH"
           "$FFMPEG_PATH" -version >/dev/null
           "$FFPROBE_PATH" -version >/dev/null
+          echo "FFMPEG_PATH=$FFMPEG_PATH" >> "$GITHUB_ENV"
           echo "FORGE_FFMPEG_COMMAND=$FFMPEG_PATH" >> "$GITHUB_ENV"
           echo "FORGE_FFMPEG_PATH=$FFMPEG_PATH" >> "$GITHUB_ENV"
           echo "FORGE_FFPROBE_PATH=$FFPROBE_PATH" >> "$GITHUB_ENV"
