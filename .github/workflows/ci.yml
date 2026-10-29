@@ -1,10 +1,10 @@
 name: Forge CI
 
 "on":
-  pull_request:
+  pull_request: {}
   push:
     branches: [main]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -21,21 +21,21 @@ jobs:
           POSTGRES_PASSWORD: forge
           POSTGRES_DB: forge_test
         ports:
-          - 5432:5432
+          - "5432:5432"
         options: >-
           --health-cmd "pg_isready -U forge -d forge_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      DATABASE_URL: postgres://forge:forge@localhost:5432/forge_test
+      DATABASE_URL: "postgres://forge:forge@localhost:5432/forge_test"
       FORGE_RUN_RECOVERY_INTEGRATION: "true"
       FORGE_CREDENTIAL_INTEGRATION: "true"
       FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
       FORGE_FRESH_DB_ON_START: "true"
-      FORGE_ACCEPTANCE_SCENARIO: happy-path
-      FORGE_ACCEPTANCE_SEED: github-${{ github.run_id }}-ci
-      FORGE_ACCEPTANCE_STORAGE: ${{ runner.temp }}/forge-ci-acceptance
+      FORGE_ACCEPTANCE_SCENARIO: "happy-path"
+      FORGE_ACCEPTANCE_SEED: "github-${{ github.run_id }}-ci"
+      FORGE_ACCEPTANCE_STORAGE: "${{ runner.temp }}/forge-ci-acceptance"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
