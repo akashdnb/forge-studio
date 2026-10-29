@@ -64,7 +64,11 @@ CREATE TABLE IF NOT EXISTS evidence_export_audit (
 );
 CREATE INDEX IF NOT EXISTS evidence_export_audit_scope_idx ON evidence_export_audit(tenant_id, created_at DESC);
 
-CREATE OR REPLACE FUNCTION forge_evidence_event_class(source_name text, operation_name text) RETURNS text AS $$
+CREATE OR REPLACE FUNCTION forge_evidence_event_class(source_name text, operation_name text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $function$
 BEGIN
   IF source_name IN ('approvals','forge_release_approvals','workflow_plan_approvals','human_approval_requests') THEN RETURN 'APPROVAL'; END IF;
   IF source_name LIKE '%policy%' OR source_name IN ('runtime_config_audit','privacy_decision_evidence') THEN RETURN 'POLICY'; END IF;
@@ -77,58 +81,90 @@ BEGIN
   IF operation_name='DELETE' THEN RETURN 'DELETION';
   RETURN 'DATA_MUTATION';
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$function$;
 
-CREATE OR REPLACE FUNCTION forge_evidence_redaction_level(source_name text) RETURNS text AS $$
+CREATE OR REPLACE FUNCTION forge_evidence_redaction_level(source_name text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $function$
 BEGIN
-  IF source_name LIKE '%credential%' OR source_name LIKE '%secret%' OR source_name LIKE '%token%' THEN RETURN 'RESTRICTED';
-  IF source_name LIKE '%security%' OR source_name LIKE '%webhook%' OR source_name LIKE '%provider%' OR source_name LIKE '%payload%' THEN RETURN 'SENSITIVE';
+  IF source_name LIKE '%credential%' OR source_name LIKE '%secret%' OR source_name LIKE '%token%' THEN RETURN 'RESTRICTED'; END IF;
+  IF source_name LIKE '%security%' OR source_name LIKE '%webhook%' OR source_name LIKE '%provider%' OR source_name LIKE '%payload%' THEN RETURN 'SENSITIVE'; END IF;
   RETURN 'STANDARD';
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$function$;
 
-CREATE OR REPLACE FUNCTION forge_evidence_index_ledger_row() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION forge_evidence_index_ledger_row()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
 DECLARE
-  source_name text := NEW.source_table;
   class_name text;
   hold_flag boolean;
   retention_state_value text := 'ACTIVE';
-  version_value text;
   service_value text;
 BEGIN
-  class_name := forge_evidence_event_class(source_name, NEW.operation);
-  version_value := NEW.provenance_id;
+  class_name := forge_evidence_event_class(NEW.source_table, NEW.operation);
   service_value := NULLIF(current_setting('forge.service_identity', true), '');
+
   SELECT EXISTS (
-    SELECT 1 FROM privacy_holds h
-    WHERE h.active AND h.tenant_id IS NOT DISTINCT FROM NEW.tenant_id
+    SELECT 1
+    FROM privacy_holds h
+    WHERE h.active
+      AND h.tenant_id IS NOT DISTINCT FROM NEW.tenant_id
       AND (h.project_id IS NULL OR h.project_id = NEW.project_id)
   ) INTO hold_flag;
-  IF hold_flag THEN retention_state_value := 'PRESERVED'; END IF;
+
+  IF hold_flag THEN
+    retention_state_value := 'PRESERVED';
+  END IF;
+
   INSERT INTO evidence_search_index(
     event_id,ledger_seq,tenant_id,project_id,episode_id,actor,service_identity,event_class,
     source_table,operation,target_type,target_id,resource_version_id,request_id,correlation_id,
     causation_id,occurred_at,canonical_payload_hash,prev_hash,event_hash,retention_state,legal_hold,redaction_level
   ) VALUES (
     NEW.event_id,NEW.ledger_seq,NEW.tenant_id,NEW.project_id,NEW.episode_id,NEW.actor,service_value,class_name,
-    NEW.source_table,NEW.operation,NEW.target_type,NEW.target_id,version_value,NEW.request_id,
+    NEW.source_table,NEW.operation,NEW.target_type,NEW.target_id,NEW.provenance_id,NEW.request_id,
     NEW.request_id,NEW.causal_event_id,NEW.occurred_at,NEW.payload_digest,NEW.prev_hash,NEW.event_hash,
-    retention_state_value,COALESCE(hold_flag,false),forge_evidence_redaction_level(source_name)
+    retention_state_value,COALESCE(hold_flag,false),forge_evidence_redaction_level(NEW.source_table)
   ) ON CONFLICT(event_id) DO NOTHING;
+
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$function$;
 
 DROP TRIGGER IF EXISTS evidence_index_after_insert ON evidence_ledger;
-CREATE TRIGGER evidence_index_after_insert AFTER INSERT ON evidence_ledger FOR EACH ROW EXECUTE FUNCTION forge_evidence_index_ledger_row();
+CREATE TRIGGER evidence_index_after_insert
+AFTER INSERT ON evidence_ledger
+FOR EACH ROW EXECUTE FUNCTION forge_evidence_index_ledger_row();
 
-INSERT INTO evidence_search_index(event_id,ledger_seq,tenant_id,project_id,episode_id,actor,event_class,source_table,operation,target_type,target_id,resource_version_id,request_id,causation_id,occurred_at,canonical_payload_hash,prev_hash,event_hash)
-SELECT event_id,ledger_seq,tenant_id,project_id,episode_id,actor,forge_evidence_event_class(source_table,operation),source_table,operation,target_type,target_id,provenance_id,request_id,causal_event_id,occurred_at,payload_digest,prev_hash,event_hash
+INSERT INTO evidence_search_index(
+  event_id,ledger_seq,tenant_id,project_id,episode_id,actor,event_class,source_table,operation,
+  target_type,target_id,resource_version_id,request_id,causation_id,occurred_at,
+  canonical_payload_hash,prev_hash,event_hash
+)
+SELECT
+  event_id,ledger_seq,tenant_id,project_id,episode_id,actor,
+  forge_evidence_event_class(source_table,operation),source_table,operation,
+  target_type,target_id,provenance_id,request_id,causal_event_id,occurred_at,
+  payload_digest,prev_hash,event_hash
 FROM evidence_ledger
 ON CONFLICT(event_id) DO NOTHING;
 
-CREATE OR REPLACE FUNCTION forge_evidence_search_immutable() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'evidence search index is immutable'; END; $$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION forge_evidence_search_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+  RAISE EXCEPTION 'evidence search index is immutable';
+END;
+$function$;
+
 DROP TRIGGER IF EXISTS evidence_search_index_immutable ON evidence_search_index;
-CREATE TRIGGER evidence_search_index_immutable BEFORE UPDATE OR DELETE ON evidence_search_index FOR EACH ROW EXECUTE FUNCTION forge_evidence_search_immutable();
+CREATE TRIGGER evidence_search_index_immutable
+BEFORE UPDATE OR DELETE ON evidence_search_index
+FOR EACH ROW EXECUTE FUNCTION forge_evidence_search_immutable();
 
 COMMIT;
