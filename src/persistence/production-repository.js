@@ -6,7 +6,7 @@ function fromDb(row){if(!row)return null;return{id:row.id,projectId:row.project_
 class PersistentProductionRepository{
  constructor({pool}){this.db=new ConcurrencyPostgresRepository({pool});}
  async migrate(options){return this.db.migrate(options);}
- async createProject(input){return this.db.createProject({...input,id:requiredString(input.id,'id'),name:requiredString(input.name,'name')});}
+ async createProject(input){const id=requiredString(input.id,'id'),name=requiredString(input.name,'name'),tenantId=requiredString(input.tenantId||process.env.FORGE_STATIC_TENANT_ID,'tenantId');const result=await this.db.pool.query('INSERT INTO projects (id,name,tenant_id,created_by,metadata) VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING *',[id,name,tenantId,input.createdBy||'system',JSON.stringify(input.metadata||{})]);return result.rows[0];}
  async createEpisode(input){const normalized={...input,id:requiredString(input.id,'id'),projectId:requiredString(input.projectId,'projectId'),title:requiredString(input.title,'title')};return this.db.withTransaction(async(client)=>{const created=await this.db.createEpisode(normalized,client);await client.query("INSERT INTO audit_events (project_id,episode_id,actor,action,target_type,target_id,details) VALUES ($1,$2,$3,'EPISODE_CREATED','episode',$2,$4::jsonb)",[created.project_id,created.id,normalized.createdBy||'system',JSON.stringify({title:created.title})]);return fromDb(created);});}
  async getEpisode(id){return fromDb(await this.db.getEpisode(id));}
  async listEpisodes(options){return(await this.db.listEpisodes(options)).map(fromDb);}
