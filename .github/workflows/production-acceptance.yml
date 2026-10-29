@@ -24,8 +24,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm install --no-audit --no-fund
-      - run: npm run check
-      - run: npm test
+      - run: node --check scripts/acceptance-entrypoint.js
+      - run: node --check scripts/run-acceptance-v2.js
+      - run: node --check scripts/acceptance-final-artifact-gate.js
+      - run: node --test test/acceptance-final-artifact-harness.test.js
       - name: Install audio-bearing acceptance fixture shim
         run: |
           chmod +x scripts/acceptance-ffmpeg-fixture-shim.sh
