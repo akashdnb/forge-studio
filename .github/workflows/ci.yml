@@ -29,6 +29,7 @@ jobs:
       FORGE_RUN_RECOVERY_INTEGRATION: "true"
       FORGE_CREDENTIAL_INTEGRATION: "true"
       FORGE_SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      NODE_OPTIONS: --test-concurrency=1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
