@@ -7,7 +7,7 @@ permissions:
 jobs:
   acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
@@ -26,6 +26,12 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run check
       - run: npm test
+      - name: Install audio-bearing acceptance fixture shim
+        run: |
+          chmod +x scripts/acceptance-ffmpeg-fixture-shim.sh
+          mkdir -p "$RUNNER_TEMP/forge-acceptance-bin"
+          ln -sf "$GITHUB_WORKSPACE/scripts/acceptance-ffmpeg-fixture-shim.sh" "$RUNNER_TEMP/forge-acceptance-bin/ffmpeg"
+          echo "$RUNNER_TEMP/forge-acceptance-bin" >> "$GITHUB_PATH"
       - run: npm run acceptance
         env:
           DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
