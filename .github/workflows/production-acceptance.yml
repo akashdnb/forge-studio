@@ -24,6 +24,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm install --no-audit --no-fund
+      - name: Bootstrap current release safety schema
+        run: node -e "const fs=require('fs');const {Client}=require('pg');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();await c.query(fs.readFileSync('migrations/013_release_safety.sql','utf8'));await c.end()})().catch(e=>{console.error(e);process.exit(1)})"
+        env:
+          DATABASE_URL: postgres://forge:forge@127.0.0.1:5432/forge_acceptance
       - run: npm run check
       - run: npm test
       - name: Install and verify system FFmpeg
