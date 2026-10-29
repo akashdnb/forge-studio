@@ -13,6 +13,12 @@ async function main() {
       const sql = await readFile(path.join(__dirname, '..', 'src', 'persistence', file), 'utf8');
       await client.query(sql);
     }
+    const tenantId = process.env.FORGE_STATIC_TENANT_ID || 'forge-default-tenant';
+    const actorId = process.env.FORGE_STATIC_ACTOR_ID || 'system';
+    await client.query(
+      'INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3) ON CONFLICT(id) DO NOTHING',
+      [tenantId, `Forge tenant ${tenantId}`, actorId],
+    );
     await client.query('COMMIT');
     console.log(JSON.stringify({ status: 'ok', schema: 'canonical-fresh', files }));
   } catch (error) {
