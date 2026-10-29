@@ -22,8 +22,18 @@ async function main() {
     const tenantId = process.env.FORGE_STATIC_TENANT_ID || 'forge-default-tenant';
     const actorId = process.env.FORGE_STATIC_ACTOR_ID || 'system';
     await client.query('INSERT INTO tenants(id,name,created_by) VALUES($1,$2,$3) ON CONFLICT(id) DO NOTHING',[tenantId, `Forge tenant ${tenantId}`, actorId]);
+    await client.query(`
+      INSERT INTO projects(id,name,created_by,tenant_id)
+      VALUES($1,$2,$3,$4)
+      ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id
+    `, ['default-project', 'Forge Studio Default Project', actorId, tenantId]);
+    await client.query(`
+      INSERT INTO project_members(project_id,actor_id,tenant_id,role)
+      VALUES($1,$2,$3,'OWNER')
+      ON CONFLICT(project_id,actor_id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, role='OWNER'
+    `, ['default-project', actorId, tenantId]);
     await client.query('COMMIT');
-    console.log(JSON.stringify({ status: 'ok', schema: 'canonical-fresh', files }));
+    console.log(JSON.stringify({ status: 'ok', schema: 'canonical-fresh', files, defaultProject: 'default-project' }));
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(`Canonical schema bootstrap failed: ${error.message}`);
