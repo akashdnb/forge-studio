@@ -8,18 +8,21 @@ WITH RECURSIVE version_closure(id) AS (
   SELECT vd.depends_on_version_id FROM version_dependencies vd JOIN version_closure vc ON vc.id=vd.version_id WHERE vd.episode_id=p_episode_id
 ), artifact_seed(id) AS (
   SELECT a.id FROM artifacts a WHERE a.episode_id=p_episode_id AND a.version_id IN (SELECT id FROM version_closure)
-  UNION
-  SELECT p_root_artifact_id
+  UNION SELECT p_root_artifact_id
 ), artifact_closure(id) AS (
   SELECT id FROM artifact_seed
   UNION
-  SELECT md.source_artifact_id FROM media_derivatives md JOIN artifact_closure ac ON ac.id=md.artifact_id
-  UNION
-  SELECT a2.id
-  FROM artifacts a2
-  JOIN artifact_closure ac ON a2.episode_id=p_episode_id
-  JOIN artifacts parent_artifact ON parent_artifact.id=ac.id
-  WHERE a2.input_version_ids ? parent_artifact.version_id
+  SELECT edge.source_id
+  FROM (
+    SELECT md.source_artifact_id AS source_id, md.artifact_id AS parent_id
+    FROM media_derivatives md
+    UNION ALL
+    SELECT a2.id AS source_id, parent_artifact.id AS parent_id
+    FROM artifacts parent_artifact
+    JOIN artifacts a2 ON a2.episode_id=p_episode_id
+    WHERE a2.input_version_ids ? parent_artifact.version_id
+  ) edge
+  JOIN artifact_closure ac ON ac.id=edge.parent_id
 ), dedup AS (
   SELECT a.id,a.version_id FROM artifacts a JOIN artifact_closure ac ON ac.id=a.id WHERE a.episode_id=p_episode_id
 )
